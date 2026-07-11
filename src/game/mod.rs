@@ -1,10 +1,12 @@
+pub mod events;
 pub mod resources;
 pub mod state;
 
 use bevy::prelude::*;
 
 use crate::car::Car;
-use crate::game::resources::{GameConfig, GameTimer, Score};
+use crate::game::events::{ChickenHit, CoinCollected};
+use crate::game::resources::{GameConfig, Score, TimeLeft};
 use crate::game::state::GameState;
 
 pub struct GamePlugin;
@@ -14,10 +16,12 @@ impl Plugin for GamePlugin {
         app.init_state::<GameState>()
             .init_resource::<GameConfig>()
             .init_resource::<Score>()
-            .init_resource::<GameTimer>()
+            .init_resource::<TimeLeft>()
+            .add_message::<ChickenHit>()
+            .add_message::<CoinCollected>()
             // Reset the run whenever (re)entering Playing.
             .add_systems(OnEnter(GameState::Playing), reset_run)
-            .add_systems(Update, tick_timer.run_if(in_state(GameState::Playing)))
+            .add_systems(Update, tick_timeleft.run_if(in_state(GameState::Playing)))
             .add_systems(
                 Update,
                 menu_input.run_if(in_state(GameState::Menu)),
@@ -37,8 +41,13 @@ impl Plugin for GamePlugin {
     }
 }
 
-fn reset_run(mut timer: ResMut<GameTimer>, mut car: Query<(&mut Car, &mut Transform)>) {
-    timer.0 = 0.0;
+fn reset_run(
+    mut score: ResMut<Score>,
+    mut timeleft: ResMut<TimeLeft>,
+    mut car: Query<(&mut Car, &mut Transform)>,
+) {
+    *score = Score::default();
+    timeleft.0 = 60.0;
     if let Ok((mut car, mut tf)) = car.single_mut() {
         car.speed = 0.0;
         car.heading = 0.0;
@@ -47,8 +56,16 @@ fn reset_run(mut timer: ResMut<GameTimer>, mut car: Query<(&mut Car, &mut Transf
     }
 }
 
-fn tick_timer(mut timer: ResMut<GameTimer>, time: Res<Time>) {
-    timer.0 += time.delta_secs();
+fn tick_timeleft(
+    mut t: ResMut<TimeLeft>,
+    time: Res<Time>,
+    mut next: ResMut<NextState<GameState>>,
+) {
+    t.0 -= time.delta_secs();
+    if t.0 <= 0.0 {
+        t.0 = 0.0;
+        next.set(GameState::GameOver);
+    }
 }
 
 fn menu_input(keys: Res<ButtonInput<KeyCode>>, mut next: ResMut<NextState<GameState>>) {

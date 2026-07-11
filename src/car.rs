@@ -5,6 +5,8 @@ use std::f32::consts::FRAC_PI_2;
 use crate::game::resources::GameConfig;
 use crate::game::state::GameState;
 use crate::palette;
+use crate::textures::TextureAssets;
+use crate::world::{Curb, Solid};
 
 #[derive(Component)]
 pub struct Car {
@@ -37,8 +39,9 @@ impl Plugin for CarPlugin {
         app.add_systems(Startup, spawn_car)
             .add_systems(
                 Update,
-                // move_car first so the juice systems read the fresh speed.
-                (move_car, spin_wheels, roll_body, brake_lights)
+                // move_car first, then resolve curb hops + building collisions,
+                // then the juice systems read the fresh speed.
+                (move_car, physics_collisions, spin_wheels, roll_body, brake_lights)
                     .chain()
                     .run_if(in_state(GameState::Playing)),
             );
@@ -49,6 +52,7 @@ fn spawn_car(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    textures: Res<TextureAssets>,
 ) {
     // --- Shared meshes/materials for the body's nested children ---
     let cabin_mesh = meshes.add(Cuboid::new(0.8, 0.4, 1.0));
@@ -85,8 +89,9 @@ fn spawn_car(
         ..default()
     });
 
-    // Wheels: cylinders with the axle along X, tire-black.
-    let wheel_mesh = meshes.add(Cylinder::new(0.15, 0.3));
+    // Wheels: cylinders with the axle along X, tire-black. Width 0.18 (not 0.3) so
+    // they read as tires, not fat blocks.
+    let wheel_mesh = meshes.add(Cylinder::new(0.15, 0.18));
     let wheel_mat = materials.add(StandardMaterial {
         base_color: palette::CAR_WHEEL,
         perceptual_roughness: 0.9,
@@ -115,12 +120,7 @@ fn spawn_car(
             // under it so the whole upper structure rolls together.
             car.spawn((
                 Mesh3d(meshes.add(Cuboid::new(1.0, 0.5, 2.0))),
-                MeshMaterial3d(materials.add(StandardMaterial {
-                    base_color: palette::CAR_BODY,
-                    perceptual_roughness: 0.35,
-                    metallic: 0.3,
-                    ..default()
-                })),
+                MeshMaterial3d(textures.car_paint.clone()),
                 Transform::from_xyz(0.0, 0.35, 0.0),
                 CarBody,
             ))
@@ -244,8 +244,8 @@ fn spin_wheels(
     let spin_delta = car.speed.abs() * dt / 0.15;
     for (mut tf, mut wheel) in &mut wheels {
         wheel.spin += spin_delta;
-        // Compose so the axle stays along X while spinning around X.
-        tf.rotation = Quat::from_rotation_z(FRAC_PI_2) * Quat::from_rotation_x(wheel.spin);
+        // Lay the axle along X (Rz) and roll around the axle = local Y (Ry).
+        tf.rotation = Quat::from_rotation_z(FRAC_PI_2) * Quat::from_rotation_y(wheel.spin);
     }
 }
 
@@ -290,6 +290,68 @@ fn brake_lights(
                 0.05 * intensity,
                 1.0,
             );
+        }
+    }
+}
+
+/// Ground-level physics + obstacle collisions, run right after `move_car`:
+/// - hop the car up onto any raised curb it drives over (smoothed Y lerp);
+/// - push the car out of buildings (circle-vs-AABB) and kill speed into the wall.
+fn physics_collisions(
+    mut car: Query<(&mut Car, &mut Transform), With<Car>>,
+    curbs: Query<(&Curb, &Transform), (With<Curb>, Without<Car>, Without<Solid>)>,
+    solids: Query<(&Solid, &Transform), (With<Solid>, Without<Car>, Without<Curb>)>,
+    time: Res<Time>,
+) {
+    let Ok((mut car, mut tf)) = car.single_mut() else {
+        return;
+    };
+    let dt = time.delta_secs();
+    const CAR_RADIUS: f32 = 0.9;
+
+    // --- Ground height: hop up onto any curb the car is over. ---
+    let mut target_y = 0.0_f32;
+    for (curb, ct) in &curbs {
+        let dx = tf.translation.x - ct.translation.x;
+        let dz = tf.translation.z - ct.translation.z;
+        if dx.abs() <= curb.half_x && dz.abs() <= curb.half_z {
+            target_y = target_y.max(curb.height);
+        }
+    }
+    tf.translation.y += (target_y - tf.translation.y) * (1.0 - (-10.0 * dt).exp());
+
+    // --- Building collision: circle-vs-AABB pushout + kill speed into wall. ---
+    let forward = Vec3::new(-car.heading.sin(), 0.0, -car.heading.cos());
+    for (solid, st) in &solids {
+        let dx = tf.translation.x - st.translation.x;
+        let dz = tf.translation.z - st.translation.z;
+        let closest_x = dx.clamp(-solid.half_x, solid.half_x);
+        let closest_z = dz.clamp(-solid.half_z, solid.half_z);
+        let px = dx - closest_x;
+        let pz = dz - closest_z;
+        let dist2 = px * px + pz * pz;
+        if dist2 < CAR_RADIUS * CAR_RADIUS {
+            let (nx, nz, pen) = if dist2 > 1e-6 {
+                let dist = dist2.sqrt();
+                (px / dist, pz / dist, CAR_RADIUS - dist)
+            } else {
+                // Center inside the box: eject along the least-penetrated axis.
+                let pen_x = solid.half_x - dx.abs();
+                let pen_z = solid.half_z - dz.abs();
+                if pen_x < pen_z {
+                    let s = if dx >= 0.0 { 1.0 } else { -1.0 };
+                    (s, 0.0, pen_x + CAR_RADIUS)
+                } else {
+                    let s = if dz >= 0.0 { 1.0 } else { -1.0 };
+                    (0.0, s, pen_z + CAR_RADIUS)
+                }
+            };
+            tf.translation.x += nx * pen;
+            tf.translation.z += nz * pen;
+            let into = forward.x * nx + forward.z * nz;
+            if (into < 0.0 && car.speed > 0.0) || (into > 0.0 && car.speed < 0.0) {
+                car.speed = 0.0;
+            }
         }
     }
 }

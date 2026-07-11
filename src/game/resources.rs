@@ -26,13 +26,20 @@ impl Default for GameConfig {
     }
 }
 
-/// Coins collected so far this run, and the total spawned.
+/// Score for the current run: chickens hit + coins collected.
+/// Total score = chickens + coins.
 #[derive(Resource, Default)]
 pub struct Score {
-    pub collected: u32,
-    pub total: u32,
+    pub chickens: u32,
+    pub coins: u32,
 }
 
-/// Elapsed seconds in the current run.
-#[derive(Resource, Default)]
-pub struct GameTimer(pub f32);
+/// Seconds remaining in the current timed round (counts down from 60.0).
+#[derive(Resource)]
+pub struct TimeLeft(pub f32);
+
+impl Default for TimeLeft {
+    fn default() -> Self {
+        Self(60.0)
+    }
+}

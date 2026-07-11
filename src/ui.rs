@@ -1,7 +1,7 @@
 use bevy::{prelude::*, text::FontSize};
 
 use crate::car::Car;
-use crate::game::resources::{GameTimer, Score};
+use crate::game::resources::{Score, TimeLeft};
 use crate::game::state::GameState;
 use crate::palette;
 
@@ -22,6 +22,10 @@ struct GameOverRoot;
 struct SpeedText;
 #[derive(Component)]
 struct GearText;
+#[derive(Component)]
+struct ScoreText;
+#[derive(Component)]
+struct ChickensText;
 #[derive(Component)]
 struct CoinsText;
 #[derive(Component)]
@@ -59,6 +63,8 @@ impl Plugin for UiPlugin {
                 (
                     update_speed_text,
                     update_gear_text,
+                    update_score_text,
+                    update_chickens_text,
                     update_coins_text,
                     update_timer_text,
                     update_hint,
@@ -101,7 +107,7 @@ fn spawn_menu(mut commands: Commands) {
             ));
             // Subtitle
             p.spawn((
-                Text::new("Collect every coin. Chase your best time."),
+                Text::new("Hit wandering chickens for score! Coins give bonus time."),
                 TextFont {
                     font_size: FontSize::Px(22.0),
                     ..default()
@@ -252,11 +258,72 @@ fn spawn_hud(mut commands: Commands) {
                 TextColor(palette::HUD_ACCENT.into()),
                 GearText,
             ));
+            // SCORE label
+            p.spawn((
+                Text::new("SCORE"),
+                TextFont {
+                    font_size: FontSize::Px(13.0),
+                    ..default()
+                },
+                TextColor(Color::srgba(0.75, 0.75, 0.8, 1.0).into()),
+                Node {
+                    margin: UiRect {
+                        top: px(8.0),
+                        bottom: px(2.0),
+                        ..default()
+                    },
+                    ..default()
+                },
+            ));
+            // Big score number (chickens + coins)
+            p.spawn((
+                Text::new(""),
+                TextFont {
+                    font_size: FontSize::Px(36.0),
+                    ..default()
+                },
+                TextColor(palette::HUD_ACCENT.into()),
+                Node {
+                    margin: UiRect::bottom(px(6.0)),
+                    ..default()
+                },
+            ))
+            .with_child((
+                TextSpan::default(),
+                TextFont {
+                    font_size: FontSize::Px(36.0),
+                    ..default()
+                },
+                TextColor(palette::HUD_ACCENT.into()),
+                ScoreText,
+            ));
+            // Chickens line
+            p.spawn((
+                Text::new("Chickens: "),
+                TextFont {
+                    font_size: FontSize::Px(20.0),
+                    ..default()
+                },
+                TextColor(palette::HUD_TEXT.into()),
+                Node {
+                    margin: UiRect::bottom(px(2.0)),
+                    ..default()
+                },
+            ))
+            .with_child((
+                TextSpan::default(),
+                TextFont {
+                    font_size: FontSize::Px(20.0),
+                    ..default()
+                },
+                TextColor(palette::HUD_ACCENT.into()),
+                ChickensText,
+            ));
             // Coins line
             p.spawn((
                 Text::new("Coins: "),
                 TextFont {
-                    font_size: FontSize::Px(22.0),
+                    font_size: FontSize::Px(20.0),
                     ..default()
                 },
                 TextColor(palette::HUD_TEXT.into()),
@@ -264,7 +331,7 @@ fn spawn_hud(mut commands: Commands) {
             .with_child((
                 TextSpan::default(),
                 TextFont {
-                    font_size: FontSize::Px(22.0),
+                    font_size: FontSize::Px(20.0),
                     ..default()
                 },
                 TextColor(palette::HUD_ACCENT.into()),
@@ -282,7 +349,7 @@ fn spawn_hud(mut commands: Commands) {
                 ..default()
             },
             HudRoot,
-            Text::new("Time: "),
+            Text::new("Time Left: "),
             TextFont {
                 font_size: FontSize::Px(24.0),
                 ..default()
@@ -377,8 +444,8 @@ fn spawn_pause(mut commands: Commands) {
         });
 }
 
-fn spawn_gameover(mut commands: Commands, score: Res<Score>, timer: Res<GameTimer>) {
-    let (mins, secs) = (timer.0 / 60.0, timer.0 % 60.0);
+fn spawn_gameover(mut commands: Commands, score: Res<Score>) {
+    let total = score.chickens + score.coins;
     commands
         .spawn((
             Node {
@@ -398,7 +465,7 @@ fn spawn_gameover(mut commands: Commands, score: Res<Score>, timer: Res<GameTime
         .with_children(|p| {
             // Title
             p.spawn((
-                Text::new("FINISH!"),
+                Text::new("Time's up!"),
                 TextFont {
                     font_size: FontSize::Px(64.0),
                     ..default()
@@ -409,9 +476,9 @@ fn spawn_gameover(mut commands: Commands, score: Res<Score>, timer: Res<GameTime
                     ..default()
                 },
             ));
-            // Coins (label + big accent value)
+            // SCORE (label + big accent value)
             p.spawn((
-                Text::new("COINS"),
+                Text::new("SCORE"),
                 TextFont {
                     font_size: FontSize::Px(16.0),
                     ..default()
@@ -423,9 +490,9 @@ fn spawn_gameover(mut commands: Commands, score: Res<Score>, timer: Res<GameTime
                 },
             ));
             p.spawn((
-                Text::new(format!("{} / {}", score.collected, score.total)),
+                Text::new(format!("{}", total)),
                 TextFont {
-                    font_size: FontSize::Px(34.0),
+                    font_size: FontSize::Px(40.0),
                     ..default()
                 },
                 TextColor(palette::HUD_ACCENT.into()),
@@ -434,26 +501,27 @@ fn spawn_gameover(mut commands: Commands, score: Res<Score>, timer: Res<GameTime
                     ..default()
                 },
             ));
-            // Time (label + big accent value)
+            // Chickens
             p.spawn((
-                Text::new("TIME"),
+                Text::new(format!("Chickens: {}", score.chickens)),
                 TextFont {
-                    font_size: FontSize::Px(16.0),
+                    font_size: FontSize::Px(24.0),
                     ..default()
                 },
-                TextColor(Color::srgba(0.7, 0.7, 0.75, 1.0).into()),
+                TextColor(palette::HUD_TEXT.into()),
                 Node {
-                    margin: UiRect::bottom(px(2.0)),
+                    margin: UiRect::bottom(px(4.0)),
                     ..default()
                 },
             ));
+            // Coins
             p.spawn((
-                Text::new(format!("{:02.0}:{:05.2}", mins, secs)),
+                Text::new(format!("Coins: {}", score.coins)),
                 TextFont {
-                    font_size: FontSize::Px(34.0),
+                    font_size: FontSize::Px(24.0),
                     ..default()
                 },
-                TextColor(palette::HUD_ACCENT.into()),
+                TextColor(palette::HUD_TEXT.into()),
                 Node {
                     margin: UiRect::bottom(px(28.0)),
                     ..default()
@@ -461,7 +529,7 @@ fn spawn_gameover(mut commands: Commands, score: Res<Score>, timer: Res<GameTime
             ));
             // Restart / menu prompt
             p.spawn((
-                Text::new("ENTER to race again  •  ESC for menu"),
+                Text::new("ENTER to play again  •  ESC for menu"),
                 TextFont {
                     font_size: FontSize::Px(22.0),
                     ..default()
@@ -502,16 +570,33 @@ fn update_gear_text(car: Query<&Car>, mut query: Query<&mut TextSpan, With<GearT
     }
 }
 
-fn update_coins_text(score: Res<Score>, mut query: Query<&mut TextSpan, With<CoinsText>>) {
+fn update_score_text(score: Res<Score>, mut query: Query<&mut TextSpan, With<ScoreText>>) {
     for mut span in &mut query {
-        **span = format!("{} / {}", score.collected, score.total);
+        **span = format!("{}", score.chickens + score.coins);
     }
 }
 
-fn update_timer_text(timer: Res<GameTimer>, mut query: Query<&mut TextSpan, With<TimerText>>) {
-    let (mins, secs) = (timer.0 / 60.0, timer.0 % 60.0);
+fn update_chickens_text(
+    score: Res<Score>,
+    mut query: Query<&mut TextSpan, With<ChickensText>>,
+) {
     for mut span in &mut query {
-        **span = format!("{:02.0}:{:05.2}", mins, secs);
+        **span = format!("{}", score.chickens);
+    }
+}
+
+fn update_coins_text(score: Res<Score>, mut query: Query<&mut TextSpan, With<CoinsText>>) {
+    for mut span in &mut query {
+        **span = format!("{}", score.coins);
+    }
+}
+
+fn update_timer_text(timeleft: Res<TimeLeft>, mut query: Query<&mut TextSpan, With<TimerText>>) {
+    let t = timeleft.0.max(0.0);
+    let mins = (t / 60.0).floor() as u32;
+    let secs = (t % 60.0).floor() as u32;
+    for mut span in &mut query {
+        **span = format!("{}:{:02}", mins, secs);
     }
 }
 
