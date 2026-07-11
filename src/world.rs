@@ -3,7 +3,7 @@ use bevy::color::LinearRgba;
 
 use crate::car::Car;
 use crate::game::events::{ChickenHit, CoinCollected};
-use crate::game::resources::{Score, TimeLeft};
+use crate::game::resources::{RoundActive, Score, TimeLeft};
 use crate::game::state::GameState;
 use crate::palette;
 use crate::textures::TextureAssets;
@@ -51,7 +51,7 @@ const CHICKEN_ARENA: f32 = 48.0;
 /// Cached mesh + material handles for chickens and feather poofs, created once
 /// at startup and reused by `spawn_chickens`, `hit_chickens` (respawns + feathers).
 #[derive(Resource)]
-struct ChickenAssets {
+pub struct ChickenAssets {
     body_mesh: Handle<Mesh>,
     body_mat: Handle<StandardMaterial>,
     comb_mesh: Handle<Mesh>,
@@ -71,8 +71,14 @@ impl Plugin for WorldPlugin {
                 OnEnter(GameState::Playing),
                 (spawn_coins, spawn_chickens),
             )
+            // Despawn the round's transient entities when the round truly ends
+            // (GameOver / Menu) — NOT on Playing->Paused, so pause keeps them.
             .add_systems(
-                OnExit(GameState::Playing),
+                OnEnter(GameState::GameOver),
+                (cleanup_coins, cleanup_chickens, cleanup_feathers),
+            )
+            .add_systems(
+                OnEnter(GameState::Menu),
                 (cleanup_coins, cleanup_chickens, cleanup_feathers),
             )
             .add_systems(
@@ -357,11 +363,16 @@ fn spawn_environment(
     }
 }
 
-fn spawn_coins(
+pub fn spawn_coins(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    round_active: Res<RoundActive>,
 ) {
+    // Resume from Paused keeps the existing coins — only spawn on a fresh round.
+    if round_active.0 {
+        return;
+    }
     // ~22 coins: some on the road, some on the grass. Avoids the car start at origin.
     let positions: [(f32, f32); 22] = [
         // On the road
@@ -457,7 +468,15 @@ fn init_chicken_assets(
     });
 }
 
-fn spawn_chickens(mut commands: Commands, assets: Res<ChickenAssets>) {
+pub fn spawn_chickens(
+    mut commands: Commands,
+    assets: Res<ChickenAssets>,
+    round_active: Res<RoundActive>,
+) {
+    // Resume from Paused keeps the existing chickens — only spawn on a fresh round.
+    if round_active.0 {
+        return;
+    }
     // ~14 chickens at scattered positions, avoiding origin / car start.
     let positions: [(f32, f32); 14] = [
         (8.0, -10.0), (-8.0, 10.0), (15.0, -25.0), (-15.0, 25.0),

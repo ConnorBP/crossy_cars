@@ -43,3 +43,9 @@ impl Default for TimeLeft {
         Self(60.0)
     }
 }
+
+/// True while a round is in progress (including while paused). Keeps
+/// `reset_run` + `spawn_coins`/`spawn_chickens` from re-firing when resuming
+/// from `Paused`, so pausing doesn't wipe the current run.
+#[derive(Resource, Default)]
+pub struct RoundActive(pub bool);
