@@ -8,6 +8,7 @@ mod textures;
 mod ui;
 mod world;
 
+use bevy::asset::{AssetMetaCheck, AssetPlugin};
 use bevy::prelude::*;
 
 use audio::AudioPlugin;
@@ -21,7 +22,16 @@ use world::WorldPlugin;
 
 fn main() {
     App::new()
-        .add_plugins(DefaultPlugins)
+        .add_plugins(
+            DefaultPlugins.set(AssetPlugin {
+                // On web, trunk's dev server returns index.html for the sidecar
+                // `<asset>.meta` 404s, which Bevy then fails to parse as RON.
+                // `Never` skips the .meta lookup and uses default meta, so the
+                // wav/wgsl assets load cleanly on both native and web.
+                meta_check: AssetMetaCheck::Never,
+                ..default()
+            }),
+        )
         .insert_resource(ClearColor(palette::SKY))
         .insert_resource(GlobalAmbientLight {
             color: Color::WHITE,
