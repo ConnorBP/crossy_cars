@@ -1,0 +1,25 @@
+[package]
+name = "car_game_ai"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bevy = { version = "0.19", features = ["webgl2"] }
+
+# Fast-ish dev builds, decent runtime.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+
+# Smaller wasm for web releases: `trunk build --release` or
+# `cargo build --release --target wasm32-unknown-unknown --profile wasm-release`
+[profile.wasm-release]
+inherits = "release"
+opt-level = "s"
+strip = "debuginfo"
