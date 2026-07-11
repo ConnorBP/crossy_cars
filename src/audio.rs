@@ -25,7 +25,7 @@ pub struct AudioPlugin;
 
 impl Plugin for AudioPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, setup_audio)
+        app.init_resource::<AudioHandles>()
             .add_systems(
                 Update,
                 (play_hit, play_coin, update_engine.run_if(in_state(GameState::Playing))),
@@ -36,15 +36,19 @@ impl Plugin for AudioPlugin {
     }
 }
 
-/// Preload all wav handles into `AudioHandles` so event systems can spawn
-/// one-shots instantly without a per-event asset load.
-fn setup_audio(mut commands: Commands, asset_server: Res<AssetServer>) {
-    commands.insert_resource(AudioHandles {
-        hit: asset_server.load("audio/hit.wav"),
-        coin: asset_server.load("audio/coin.wav"),
-        click: asset_server.load("audio/click.wav"),
-        engine: asset_server.load("audio/engine.wav"),
-    });
+/// Preload all wav handles. Built eagerly via `FromWorld` (at app build time)
+/// so the handles exist before any `Update` system (e.g. `play_hit`) runs —
+/// avoiding a "Resource does not exist" panic from a deferred `insert_resource`.
+impl FromWorld for AudioHandles {
+    fn from_world(world: &mut World) -> Self {
+        let asset_server = world.resource::<AssetServer>();
+        AudioHandles {
+            hit: asset_server.load("audio/hit.wav"),
+            coin: asset_server.load("audio/coin.wav"),
+            click: asset_server.load("audio/click.wav"),
+            engine: asset_server.load("audio/engine.wav"),
+        }
+    }
 }
 
 /// One-shot hit SFX for every chicken strike. `PlaybackSettings::DESPAWN`

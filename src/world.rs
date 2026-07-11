@@ -66,7 +66,8 @@ pub struct WorldPlugin;
 
 impl Plugin for WorldPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, (spawn_environment, init_chicken_assets))
+        app.add_systems(Startup, spawn_environment)
+            .init_resource::<ChickenAssets>()
             .add_systems(
                 OnEnter(GameState::Playing),
                 (spawn_coins, spawn_chickens),
@@ -438,34 +439,39 @@ fn cleanup_coins(mut commands: Commands, coins: Query<Entity, With<Coin>>) {
     }
 }
 
-fn init_chicken_assets(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-) {
-    commands.insert_resource(ChickenAssets {
-        body_mesh: meshes.add(Sphere::new(0.22).mesh().uv(10, 8)),
-        body_mat: materials.add(StandardMaterial {
-            base_color: Color::srgb(0.95, 0.95, 0.95),
-            perceptual_roughness: 0.7,
-            ..default()
-        }),
-        comb_mesh: meshes.add(Cuboid::new(0.12, 0.06, 0.12)),
-        comb_mat: materials.add(StandardMaterial {
-            base_color: Color::srgb(0.9, 0.1, 0.1),
-            ..default()
-        }),
-        beak_mesh: meshes.add(Cuboid::new(0.06, 0.04, 0.08)),
-        beak_mat: materials.add(StandardMaterial {
-            base_color: Color::srgb(1.0, 0.6, 0.1),
-            ..default()
-        }),
-        feather_mesh: meshes.add(Sphere::new(0.08).mesh().uv(6, 4)),
-        feather_mat: materials.add(StandardMaterial {
-            base_color: Color::srgb(0.95, 0.95, 0.95),
-            ..default()
-        }),
-    });
+impl FromWorld for ChickenAssets {
+    fn from_world(world: &mut World) -> Self {
+        // Built eagerly (at app build time) so the handles exist before any
+        // system that reads `Res<ChickenAssets>` runs. `resource_scope` lets
+        // us hold `&mut Assets<Mesh>` and `&mut Assets<StandardMaterial>` at
+        // once without double-borrowing `World`.
+        world.resource_scope::<Assets<Mesh>, _>(|world, mut meshes| {
+            let mut materials = world.resource_mut::<Assets<StandardMaterial>>();
+            ChickenAssets {
+                body_mesh: meshes.add(Sphere::new(0.22).mesh().uv(10, 8)),
+                body_mat: materials.add(StandardMaterial {
+                    base_color: Color::srgb(0.95, 0.95, 0.95),
+                    perceptual_roughness: 0.7,
+                    ..default()
+                }),
+                comb_mesh: meshes.add(Cuboid::new(0.12, 0.06, 0.12)),
+                comb_mat: materials.add(StandardMaterial {
+                    base_color: Color::srgb(0.9, 0.1, 0.1),
+                    ..default()
+                }),
+                beak_mesh: meshes.add(Cuboid::new(0.06, 0.04, 0.08)),
+                beak_mat: materials.add(StandardMaterial {
+                    base_color: Color::srgb(1.0, 0.6, 0.1),
+                    ..default()
+                }),
+                feather_mesh: meshes.add(Sphere::new(0.08).mesh().uv(6, 4)),
+                feather_mat: materials.add(StandardMaterial {
+                    base_color: Color::srgb(0.95, 0.95, 0.95),
+                    ..default()
+                }),
+            }
+        })
+    }
 }
 
 pub fn spawn_chickens(
