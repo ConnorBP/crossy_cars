@@ -56,6 +56,18 @@ pub struct Tree;
 /// Tag for a lamp-post obstacle (collidable).
 #[derive(Component)]
 pub struct LampPost;
+/// Tag for a traffic-cone obstacle (collidable, T12 variety).
+#[derive(Component)]
+pub struct Cone;
+/// Tag for a fire-hydrant obstacle (collidable, T12 variety).
+#[derive(Component)]
+pub struct Hydrant;
+/// Tag for a bench obstacle (collidable, T12 variety).
+#[derive(Component)]
+pub struct Bench;
+/// Tag for a hedge obstacle (collidable, T12 variety).
+#[derive(Component)]
+pub struct Hedge;
 
 // ---------------------------------------------------------------------------
 // Chunk system
@@ -462,6 +474,214 @@ pub fn populate_chunk(
                         Transform::from_xyz(dir * 0.8, 3.1, 0.0),
                     ));
                 });
+            }
+        }
+
+        // --- T12 obstacle variety: cones, hydrants, benches, hedges ---
+        // Shared assets for the four new obstacle types (built from primitives,
+        // each carries a generic `Collider` so `physics_collisions` handles them
+        // automatically). Placed on the grass/sidewalk edge (|x| in 6..8, beyond
+        // the curbs at ±4.75 and inside the tree band at 8..13) so the road lane
+        // (|x|<4) stays drivable. Z stays within [z_min, z_max] to keep the 3.0u
+        // seam margin (risk E12).
+        // NB: the Bevy `Cone` primitive is fully-qualified here because this
+        // module also declares a `Cone` tag component (T12) of the same name.
+        let cone_body_mesh = meshes.add(bevy::math::primitives::Cone::new(0.18, 0.4));
+        let cone_base_mesh = meshes.add(Cuboid::new(0.4, 0.04, 0.4));
+        let cone_mat = materials.add(StandardMaterial {
+            base_color: Color::srgb(0.95, 0.45, 0.05),
+            perceptual_roughness: 0.7,
+            // Slight emissive so cones pop under bloom (T9).
+            emissive: LinearRgba::rgb(0.25, 0.08, 0.0),
+            ..default()
+        });
+        let cone_shadow_mesh = meshes.add(Circle::new(0.3));
+
+        let hydrant_body_mesh = meshes.add(Cylinder::new(0.12, 0.3));
+        let hydrant_dome_mesh = meshes.add(Sphere::new(0.1).mesh().uv(10, 6));
+        let hydrant_nub_mesh = meshes.add(Cylinder::new(0.05, 0.12));
+        let hydrant_mat = materials.add(StandardMaterial {
+            base_color: Color::srgb(0.85, 0.12, 0.1),
+            perceptual_roughness: 0.6,
+            emissive: LinearRgba::rgb(0.18, 0.02, 0.0),
+            ..default()
+        });
+        let hydrant_shadow_mesh = meshes.add(Circle::new(0.35));
+
+        let bench_seat_mesh = meshes.add(Cuboid::new(0.9, 0.1, 0.3));
+        let bench_leg_mesh = meshes.add(Cuboid::new(0.08, 0.45, 0.28));
+        let bench_back_mesh = meshes.add(Cuboid::new(0.9, 0.3, 0.06));
+        let bench_mat = materials.add(StandardMaterial {
+            base_color: Color::srgb(0.45, 0.28, 0.14),
+            perceptual_roughness: 0.9,
+            ..default()
+        });
+        let bench_shadow_mesh =
+            meshes.add(Plane3d::default().mesh().size(1.1, 0.45));
+
+        let hedge_box_mesh = meshes.add(Cuboid::new(1.2, 0.5, 0.4));
+        let hedge_mat = materials.add(StandardMaterial {
+            base_color: Color::srgb(0.16, 0.34, 0.14),
+            perceptual_roughness: 0.9,
+            ..default()
+        });
+        let hedge_shadow_mesh =
+            meshes.add(Plane3d::default().mesh().size(1.4, 0.55));
+
+        // Scatter 2-4 obstacles per chunk (mix of the four types).
+        let n_obs = 2 + (rand(&mut s) * 3.0) as usize; // 2..4
+        for _ in 0..n_obs {
+            let kind = (rand(&mut s) * 4.0) as usize % 4; // 0=cone,1=hydrant,2=bench,3=hedge
+            let side = if rand(&mut s) < 0.5 { -1.0 } else { 1.0 };
+            let ox = side * (6.0 + rand(&mut s) * 2.0); // |x| in 6..8
+            let oz = z_min + rand(&mut s) * (z_max - z_min);
+            match kind {
+                0 => {
+                    // Traffic cone: tapered cone body on a square base.
+                    p.spawn((
+                        Transform::from_xyz(ox, 0.0, oz),
+                        Visibility::default(),
+                        Collider {
+                            half_x: 0.2,
+                            half_z: 0.2,
+                        },
+                        Cone,
+                    ))
+                    .with_children(|cp| {
+                        // Cone is centered on its midpoint (base at y=0, tip at
+                        // y=height), so a 0.4-tall cone sits at y=0.2.
+                        cp.spawn((
+                            Mesh3d(cone_body_mesh.clone()),
+                            MeshMaterial3d(cone_mat.clone()),
+                            Transform::from_xyz(0.0, 0.2, 0.0),
+                        ));
+                        cp.spawn((
+                            Mesh3d(cone_base_mesh.clone()),
+                            MeshMaterial3d(cone_mat.clone()),
+                            Transform::from_xyz(0.0, 0.02, 0.0),
+                        ));
+                        cp.spawn((
+                            Mesh3d(cone_shadow_mesh.clone()),
+                            MeshMaterial3d(shadow_mat.clone()),
+                            Transform::from_xyz(0.0, 0.05, 0.0),
+                        ));
+                    });
+                }
+                1 => {
+                    // Fire hydrant: short cylinder body, dome cap, two side nubs.
+                    p.spawn((
+                        Transform::from_xyz(ox, 0.0, oz),
+                        Visibility::default(),
+                        Collider {
+                            half_x: 0.25,
+                            half_z: 0.25,
+                        },
+                        Hydrant,
+                    ))
+                    .with_children(|hp| {
+                        // Cylinder centered on midpoint: 0.3 tall -> y=0.15.
+                        hp.spawn((
+                            Mesh3d(hydrant_body_mesh.clone()),
+                            MeshMaterial3d(hydrant_mat.clone()),
+                            Transform::from_xyz(0.0, 0.15, 0.0),
+                        ));
+                        // Dome caps the top (cylinder top at y=0.3).
+                        hp.spawn((
+                            Mesh3d(hydrant_dome_mesh.clone()),
+                            MeshMaterial3d(hydrant_mat.clone()),
+                            Transform::from_xyz(0.0, 0.34, 0.0),
+                        ));
+                        // Side nubs: rotate cylinder axis from Y to X.
+                        hp.spawn((
+                            Mesh3d(hydrant_nub_mesh.clone()),
+                            MeshMaterial3d(hydrant_mat.clone()),
+                            Transform::from_xyz(0.15, 0.18, 0.0)
+                                .with_rotation(Quat::from_rotation_z(
+                                    std::f32::consts::FRAC_PI_2,
+                                )),
+                        ));
+                        hp.spawn((
+                            Mesh3d(hydrant_nub_mesh.clone()),
+                            MeshMaterial3d(hydrant_mat.clone()),
+                            Transform::from_xyz(-0.15, 0.18, 0.0)
+                                .with_rotation(Quat::from_rotation_z(
+                                    std::f32::consts::FRAC_PI_2,
+                                )),
+                        ));
+                        hp.spawn((
+                            Mesh3d(hydrant_shadow_mesh.clone()),
+                            MeshMaterial3d(shadow_mat.clone()),
+                            Transform::from_xyz(0.0, 0.05, 0.0),
+                        ));
+                    });
+                }
+                2 => {
+                    // Bench: long seat on two legs + a backrest, wood/brown.
+                    p.spawn((
+                        Transform::from_xyz(ox, 0.0, oz),
+                        Visibility::default(),
+                        Collider {
+                            half_x: 0.5,
+                            half_z: 0.18,
+                        },
+                        Bench,
+                    ))
+                    .with_children(|bp| {
+                        // Seat at sitting height ~0.45.
+                        bp.spawn((
+                            Mesh3d(bench_seat_mesh.clone()),
+                            MeshMaterial3d(bench_mat.clone()),
+                            Transform::from_xyz(0.0, 0.45, 0.0),
+                        ));
+                        // Two legs supporting the seat.
+                        bp.spawn((
+                            Mesh3d(bench_leg_mesh.clone()),
+                            MeshMaterial3d(bench_mat.clone()),
+                            Transform::from_xyz(0.35, 0.225, 0.0),
+                        ));
+                        bp.spawn((
+                            Mesh3d(bench_leg_mesh.clone()),
+                            MeshMaterial3d(bench_mat.clone()),
+                            Transform::from_xyz(-0.35, 0.225, 0.0),
+                        ));
+                        // Backrest along the back edge of the seat.
+                        bp.spawn((
+                            Mesh3d(bench_back_mesh.clone()),
+                            MeshMaterial3d(bench_mat.clone()),
+                            Transform::from_xyz(0.0, 0.65, -0.12),
+                        ));
+                        bp.spawn((
+                            Mesh3d(bench_shadow_mesh.clone()),
+                            MeshMaterial3d(shadow_mat.clone()),
+                            Transform::from_xyz(0.0, 0.05, 0.0),
+                        ));
+                    });
+                }
+                _ => {
+                    // Hedge: a dark-green box row segment.
+                    p.spawn((
+                        Transform::from_xyz(ox, 0.0, oz),
+                        Visibility::default(),
+                        Collider {
+                            half_x: 0.6,
+                            half_z: 0.25,
+                        },
+                        Hedge,
+                    ))
+                    .with_children(|hp| {
+                        // Box centered on its midpoint: 0.5 tall -> y=0.25.
+                        hp.spawn((
+                            Mesh3d(hedge_box_mesh.clone()),
+                            MeshMaterial3d(hedge_mat.clone()),
+                            Transform::from_xyz(0.0, 0.25, 0.0),
+                        ));
+                        hp.spawn((
+                            Mesh3d(hedge_shadow_mesh.clone()),
+                            MeshMaterial3d(shadow_mat.clone()),
+                            Transform::from_xyz(0.0, 0.05, 0.0),
+                        ));
+                    });
+                }
             }
         }
     });

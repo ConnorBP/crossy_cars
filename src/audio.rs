@@ -86,7 +86,9 @@ fn play_coin(
 fn play_click(mut commands: Commands, handles: Res<AudioHandles>) {
     commands.spawn((
         AudioPlayer::new(handles.click.clone()),
-        PlaybackSettings::DESPAWN,
+        // UI/menu click — kept quiet (it was playing at default max volume,
+        // which was jarring on the startup menu).
+        PlaybackSettings::DESPAWN.with_volume(Volume::Linear(0.25)),
     ));
 }
 

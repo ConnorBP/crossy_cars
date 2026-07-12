@@ -2,12 +2,14 @@ mod audio;
 mod camera;
 mod car;
 mod chickens;
+mod combos;
 mod countdown;
 mod effects;
 mod game;
 mod health;
 mod minimap;
 mod palette;
+mod pickups;
 mod persist;
 mod shaders;
 mod textures;
@@ -21,12 +23,14 @@ use audio::AudioPlugin;
 use camera::CameraPlugin;
 use car::CarPlugin;
 use chickens::ChickensPlugin;
+use combos::CombosPlugin;
 use countdown::CountdownPlugin;
 use effects::EffectsPlugin;
 use game::GamePlugin;
 use health::HealthPlugin;
 use minimap::MinimapPlugin;
 use persist::PersistPlugin;
+use pickups::PickupsPlugin;
 use shaders::ShaderPlugin;
 use textures::TexturesPlugin;
 use ui::UiPlugin;
@@ -63,11 +67,15 @@ fn main() {
             ShaderPlugin,
             TexturesPlugin,
             PersistPlugin,
+        ))
+        .add_plugins((
             ChickensPlugin,
             HealthPlugin,
             MinimapPlugin,
             CountdownPlugin,
             EffectsPlugin,
+            CombosPlugin,
+            PickupsPlugin,
         ))
         .run();
 }
