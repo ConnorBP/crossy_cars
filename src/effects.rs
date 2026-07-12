@@ -236,10 +236,10 @@ impl Plugin for EffectsPlugin {
                     .chain()
                     .run_if(in_state(GameState::Playing)),
             )
-            // Clean up any lingering marks/smoke when leaving play (GameOver /
-            // Menu). `despawn()` is recursive in 0.19 (risk E2) — these are
-            // leaf entities, so it's a straight remove.
-            .add_systems(OnExit(GameState::Playing), cleanup_effects)
+            // Pausing preserves both visible effects and their reusable pool
+            // slots. Only terminal round destinations purge the pools; this
+            // also covers paused restarts, which deliberately route via Menu.
+            .add_systems(OnEnter(GameState::GameOver), cleanup_effects)
             .add_systems(OnEnter(GameState::Menu), cleanup_effects);
     }
 }
@@ -626,11 +626,12 @@ fn update_smoke(
 }
 
 // ===========================================================================
-// Cleanup — purge all marks/smoke on state exit
+// Cleanup — purge all marks/smoke when a round ends
 // ===========================================================================
 
-/// Despawn every tire mark and smoke puff (e.g. on GameOver / Menu). Recursive
-/// despawn in 0.19 is safe here (these are leaf entities).
+/// Despawn every tire mark and smoke puff on entry to GameOver or Menu.
+/// Playing -> Paused intentionally does not call this, so pause/resume retains
+/// the stable pools. Recursive despawn in 0.19 is safe here (leaf entities).
 fn cleanup_effects(
     mut commands: Commands,
     marks: Query<Entity, With<TireMark>>,

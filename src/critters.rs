@@ -2,8 +2,8 @@
 //! that you must **NOT** hit.
 //!
 //! Distinct from chickens (which **award** score): hitting a critter is a
-//! **PENALTY** — the car loses 25 health and 2 chicken-score, a red particle
-//! burst fires, a bad-thud SFX plays, and a `CritterHit` message is written.
+//! **PENALTY** — at most once per short contact window the car loses 25 health
+//! and 2 chicken-score; every hit still fires particles, SFX, and `CritterHit`.
 //!
 //! The module mirrors `chickens.rs` (wander + recycle-ahead + bob + particle
 //! burst + cleanup) but:
@@ -18,8 +18,8 @@
 //! - `CritterHit` is defined here and registered via
 //!   `app.add_message::<CritterHit>()` in `CrittersPlugin` (the orchestrator
 //!   does **not** register it in `game/mod.rs`).
-//! - `spawn_critters` runs `.in_set(SpawnSet)` and checks `RoundActive.0` to
-//!   skip on resume from `Paused`.
+//! - `spawn_critters` runs `.in_set(SpawnSet)` and consumes a cleanup-driven
+//!   fresh-round latch, so pause/resume skips spawning regardless of reset order.
 //! - Critter entities have **no** `Collider` component.
 
 use bevy::audio::{AudioPlayer, AudioSource, PlaybackSettings, Volume};
@@ -28,7 +28,7 @@ use std::f32::consts::TAU;
 
 use crate::car::Car;
 use crate::game::SpawnSet;
-use crate::game::resources::{GameConfig, RoundActive, Score};
+use crate::game::resources::{GameConfig, GameOverReason, Score};
 use crate::game::state::GameState;
 use crate::health::Health;
 use crate::modifiers::ActiveModifier;
@@ -53,13 +53,12 @@ const HIT_RADIUS: f32 = 1.2;
 /// ahead) so the menagerie stays near the endless driver.
 const KEEP_RADIUS: f32 = 50.0;
 
-/// Critters this far **behind** the car (in +Z) are recycled even if within
-/// `KEEP_RADIUS` — the car drives toward -Z, so a critter at `z > car.z + 15`
-/// has been left behind.
+/// Critters this far behind the car along its current heading are recycled
+/// even if they remain within `KEEP_RADIUS`.
 const BEHIND_THRESHOLD: f32 = 15.0;
 
-/// Recycled critters respawn this many units ahead of the car (toward -Z),
-/// at a random offset within `[RESPAWN_AHEAD_MIN, RESPAWN_AHEAD_MIN + RANGE]`.
+/// Recycled critters respawn this many units along the car's current forward
+/// axis, at a random offset within `[RESPAWN_AHEAD_MIN, ... + RANGE]`.
 const RESPAWN_AHEAD_MIN: f32 = 30.0;
 const RESPAWN_AHEAD_RANGE: f32 = 20.0;
 
@@ -69,12 +68,15 @@ const RESPAWN_AHEAD_RANGE: f32 = 20.0;
 const SCATTER_RADIUS: f32 = 40.0;
 const SCATTER_INNER: f32 = 8.0;
 
-/// X spread for scattered / respawned critters (keeps them in the drivable
-/// corridor; the car's X clamp is ±24).
-const X_SPREAD: f32 = 22.0;
+/// Maximum lateral spread from the car's current position and heading for
+/// scattered / respawned critters.
+const LATERAL_SPREAD: f32 = 22.0;
 
 /// Health lost per critter hit.
 const HIT_HEALTH_PENALTY: f32 = 25.0;
+/// Minimum interval between health/score penalties. Contacts during this
+/// bounded window still receive all visual, audio, message and respawn work.
+const HIT_PENALTY_COOLDOWN: f32 = 0.4;
 /// Chicken-score lost per critter hit (the player is punished for bad driving).
 const HIT_SCORE_PENALTY: u32 = 2;
 
@@ -153,6 +155,21 @@ struct BloodPuff {
 /// Emitted when the car runs over a wandering critter (penalty hit).
 #[derive(Message)]
 pub struct CritterHit;
+
+/// Remaining contact-penalty lockout. A resource (rather than a system local)
+/// lets fresh-round spawning explicitly clear it independent of reset order.
+#[derive(Resource, Default)]
+struct CritterPenaltyCooldown(f32);
+
+/// Fresh-round spawn latch set by cleanup and unaffected by reset ordering.
+#[derive(Resource)]
+struct CritterSpawnPending(bool);
+
+impl Default for CritterSpawnPending {
+    fn default() -> Self {
+        Self(true)
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Asset resource (FromWorld — meshes + materials + audio built via scope)
@@ -369,9 +386,10 @@ impl Plugin for CrittersPlugin {
     fn build(&self, app: &mut App) {
         app.add_message::<CritterHit>()
             .init_resource::<CritterAssets>()
-            // Fresh-round spawn: inside SpawnSet so it runs before reset_run
-            // flips RoundActive (risk E11). Checks RoundActive.0 to skip on
-            // resume from Paused.
+            .init_resource::<CritterPenaltyCooldown>()
+            .init_resource::<CritterSpawnPending>()
+            // Fresh-round spawn: inside SpawnSet and guarded by a cleanup-
+            // driven latch, so reset ordering and pause/resume are both safe.
             .add_systems(OnEnter(GameState::Playing), spawn_critters.in_set(SpawnSet))
             // Hit detection runs before wandering (chained — they share
             // Transform access on Critter entities; ordering resolves the
@@ -405,35 +423,36 @@ impl Plugin for CrittersPlugin {
 // ---------------------------------------------------------------------------
 
 /// Fresh-round spawn: scatter the modifier-adjusted critter target (random
-/// kinds) within radius `SCATTER_RADIUS` of the car. Runs in `SpawnSet` (before
-/// `reset_run`) and skips on resume from `Paused` (when `RoundActive.0` is
-/// already true).
+/// kinds) within radius `SCATTER_RADIUS` of the car. Runs in `SpawnSet` and
+/// consumes the cleanup-driven fresh-round latch, independent of reset order.
 fn spawn_critters(
     mut commands: Commands,
     assets: Res<CritterAssets>,
     cfg: Res<GameConfig>,
     modifier: Res<ActiveModifier>,
     car: Query<&Transform, (With<Car>, Without<Critter>)>,
-    round_active: Res<RoundActive>,
+    mut spawn_pending: ResMut<CritterSpawnPending>,
+    mut penalty_cooldown: ResMut<CritterPenaltyCooldown>,
     mut seed: Local<u32>,
 ) {
-    if round_active.0 {
+    if !spawn_pending.0 {
         return;
     }
+    penalty_cooldown.0 = 0.0;
     ensure_seeded(&mut seed, 0x2468_ACE0);
     let Ok(car_t) = car.single() else {
         return;
     };
+    spawn_pending.0 = false;
     let car_pos = car_t.translation;
+    let forward = horizontal_forward(car_t.rotation);
 
     for _ in 0..effective_critter_target(&modifier) {
         let angle = rand(&mut seed) * TAU;
         let radius = SCATTER_INNER + rand(&mut seed) * (SCATTER_RADIUS - SCATTER_INNER);
-        let pos = Vec3::new(
-            (car_pos.x + angle.cos() * radius).clamp(-X_SPREAD, X_SPREAD),
-            0.0,
-            car_pos.z + angle.sin() * radius,
-        );
+        let lateral = (angle.cos() * radius).clamp(-LATERAL_SPREAD, LATERAL_SPREAD);
+        let longitudinal = angle.sin() * radius;
+        let pos = car_relative_ground_pos(car_pos, forward, longitudinal, lateral);
         let kind = match (rand(&mut seed) * 3.0) as u32 {
             0 => CritterKind::Pedestrian,
             1 => CritterKind::Cow,
@@ -695,6 +714,7 @@ fn wander_critters(
         return;
     };
     let car_pos = car_t.translation;
+    let car_forward = horizontal_forward(car_t.rotation);
     let dt = time.delta_secs();
 
     for (e, mut critter, mut tf, children) in &mut critters {
@@ -713,11 +733,9 @@ fn wander_critters(
         tf.rotation = Quat::from_rotation_y(heading);
 
         // --- Recycle critters that fell behind or drifted too far away ---
-        let dist = tf.translation.distance(car_pos);
-        let behind = tf.translation.z > car_pos.z + BEHIND_THRESHOLD;
-        if dist > KEEP_RADIUS || behind {
+        if should_recycle(tf.translation, car_pos, car_forward) {
             commands.entity(e).despawn();
-            let new_pos = respawn_ahead_pos(car_pos, &mut seed);
+            let new_pos = respawn_ahead_pos(car_pos, car_forward, &mut seed);
             let kind = match (rand(&mut seed) * 3.0) as u32 {
                 0 => CritterKind::Pedestrian,
                 1 => CritterKind::Cow,
@@ -753,26 +771,32 @@ fn wander_critters(
 // ---------------------------------------------------------------------------
 
 /// On car-to-critter contact (XZ distance < `HIT_RADIUS`): despawn the
-/// critter, apply a **PENALTY** (`health.0 -= 25`, `score.chickens -= 2`),
+/// critter, apply a cooldown-gated **PENALTY** (`health.0 -= 25`, score -2),
 /// write a `CritterHit` message, spawn a **red** particle burst, play a
-/// bad-thud SFX (hit.wav at low volume), and respawn a critter ahead so the
-/// population stays constant.
+/// bad-thud SFX, and respawn ahead. Visual/message handling is retained for
+/// every clustered contact; lethal admitted damage ends the round as Wrecked.
 fn hit_critters(
     mut commands: Commands,
     assets: Res<CritterAssets>,
     cfg: Res<GameConfig>,
-    car: Query<&Transform, (With<Car>, Without<Critter>)>,
+    mut car: Query<(&mut Car, &Transform), Without<Critter>>,
     critters: Query<(Entity, &Transform, &CritterKind), With<Critter>>,
     mut health: ResMut<Health>,
     mut score: ResMut<Score>,
     mut critter_hits: MessageWriter<CritterHit>,
+    mut next: ResMut<NextState<GameState>>,
+    mut reason: ResMut<GameOverReason>,
+    time: Res<Time>,
+    mut penalty_cooldown: ResMut<CritterPenaltyCooldown>,
     mut seed: Local<u32>,
 ) {
     ensure_seeded(&mut seed, 0xACE0_2468);
-    let Ok(car_t) = car.single() else {
+    penalty_cooldown.0 = (penalty_cooldown.0 - time.delta_secs()).max(0.0);
+    let Ok((mut car, car_t)) = car.single_mut() else {
         return;
     };
     let car_pos = car_t.translation;
+    let car_forward = horizontal_forward(car_t.rotation);
     let hit_r2 = HIT_RADIUS * HIT_RADIUS;
 
     for (e, critter_t, &kind) in &critters {
@@ -782,9 +806,21 @@ fn hit_critters(
             // --- Despawn the hit critter ---
             commands.entity(e).despawn();
 
-            // --- PENALTY: lose health + lose chicken score ---
-            health.0 = (health.0 - HIT_HEALTH_PENALTY).max(0.0);
-            score.chickens = score.chickens.saturating_sub(HIT_SCORE_PENALTY);
+            // --- PENALTY: one health/score loss per short contact window ---
+            // Clustered critters are still visibly hit below, but cannot stack
+            // several penalties in the same frame or immediate aftermath.
+            let decision = critter_damage_decision(health.0, penalty_cooldown.0);
+            if decision.apply {
+                health.0 = decision.health;
+                score.chickens = score.chickens.saturating_sub(HIT_SCORE_PENALTY);
+                penalty_cooldown.0 = HIT_PENALTY_COOLDOWN;
+
+                if decision.lethal {
+                    car.speed = 0.0;
+                    *reason = GameOverReason::Wrecked;
+                    next.set(GameState::GameOver);
+                }
+            }
 
             // --- Write the message (audio.rs / UI can react) ---
             critter_hits.write(CritterHit);
@@ -799,7 +835,7 @@ fn hit_critters(
             ));
 
             // --- Respawn a critter ahead so there's always something to avoid ---
-            let new_pos = respawn_ahead_pos(car_pos, &mut seed);
+            let new_pos = respawn_ahead_pos(car_pos, car_forward, &mut seed);
             spawn_one_critter(
                 &mut commands,
                 &assets,
@@ -921,10 +957,15 @@ fn update_particles(
 // ---------------------------------------------------------------------------
 
 /// Despawn every critter (recursive — nukes the mesh hierarchy, risk E2).
-fn cleanup_critters(mut commands: Commands, critters: Query<Entity, With<Critter>>) {
+fn cleanup_critters(
+    mut commands: Commands,
+    critters: Query<Entity, With<Critter>>,
+    mut spawn_pending: ResMut<CritterSpawnPending>,
+) {
     for e in &critters {
         commands.entity(e).despawn();
     }
+    spawn_pending.0 = true;
 }
 
 /// Despawn every lingering gib + puff particle.
@@ -964,13 +1005,76 @@ fn rand_dir_xz(seed: &mut u32) -> Vec3 {
     Vec3::new(angle.cos(), 0.0, angle.sin())
 }
 
-/// A position ahead of the car (toward -Z, the driving direction) at a random
-/// distance within `[RESPAWN_AHEAD_MIN, RESPAWN_AHEAD_MIN + RANGE]`, with a
-/// random X offset inside the drivable corridor.
-fn respawn_ahead_pos(car_pos: Vec3, seed: &mut u32) -> Vec3 {
+/// Horizontal unit forward for a car transform.
+fn horizontal_forward(rotation: Quat) -> Vec3 {
+    normalized_horizontal(rotation * Vec3::NEG_Z)
+}
+
+fn normalized_horizontal(direction: Vec3) -> Vec3 {
+    let horizontal = Vec3::new(direction.x, 0.0, direction.z);
+    if horizontal.length_squared() > f32::EPSILON {
+        horizontal.normalize()
+    } else {
+        Vec3::NEG_Z
+    }
+}
+
+/// Place a point in the car's heading-relative frame. Positive `ahead` follows
+/// forward and positive `lateral` follows local +X (the car's right side).
+fn car_relative_ground_pos(car_pos: Vec3, forward: Vec3, ahead: f32, lateral: f32) -> Vec3 {
+    let forward = normalized_horizontal(forward);
+    let right = Vec3::new(-forward.z, 0.0, forward.x);
+    let mut pos =
+        car_pos + forward * ahead + right * lateral.clamp(-LATERAL_SPREAD, LATERAL_SPREAD);
+    pos.y = 0.0;
+    pos
+}
+
+/// Whether a point has fallen behind the car along the car's current heading.
+fn is_behind_car(pos: Vec3, car_pos: Vec3, car_forward: Vec3) -> bool {
+    (pos - car_pos).dot(normalized_horizontal(car_forward)) < -BEHIND_THRESHOLD
+}
+
+fn should_recycle(pos: Vec3, car_pos: Vec3, car_forward: Vec3) -> bool {
+    pos.distance(car_pos) > KEEP_RADIUS || is_behind_car(pos, car_pos, car_forward)
+}
+
+/// A position ahead of the car at a random forward distance and a random
+/// car-relative lateral offset centered on the car.
+fn respawn_ahead_pos(car_pos: Vec3, car_forward: Vec3, seed: &mut u32) -> Vec3 {
     let ahead = RESPAWN_AHEAD_MIN + rand(seed) * RESPAWN_AHEAD_RANGE;
-    let x = (rand(seed) * 2.0 - 1.0) * X_SPREAD;
-    Vec3::new(x, 0.0, car_pos.z - ahead)
+    let lateral = (rand(seed) * 2.0 - 1.0) * LATERAL_SPREAD;
+    car_relative_ground_pos(car_pos, car_forward, ahead, lateral)
+}
+
+/// Pure contact-window decision used by the hit system and unit tests.
+fn should_apply_penalty(cooldown_remaining: f32) -> bool {
+    cooldown_remaining <= 0.0
+}
+
+#[derive(Debug, PartialEq)]
+struct CritterDamageDecision {
+    apply: bool,
+    health: f32,
+    lethal: bool,
+}
+
+/// Pure cooldown/damage decision. A blocked hit preserves health; an admitted
+/// hit clamps at zero and reports lethality for the GameOver transition.
+fn critter_damage_decision(health: f32, cooldown_remaining: f32) -> CritterDamageDecision {
+    if !should_apply_penalty(cooldown_remaining) {
+        return CritterDamageDecision {
+            apply: false,
+            health,
+            lethal: false,
+        };
+    }
+    let health = (health - HIT_HEALTH_PENALTY).max(0.0);
+    CritterDamageDecision {
+        apply: true,
+        health,
+        lethal: health <= 0.0,
+    }
 }
 
 /// Seed a `Local<u32>` RNG on first use with a per-system constant so the
@@ -1025,5 +1129,51 @@ mod tests {
         assert_eq!(effective_critter_target(&standard), CRITTER_COUNT);
         assert_eq!(effective_critter_target(&stampede), CRITTER_COUNT * 2);
         assert_eq!(effective_critter_target(&frenzy), CRITTER_COUNT);
+    }
+
+    #[test]
+    fn cooldown_gates_damage_and_admitted_damage_is_bounded() {
+        assert_eq!(
+            critter_damage_decision(100.0, HIT_PENALTY_COOLDOWN),
+            CritterDamageDecision {
+                apply: false,
+                health: 100.0,
+                lethal: false,
+            }
+        );
+        assert_eq!(
+            critter_damage_decision(100.0, 0.0),
+            CritterDamageDecision {
+                apply: true,
+                health: 75.0,
+                lethal: false,
+            }
+        );
+        assert_eq!(
+            critter_damage_decision(10.0, 0.0),
+            CritterDamageDecision {
+                apply: true,
+                health: 0.0,
+                lethal: true,
+            }
+        );
+    }
+
+    #[test]
+    fn critter_ahead_placement_tracks_turned_heading() {
+        let car_pos = Vec3::new(12.0, 0.0, -9.0);
+        let forward = horizontal_forward(Quat::from_rotation_y(std::f32::consts::PI));
+        let pos = car_relative_ground_pos(car_pos, forward, 20.0, 0.0);
+
+        assert!((pos - Vec3::new(12.0, 0.0, 11.0)).length() < 0.0001);
+    }
+
+    #[test]
+    fn critter_behind_check_is_heading_relative() {
+        let car_pos = Vec3::new(-40.0, 0.0, 70.0);
+        let south = Vec3::NEG_Z;
+
+        assert!(is_behind_car(car_pos + Vec3::Z * 16.0, car_pos, south));
+        assert!(!is_behind_car(car_pos - Vec3::Z * 16.0, car_pos, south));
     }
 }

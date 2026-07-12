@@ -32,6 +32,8 @@
 //! circle-vs-AABB loop. Curbs keep their own `Curb` component for the
 //! hop-up behaviour.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use bevy::color::LinearRgba;
 use bevy::math::primitives::Circle;
 use bevy::prelude::*;
@@ -311,10 +313,58 @@ fn tile_from_edges(gx: i32, gz: i32) -> TileKind {
 /// spacing of road grid lines); `count` is the grid window size (kept alive
 /// and recycled in BOTH X and Z). With the defaults (40 × 5) the world
 /// covers a 200u × 200u window around the car at any time.
+///
+/// Positive even counts are supported with a deterministic negative-side
+/// bias: for example, count 4 around coordinate 0 spans -2..=1. This keeps
+/// exactly `count * count` cells even though an even window cannot have one
+/// cell geometrically at its center. Non-positive counts are clamped to 1.
 #[derive(Resource)]
 pub struct GridConfig {
     pub block: f32,
     pub count: i32,
+}
+
+type GridCoord = (i32, i32);
+
+/// Return the exact grid-coordinate window centered on `center`.
+///
+/// Odd counts are symmetric (`5` gives offsets `-2..=2`). Even counts use
+/// the documented negative-side bias (`4` gives `-2..=1`), and non-positive
+/// counts are clamped to one cell. A set is returned so cardinality and
+/// uniqueness are explicit invariants shared by startup, reset and recycle.
+fn desired_grid_coords(center: GridCoord, count: i32) -> BTreeSet<GridCoord> {
+    let count = count.max(1);
+    let first_x = center.0 - count / 2;
+    let first_z = center.1 - count / 2;
+    let mut desired = BTreeSet::new();
+    for x_offset in 0..count {
+        for z_offset in 0..count {
+            desired.insert((first_x + x_offset, first_z + z_offset));
+        }
+    }
+    desired
+}
+
+/// A deferred-command-safe set-difference plan. Coordinates are sets, so a
+/// malformed snapshot containing duplicate coordinates still cannot schedule
+/// duplicate coordinate spawns or despawns.
+#[derive(Debug, PartialEq, Eq)]
+struct RecyclePlan {
+    despawn: BTreeSet<GridCoord>,
+    spawn: BTreeSet<GridCoord>,
+}
+
+/// Build a recycle plan from one immutable snapshot and one desired window.
+/// No result depends on commands issued while applying the plan.
+fn recycle_plan(
+    existing_coords: impl IntoIterator<Item = GridCoord>,
+    desired: &BTreeSet<GridCoord>,
+) -> RecyclePlan {
+    let existing: BTreeSet<_> = existing_coords.into_iter().collect();
+    RecyclePlan {
+        despawn: existing.difference(desired).copied().collect(),
+        spawn: desired.difference(&existing).copied().collect(),
+    }
 }
 
 impl Default for GridConfig {
@@ -327,11 +377,9 @@ impl Default for GridConfig {
 }
 
 /// Identifies a block-root entity and its grid coordinates. Root transform
-/// sits at world `((gx+0.5)*block, 0, (gz+0.5)*block)`. When recycled along an
-/// axis, the root is moved to the opposite side of the grid and re-populated
-/// with a fresh (gx,gz)-derived seed. The `kind` is the Wang-tile kind
-/// chosen for this block; neighbours read it to compute their fixed-edge
-/// constraints (T19).
+/// sits at world `((gx+0.5)*block, 0, (gz+0.5)*block)`. Recycling retires
+/// roots outside the desired window and deterministically creates missing
+/// `(gx,gz)` roots. `kind` is derived from the same coordinate road-line data.
 #[derive(Component)]
 pub struct Block {
     pub gx: i32,
@@ -357,17 +405,16 @@ impl Plugin for WorldPlugin {
             // in SpawnSet so it's before reset_run, which zeroes the car to
             // origin.
             .add_systems(OnEnter(GameState::Playing), reset_grid.in_set(SpawnSet))
-            // Recycle blocks that fall off any edge of the grid to the
-            // opposite side, keeping a continuous count×count window around
-            // the car in BOTH X and Z.
+            // Reconcile all block roots to the exact count×count coordinate
+            // window around the car in one deferred-safe snapshot/plan pass.
             .add_systems(Update, recycle_grid.run_if(in_state(GameState::Playing)));
     }
 }
 
 /// Spawn the directional sun + the initial count×count grid of blocks
-/// centered on the origin: gx,gz in `-count/2 .. count/2 - 1` (for count=5:
-/// -2..=2). Run once at Startup. The sun is Startup-only and persists — it
-/// is NOT re-spawned by `reset_grid`.
+/// centered on the origin (for count=5: gx,gz in -2..=2). Run once at
+/// Startup. The sun is Startup-only and persists — it is NOT re-spawned by
+/// `reset_grid`.
 fn spawn_initial_grid(
     mut commands: Commands,
     cfg: Res<GridConfig>,
@@ -388,10 +435,10 @@ fn spawn_initial_grid(
     spawn_grid_window(&mut commands, &cfg, &mut meshes, &mut materials, &textures);
 }
 
-/// Spawn the count×count grid of blocks centered on the origin: gx,gz in
-/// `-count/2 .. count/2 - 1`. Each block root at `((gx+0.5)*block, 0,
-/// (gz+0.5)*block)` with `Block { gx, gz, kind }`, then `populate_block`.
-/// Used by both `spawn_initial_grid` (Startup) and `reset_grid` (round start).
+/// Spawn the exact count×count grid of blocks centered on the origin. Each
+/// block root is at `((gx+0.5)*block, 0, (gz+0.5)*block)` with
+/// `Block { gx, gz, kind }`, then `populate_block`. Used by both
+/// `spawn_initial_grid` (Startup) and `reset_grid` (round start).
 ///
 /// Each block's tile is derived deterministically from its (gx,gz) via the
 /// road-line functions (see `tile_from_edges`) — no neighbour querying or
@@ -405,31 +452,26 @@ fn spawn_grid_window(
     textures: &TextureAssets,
 ) {
     let block = cfg.block;
-    let count = cfg.count;
-    let lo = -count / 2;
-    let hi = count / 2 - 1; // inclusive
-    for gx in lo..=hi {
-        for gz in lo..=hi {
-            let kind = tile_from_edges(gx, gz);
-            let root = commands
-                .spawn((
-                    Transform::from_xyz((gx as f32 + 0.5) * block, 0.0, (gz as f32 + 0.5) * block),
-                    Visibility::default(),
-                    Block { gx, gz, kind },
-                ))
-                .id();
-            populate_block(
-                commands,
-                meshes,
-                materials,
-                textures,
-                root,
-                gx,
-                gz,
-                seed_for(gx, gz),
-                kind,
-            );
-        }
+    for (gx, gz) in desired_grid_coords((0, 0), cfg.count) {
+        let kind = tile_from_edges(gx, gz);
+        let root = commands
+            .spawn((
+                Transform::from_xyz((gx as f32 + 0.5) * block, 0.0, (gz as f32 + 0.5) * block),
+                Visibility::default(),
+                Block { gx, gz, kind },
+            ))
+            .id();
+        populate_block(
+            commands,
+            meshes,
+            materials,
+            textures,
+            root,
+            gx,
+            gz,
+            seed_for(gx, gz),
+            kind,
+        );
     }
 }
 
@@ -1436,19 +1478,11 @@ fn try_place(
     None
 }
 
-/// 4-directional recycling: for EACH axis (X and Z) independently, find the
-/// min/max block coordinate; when the car is past the grid edge by
-/// `VIEW_MARGIN`, recycle the far column/row — despawn those block roots
-/// (recursive — nukes all their children, safe in 0.19, risk E2) and spawn
-/// fresh ones on the opposite side with progressed (gx,gz) + fresh seed.
-/// Keeps a continuous count×count window around the car in BOTH X and Z ->
-/// no gaps, car can drive endlessly in any direction. At most one
-/// column/row recycles per axis per frame.
-///
-/// T19: when spawning a recycled block, its INWARD neighbours (the existing
-/// grid on the side it's joining) fix the shared edges; outward edges are
-/// free. The existing neighbours' `Block.kind` is read to get the matching
-/// socket. This preserves Wang-tile edge-continuity across recycles.
+/// Reconcile the block roots to the exact count×count rectangle centered on
+/// the car's current grid cell. The query is read once, then a pure set-diff
+/// plan is applied through deferred commands. This avoids stale-query axis
+/// passes and handles X, Z, diagonal and arbitrarily large teleports in one
+/// frame.
 fn recycle_grid(
     mut commands: Commands,
     cfg: Res<GridConfig>,
@@ -1456,135 +1490,63 @@ fn recycle_grid(
     mut materials: ResMut<Assets<StandardMaterial>>,
     textures: Res<TextureAssets>,
     car: Query<&Transform, (With<Car>, Without<Block>)>,
-    blocks: Query<(Entity, &Block, &Transform)>,
+    blocks: Query<(Entity, &Block)>,
 ) {
     let Ok(car_t) = car.single() else {
         return;
     };
     let block = cfg.block;
-    // Don't recycle a block until it's fully off-screen beyond the grid edge.
-    const VIEW_MARGIN: f32 = 16.0;
-    let car_x = car_t.translation.x;
-    let car_z = car_t.translation.z;
+    if !block.is_finite() || block <= 0.0 {
+        return;
+    }
 
-    // Snapshot (entity, gx, gz) so we can compute despawn sets + new positions
-    // before mutating. We do NOT need neighbour tiles anymore — each block's
-    // tile is derived deterministically from its (gx,gz) via `tile_from_edges`
-    // (road-line model), so shared edges always agree. Recycling just retires
-    // the out-of-range column/row and regenerates new blocks at the opposite
-    // edge from their (gx,gz) seed.
-    let block_list: Vec<(Entity, i32, i32)> =
-        blocks.iter().map(|(e, b, _)| (e, b.gx, b.gz)).collect();
+    let center = (
+        (car_t.translation.x / block).floor() as i32,
+        (car_t.translation.z / block).floor() as i32,
+    );
+    let desired = desired_grid_coords(center, cfg.count);
 
-    // --- X axis ---
-    let (min_gx, max_gx) = block_list
-        .iter()
-        .map(|(_, gx, _)| *gx)
-        .fold((i32::MAX, i32::MIN), |(mn, mx), gx| {
-            (mn.min(gx), mx.max(gx))
-        });
-    let x_edge_hi = (max_gx as f32 + 0.5) * block + VIEW_MARGIN;
-    let x_edge_lo = (min_gx as f32 + 0.5) * block - VIEW_MARGIN;
-    if car_x > x_edge_hi {
-        // Retire the -X (min_gx) column; regenerate it on the +X side at max_gx+1.
-        let gz_values: Vec<i32> = block_list
-            .iter()
-            .filter(|(_, gx, _)| *gx == min_gx)
-            .map(|(_, _, gz)| *gz)
-            .collect();
-        for &(e, _, _) in block_list.iter().filter(|(_, gx, _)| *gx == min_gx) {
-            commands.entity(e).despawn();
-        }
-        let new_gx = max_gx + 1;
-        for gz in gz_values {
-            spawn_block_at(
-                &mut commands,
-                &mut meshes,
-                &mut materials,
-                &textures,
-                block,
-                new_gx,
-                gz,
-            );
-        }
-    } else if car_x < x_edge_lo {
-        // Retire the +X (max_gx) column; regenerate it on the -X side at min_gx-1.
-        let gz_values: Vec<i32> = block_list
-            .iter()
-            .filter(|(_, gx, _)| *gx == max_gx)
-            .map(|(_, _, gz)| *gz)
-            .collect();
-        for &(e, _, _) in block_list.iter().filter(|(_, gx, _)| *gx == max_gx) {
-            commands.entity(e).despawn();
-        }
-        let new_gx = min_gx - 1;
-        for gz in gz_values {
-            spawn_block_at(
-                &mut commands,
-                &mut meshes,
-                &mut materials,
-                &textures,
-                block,
-                new_gx,
-                gz,
-            );
+    // One immutable ECS snapshot. Grouping entities by coordinate lets us
+    // apply each coordinate action exactly once; duplicate roots, if a prior
+    // bad frame left any, are also retired while retaining one desired root.
+    let mut entities_by_coord: BTreeMap<GridCoord, Vec<Entity>> = BTreeMap::new();
+    for (entity, block_component) in &blocks {
+        entities_by_coord
+            .entry((block_component.gx, block_component.gz))
+            .or_default()
+            .push(entity);
+    }
+    let existing_coords: BTreeSet<_> = entities_by_coord.keys().copied().collect();
+    let plan = recycle_plan(existing_coords.iter().copied(), &desired);
+
+    for coord in &plan.despawn {
+        if let Some(entities) = entities_by_coord.get(coord) {
+            for &entity in entities {
+                commands.entity(entity).despawn();
+            }
         }
     }
 
-    // --- Z axis --- (re-snapshot in case X recycled; gx set is unchanged but
-    // entities changed, so re-query.)
-    let block_list_z: Vec<(Entity, i32, i32)> =
-        blocks.iter().map(|(e, b, _)| (e, b.gx, b.gz)).collect();
-    let (min_gz, max_gz) = block_list_z
-        .iter()
-        .map(|(_, _, gz)| *gz)
-        .fold((i32::MAX, i32::MIN), |(mn, mx), gz| {
-            (mn.min(gz), mx.max(gz))
-        });
-    let z_edge_hi = (max_gz as f32 + 0.5) * block + VIEW_MARGIN;
-    let z_edge_lo = (min_gz as f32 + 0.5) * block - VIEW_MARGIN;
-    if car_z > z_edge_hi {
-        let gx_values: Vec<i32> = block_list_z
-            .iter()
-            .filter(|(_, _, gz)| *gz == min_gz)
-            .map(|(_, gx, _)| *gx)
-            .collect();
-        for &(e, _, _) in block_list_z.iter().filter(|(_, _, gz)| *gz == min_gz) {
-            commands.entity(e).despawn();
+    // A desired coordinate needs one root. Keep the first snapshot entity and
+    // remove any duplicates without ever scheduling an entity twice.
+    for coord in desired.intersection(&existing_coords) {
+        if let Some(entities) = entities_by_coord.get(coord) {
+            for &duplicate in entities.iter().skip(1) {
+                commands.entity(duplicate).despawn();
+            }
         }
-        let new_gz = max_gz + 1;
-        for gx in gx_values {
-            spawn_block_at(
-                &mut commands,
-                &mut meshes,
-                &mut materials,
-                &textures,
-                block,
-                gx,
-                new_gz,
-            );
-        }
-    } else if car_z < z_edge_lo {
-        let gx_values: Vec<i32> = block_list_z
-            .iter()
-            .filter(|(_, _, gz)| *gz == max_gz)
-            .map(|(_, gx, _)| *gx)
-            .collect();
-        for &(e, _, _) in block_list_z.iter().filter(|(_, _, gz)| *gz == max_gz) {
-            commands.entity(e).despawn();
-        }
-        let new_gz = min_gz - 1;
-        for gx in gx_values {
-            spawn_block_at(
-                &mut commands,
-                &mut meshes,
-                &mut materials,
-                &textures,
-                block,
-                gx,
-                new_gz,
-            );
-        }
+    }
+
+    for &(gx, gz) in &plan.spawn {
+        spawn_block_at(
+            &mut commands,
+            &mut meshes,
+            &mut materials,
+            &textures,
+            block,
+            gx,
+            gz,
+        );
     }
 }
 
@@ -1693,11 +1655,11 @@ fn collect_coins(
 }
 
 // ---------------------------------------------------------------------------
-// Tests: deterministic road-line + tile generation (Wave A world-gen seam)
+// Tests: grid recycling reliability + deterministic world generation
 // ---------------------------------------------------------------------------
 //
-// Pure, allocation-free tests covering the road-line seam contract that the
-// traffic wave (and the rest of the world) rely on:
+// Pure tests cover the grid-window/set-difference contract and the road-line
+// seam contract that the traffic wave (and the rest of the world) rely on:
 //   * line 0 is always a road on both axes (spawn intersection guarantee),
 //   * road-line decisions are deterministic across negative/positive indices,
 //   * `tile_from_edges` derives its four sockets from exactly the same four
@@ -1710,6 +1672,127 @@ fn collect_coins(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_contiguous_window(coords: &BTreeSet<GridCoord>, center: GridCoord, count: i32) {
+        let count = count.max(1);
+        assert_eq!(coords.len(), (count * count) as usize);
+        let xs: BTreeSet<_> = coords.iter().map(|&(gx, _)| gx).collect();
+        let zs: BTreeSet<_> = coords.iter().map(|&(_, gz)| gz).collect();
+        let first_x = center.0 - count / 2;
+        let first_z = center.1 - count / 2;
+        let expected_xs: BTreeSet<_> = (first_x..first_x + count).collect();
+        let expected_zs: BTreeSet<_> = (first_z..first_z + count).collect();
+        assert_eq!(xs, expected_xs);
+        assert_eq!(zs, expected_zs);
+        for gx in xs {
+            for gz in &zs {
+                assert!(coords.contains(&(gx, *gz)), "missing ({gx},{gz})");
+            }
+        }
+    }
+
+    fn apply_plan(existing: &BTreeSet<GridCoord>, plan: &RecyclePlan) -> BTreeSet<GridCoord> {
+        let mut result = existing.clone();
+        for coord in &plan.despawn {
+            assert!(
+                result.remove(coord),
+                "despawned absent coordinate {coord:?}"
+            );
+        }
+        for &coord in &plan.spawn {
+            assert!(
+                result.insert(coord),
+                "spawned duplicate coordinate {coord:?}"
+            );
+        }
+        result
+    }
+
+    /// The default odd window is exactly 5×5. In particular, integer
+    /// division must not accidentally turn the inclusive high bound into 1.
+    #[test]
+    fn desired_five_window_has_25_unique_coords_and_exact_span() {
+        let coords = desired_grid_coords((0, 0), 5);
+        assert_contiguous_window(&coords, (0, 0), 5);
+        assert_eq!(coords.len(), 25);
+        assert_eq!(coords.first(), Some(&(-2, -2)));
+        assert_eq!(coords.last(), Some(&(2, 2)));
+        assert!(
+            coords
+                .iter()
+                .all(|&(gx, gz)| { (-2..=2).contains(&gx) && (-2..=2).contains(&gz) })
+        );
+    }
+
+    /// Even windows use the documented negative-side bias, while invalid
+    /// non-positive counts clamp to one coordinate instead of becoming empty.
+    #[test]
+    fn desired_even_window_policy_and_non_positive_clamp_are_exact() {
+        let even = desired_grid_coords((10, -4), 4);
+        assert_contiguous_window(&even, (10, -4), 4);
+        let xs: BTreeSet<_> = even.iter().map(|&(gx, _)| gx).collect();
+        let zs: BTreeSet<_> = even.iter().map(|&(_, gz)| gz).collect();
+        assert_eq!(xs, BTreeSet::from([8, 9, 10, 11]));
+        assert_eq!(zs, BTreeSet::from([-6, -5, -4, -3]));
+
+        assert_eq!(desired_grid_coords((7, 9), 0), BTreeSet::from([(7, 9)]));
+        assert_eq!(desired_grid_coords((7, 9), -5), BTreeSet::from([(7, 9)]));
+    }
+
+    /// Every direction and distance is handled by one old-vs-desired set
+    /// difference. Applying each plan yields exactly 25 unique contiguous
+    /// coordinates immediately, including disjoint multi-window teleports.
+    #[test]
+    fn recycle_plans_handle_x_z_diagonal_and_multi_window_moves() {
+        let starts_and_targets = [
+            ((0, 0), (1, 0)),   // +X
+            ((0, 0), (-1, 0)),  // -X
+            ((0, 0), (0, 1)),   // +Z
+            ((0, 0), (0, -1)),  // -Z
+            ((0, 0), (1, 1)),   // diagonal
+            ((2, -3), (-1, 4)), // diagonal beyond one window
+            ((0, 0), (13, -9)), // fully disjoint multi-window teleport
+        ];
+
+        for (start, target) in starts_and_targets {
+            let existing = desired_grid_coords(start, 5);
+            let desired = desired_grid_coords(target, 5);
+            let plan = recycle_plan(existing.iter().copied(), &desired);
+            assert!(plan.spawn.is_disjoint(&plan.despawn));
+            let result = apply_plan(&existing, &plan);
+            assert_eq!(result, desired, "failed move {start:?} -> {target:?}");
+            assert_contiguous_window(&result, target, 5);
+        }
+    }
+
+    /// Duplicate coordinates in a malformed snapshot are collapsed before
+    /// differencing, so neither side of the plan can contain duplicate or
+    /// contradictory coordinate actions.
+    #[test]
+    fn recycle_plan_never_duplicates_spawn_or_despawn_coordinates() {
+        let desired = desired_grid_coords((1, 1), 5);
+        let existing = desired_grid_coords((0, 0), 5);
+        let duplicated: Vec<_> = existing
+            .iter()
+            .flat_map(|&coord| [coord, coord, coord])
+            .collect();
+        let plan = recycle_plan(duplicated, &desired);
+
+        assert_eq!(plan.despawn.len(), 9);
+        assert_eq!(plan.spawn.len(), 9);
+        assert!(plan.spawn.is_disjoint(&plan.despawn));
+        assert_eq!(apply_plan(&existing, &plan), desired);
+    }
+
+    /// With no movement, the set difference is empty: stable frames issue no
+    /// unnecessary spawn/despawn work.
+    #[test]
+    fn recycle_plan_is_empty_when_window_is_already_desired() {
+        let desired = desired_grid_coords((-20, 30), 5);
+        let plan = recycle_plan(desired.iter().copied(), &desired);
+        assert!(plan.spawn.is_empty());
+        assert!(plan.despawn.is_empty());
+    }
 
     /// Line 0 is forced to be a road on BOTH axes — this is the
     /// spawn-intersection guarantee (the car spawns at the origin and must

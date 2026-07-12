@@ -1,13 +1,14 @@
 //! Best-score persistence: `localStorage` on web, a tiny file on native.
 //!
-//! Loads the saved best at startup, updates it whenever the current run's
-//! score beats it (persisting the new record immediately), and renders a
-//! small "BEST: N" UI node in the bottom-left corner (away from the HUD,
-//! which occupies the top-left panel and top-right timer).
+//! Loads the saved best at startup, updates the in-memory value whenever the
+//! current run beats it, and persists a new record once when the round ends.
+//! It also renders a small "BEST: N" UI node in the bottom-left corner (away
+//! from the HUD, which occupies the top-left panel and top-right timer).
 
 use bevy::{prelude::*, text::FontSize};
 
 use crate::game::resources::Score;
+use crate::game::state::GameState;
 use crate::palette;
 
 /// localStorage key (web).
@@ -28,6 +29,12 @@ pub struct BestScore(pub u32);
 #[derive(Resource, Default)]
 pub struct BestAtRoundStart(pub u32);
 
+/// Last value successfully loaded from or written to storage. Keeping this
+/// separate from `BestAtRoundStart` avoids a duplicate write on
+/// GameOver -> Menu without changing the snapshot used by the game-over UI.
+#[derive(Resource, Default)]
+struct PersistedBest(u32);
+
 /// Marker for the best-score UI root node (never despawned).
 #[derive(Component)]
 struct BestScoreRoot;
@@ -41,17 +48,24 @@ impl Plugin for PersistPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<BestScore>()
             .init_resource::<BestAtRoundStart>()
+            .init_resource::<PersistedBest>()
             .add_systems(Startup, (load_best_score, spawn_best_score_ui).chain())
-            // Runs every frame in every state; cheap (one u32 add + compare)
-            // and only writes to storage when a new record is set, so it
-            // reliably catches the final score at its peak.
-            .add_systems(Update, (update_best, update_best_score_text));
+            // Keep the live value current for the persistent BEST UI, but do
+            // not touch storage in the per-frame path.
+            .add_systems(Update, update_best.run_if(in_state(GameState::Playing)))
+            .add_systems(Update, update_best_score_text)
+            // Either terminal destination ends a round. PersistedBest makes
+            // GameOver -> Menu idempotent; paused restarts also route via Menu.
+            .add_systems(OnEnter(GameState::GameOver), persist_best_on_round_end)
+            .add_systems(OnEnter(GameState::Menu), persist_best_on_round_end);
     }
 }
 
 /// Overwrite the `BestScore` resource with the value persisted on disk/web.
-fn load_best_score(mut best: ResMut<BestScore>) {
-    best.0 = load_best();
+fn load_best_score(mut best: ResMut<BestScore>, mut persisted: ResMut<PersistedBest>) {
+    let loaded = load_best();
+    best.0 = loaded;
+    persisted.0 = loaded;
 }
 
 /// Spawn the "BEST: N" UI node (bottom-left, absolute). Lives for the whole
@@ -87,13 +101,30 @@ fn spawn_best_score_ui(mut commands: Commands) {
         ));
 }
 
-/// If the current run's total (chickens + coins) beats the stored best,
-/// update the resource and persist the new record.
+/// If the current run's total (chickens + coins) beats the best, update only
+/// the in-memory resource so live UI remains current without per-hit I/O.
 fn update_best(score: Res<Score>, mut best: ResMut<BestScore>) {
-    let total = score.chickens + score.coins;
-    if total > best.0 {
-        best.0 = total;
-        save_best(total);
+    best.0 = best.0.max(score.chickens + score.coins);
+}
+
+/// A round should write only a strict improvement over both its starting
+/// record and the value already known to be in storage.
+fn should_persist_best(current_best: u32, best_at_round_start: u32, persisted_best: u32) -> bool {
+    current_best > best_at_round_start && current_best > persisted_best
+}
+
+/// Capture any final score update and persist a new record at a terminal round
+/// boundary. Updating `persisted` only after a successful write permits a
+/// failed GameOver write to retry on Menu while suppressing duplicate writes.
+fn persist_best_on_round_end(
+    score: Res<Score>,
+    mut best: ResMut<BestScore>,
+    best_at_start: Res<BestAtRoundStart>,
+    mut persisted: ResMut<PersistedBest>,
+) {
+    best.0 = best.0.max(score.chickens + score.coins);
+    if should_persist_best(best.0, best_at_start.0, persisted.0) && save_best(best.0) {
+        persisted.0 = best.0;
     }
 }
 
@@ -109,7 +140,7 @@ fn update_best_score_text(
 
 // --- platform-specific storage helpers ---
 // All `web_sys::window()` usage is gated behind `target_arch = "wasm32"`; native
-// uses blocking `std::fs` (tiny file, fine at startup / on record updates).
+// uses blocking `std::fs` (tiny file, only used at startup / round end).
 
 /// Read the persisted best score. Returns 0 if missing/unreadable.
 fn load_best() -> u32 {
@@ -139,20 +170,38 @@ fn load_best() -> u32 {
     }
 }
 
-/// Persist the new best score. Best-effort: silently ignores storage errors.
-fn save_best(total: u32) {
+/// Persist the new best score. Returns whether storage accepted the write.
+fn save_best(total: u32) -> bool {
     #[cfg(target_arch = "wasm32")]
     {
         let Some(window) = web_sys::window() else {
-            return;
+            return false;
         };
         let Ok(Some(storage)) = window.local_storage() else {
-            return;
+            return false;
         };
-        let _ = storage.set_item(STORAGE_KEY, &total.to_string());
+        storage.set_item(STORAGE_KEY, &total.to_string()).is_ok()
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let _ = std::fs::write(FILE_PATH, total.to_string());
+        std::fs::write(FILE_PATH, total.to_string()).is_ok()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_persist_best;
+
+    #[test]
+    fn persistence_requires_a_strict_round_improvement() {
+        assert!(should_persist_best(11, 10, 10));
+        assert!(!should_persist_best(10, 10, 9));
+        assert!(!should_persist_best(9, 10, 9));
+    }
+
+    #[test]
+    fn already_persisted_round_best_is_not_written_again() {
+        assert!(!should_persist_best(11, 10, 11));
+        assert!(!should_persist_best(11, 10, 12));
     }
 }

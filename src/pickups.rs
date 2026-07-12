@@ -40,10 +40,10 @@ use bevy::prelude::*;
 use bevy::text::FontSize;
 
 use crate::car::Car;
-use crate::game::events::CoinCollected;
-use crate::game::resources::{GameConfig, RoundActive, Score, TimeLeft};
-use crate::game::state::GameState;
 use crate::game::SpawnSet;
+use crate::game::events::CoinCollected;
+use crate::game::resources::{GameConfig, Score, TimeLeft};
+use crate::game::state::GameState;
 use crate::health::Health;
 use crate::world::Coin;
 
@@ -53,9 +53,11 @@ use crate::world::Coin;
 
 /// Radius (world units) around the car in which a power-up can spawn.
 const SPAWN_RADIUS: f32 = 25.0;
-/// Forward bias: power-ups spawn ahead of the car (it drives toward -Z), in a
+/// Forward bias: power-ups spawn ahead along the car's current heading, in a
 /// cone spanning ±`SPAWN_HALF_CONE` radians around the forward axis.
 const SPAWN_HALF_CONE: f32 = 0.7; // ~40°
+/// Reachable lateral half-width measured from the car, not world X.
+const SPAWN_LATERAL_RANGE: f32 = 22.0;
 /// Min/max seconds between power-up spawns (re-rolled each spawn).
 const SPAWN_INTERVAL_MIN: f32 = 8.0;
 const SPAWN_INTERVAL_MAX: f32 = 12.0;
@@ -123,6 +125,16 @@ pub struct SpeedBoostTimer(pub f32);
 /// Remaining seconds of active CoinMagnet (0 = inactive). Owned here.
 #[derive(Resource, Default)]
 pub struct MagnetTimer(pub f32);
+
+/// Cleanup-driven fresh-round latch, independent of `reset_run` ordering.
+#[derive(Resource)]
+struct PickupResetPending(bool);
+
+impl Default for PickupResetPending {
+    fn default() -> Self {
+        Self(true)
+    }
+}
 
 /// Shared mesh + per-kind emissive material handles for power-up orbs. Built
 /// once via `FromWorld` (resource-scoping `Assets<Mesh>` then
@@ -308,20 +320,14 @@ impl Plugin for PickupsPlugin {
             .init_resource::<PickupAudio>()
             .init_resource::<SpeedBoostTimer>()
             .init_resource::<MagnetTimer>()
-            // Fresh-round reset (skipped on resume from Paused). MUST run
-            // before `reset_run` flips `RoundActive` on, so it's placed in
-            // `SpawnSet` (which `reset_run` follows via `.after(SpawnSet)`).
-            .add_systems(
-                OnEnter(GameState::Playing),
-                reset_pickups.in_set(SpawnSet),
-            )
+            .init_resource::<PickupResetPending>()
+            // Fresh-round reset uses a cleanup-driven latch, so it remains
+            // correct whether `reset_run` runs before or after `SpawnSet`.
+            .add_systems(OnEnter(GameState::Playing), reset_pickups.in_set(SpawnSet))
             // UI lifecycle tied to the Playing state (despawned on exit so a
             // pause/resume cycle respawns it cleanly, like the HUD/health bar).
             .add_systems(OnEnter(GameState::Playing), spawn_powerup_ui)
-            .add_systems(
-                OnExit(GameState::Playing),
-                despawn_marker::<PowerUpUiRoot>,
-            )
+            .add_systems(OnExit(GameState::Playing), despawn_marker::<PowerUpUiRoot>)
             // Update gameplay systems (spawn / collect / effects / animation).
             .add_systems(
                 Update,
@@ -342,14 +348,8 @@ impl Plugin for PickupsPlugin {
             // so no separate OnExit cleanup is needed).
             .add_systems(Update, update_pickup_flash)
             // Clean up any lingering power-up orbs on round end / menu return.
-            .add_systems(
-                OnEnter(GameState::GameOver),
-                cleanup_pickups,
-            )
-            .add_systems(
-                OnEnter(GameState::Menu),
-                cleanup_pickups,
-            );
+            .add_systems(OnEnter(GameState::GameOver), cleanup_pickups)
+            .add_systems(OnEnter(GameState::Menu), cleanup_pickups);
     }
 }
 
@@ -392,7 +392,8 @@ fn spawn_pickup(
     }
 
     // Re-arm the timer with a fresh random interval.
-    state.timer = SPAWN_INTERVAL_MIN + rand(&mut state.seed) * (SPAWN_INTERVAL_MAX - SPAWN_INTERVAL_MIN);
+    state.timer =
+        SPAWN_INTERVAL_MIN + rand(&mut state.seed) * (SPAWN_INTERVAL_MAX - SPAWN_INTERVAL_MIN);
 
     // Cap active orbs (web-friendly). If at cap, skip this spawn window.
     if powerups.iter().count() >= MAX_ACTIVE_PICKUPS {
@@ -404,26 +405,12 @@ fn spawn_pickup(
     };
     let car_pos = car_t.translation;
 
-    // Forward axis (heading 0 => -Z). Apply the car's heading rotation to -Z
-    // for an exact forward vector (handles any heading).
-    let forward = car_t.rotation * Vec3::NEG_Z;
-
-    // Spawn somewhere in a cone AHEAD of the car (so it's reachable as the
-    // car drives forward toward -Z), at a distance within SPAWN_RADIUS.
+    // Spawn somewhere in a cone AHEAD of the car's current heading, then
+    // bound reachability in the car-relative lateral axis (never world X).
+    let forward = horizontal_forward(car_t.rotation);
     let angle = (rand(&mut state.seed) * 2.0 - 1.0) * SPAWN_HALF_CONE;
     let dist = SPAWN_RADIUS * (0.55 + rand(&mut state.seed) * 0.45); // 55..100% of radius
-    // Rotate the forward vector by `angle` about the Y axis.
-    let (sa, ca) = angle.sin_cos();
-    let dir = Vec3::new(
-        forward.x * ca - forward.z * sa,
-        0.0,
-        forward.x * sa + forward.z * ca,
-    )
-    .normalize_or_zero();
-    let pos = car_pos + dir * dist;
-    // Keep X within the drivable strip (the car clamps to ±24, so clamp the
-    // orb a touch tighter so it's always on the road/grass you can reach).
-    let pos = Vec3::new(pos.x.clamp(-22.0, 22.0), ORB_HOVER_Y, pos.z);
+    let pos = pickup_spawn_pos(car_pos, forward, angle, dist);
 
     // Weighted kind pick: Health ~10%, Time ~20%, MegaCoin ~15%,
     // SpeedBoost ~25%, CoinMagnet ~30%.
@@ -614,10 +601,7 @@ fn apply_coin_magnet(
 /// translation Y (gentle bob around the hover height, with a per-orb phase
 /// derived from its XZ position so multiple orbs don't bounce in lockstep).
 /// The orb + pedestal mesh children ride along with the root transform.
-fn animate_pickups(
-    mut powerups: Query<(&mut Transform, &PowerUp)>,
-    time: Res<Time>,
-) {
+fn animate_pickups(mut powerups: Query<(&mut Transform, &PowerUp)>, time: Res<Time>) {
     let t = time.elapsed_secs();
     for (mut tf, _power) in &mut powerups {
         // Spin around Y.
@@ -635,19 +619,19 @@ fn animate_pickups(
 // ===========================================================================
 
 /// Fresh-round reset: zero the effect timers and despawn any active power-up
-/// orbs (covers ALL `PowerUp` kinds). Skipped on resume from `Paused` (round
-/// still active), per the fresh-round rule (risk E11). Runs in `SpawnSet` so
-/// it precedes `reset_run`.
+/// orbs (covers ALL `PowerUp` kinds). The cleanup-driven latch skips pause
+/// resume and remains safe regardless of `reset_run` / `SpawnSet` ordering.
 fn reset_pickups(
     mut boost: ResMut<SpeedBoostTimer>,
     mut magnet: ResMut<MagnetTimer>,
     powerups: Query<Entity, With<PowerUp>>,
     mut commands: Commands,
-    round_active: Res<RoundActive>,
+    mut reset_pending: ResMut<PickupResetPending>,
 ) {
-    if round_active.0 {
+    if !reset_pending.0 {
         return;
     }
+    reset_pending.0 = false;
     boost.0 = 0.0;
     magnet.0 = 0.0;
     // `With<PowerUp>` matches every kind, so new kinds are covered for free.
@@ -664,6 +648,7 @@ fn cleanup_pickups(
     powerups: Query<Entity, With<PowerUp>>,
     mut boost: ResMut<SpeedBoostTimer>,
     mut magnet: ResMut<MagnetTimer>,
+    mut reset_pending: ResMut<PickupResetPending>,
 ) {
     // `With<PowerUp>` matches every kind, so new kinds are covered for free.
     for e in &powerups {
@@ -672,6 +657,7 @@ fn cleanup_pickups(
     // Also zero timers so no effect bleeds into the next round.
     boost.0 = 0.0;
     magnet.0 = 0.0;
+    reset_pending.0 = true;
 }
 
 /// Despawn every entity tagged with marker `M` (mirrors `ui.rs` / `health.rs`).
@@ -785,12 +771,18 @@ fn powerup_row(parent: &mut ChildSpawnerCommands, label: &str, color: Color, kin
             let fill_bg = BackgroundColor(color);
             match kind {
                 PowerKind::SpeedBoost => {
-                    row.spawn((track_node, track_bg))
-                        .with_child((fill_node, fill_bg, BoostBarFill));
+                    row.spawn((track_node, track_bg)).with_child((
+                        fill_node,
+                        fill_bg,
+                        BoostBarFill,
+                    ));
                 }
                 PowerKind::CoinMagnet => {
-                    row.spawn((track_node, track_bg))
-                        .with_child((fill_node, fill_bg, MagnetBarFill));
+                    row.spawn((track_node, track_bg)).with_child((
+                        fill_node,
+                        fill_bg,
+                        MagnetBarFill,
+                    ));
                 }
                 // Instant kinds: no timer bar. These arms are unreachable
                 // (no row is spawned for them) but keep the match exhaustive.
@@ -880,12 +872,7 @@ fn update_pickup_flash(
             continue;
         }
         let frac = (flash.t / PICKUP_FLASH_DURATION).clamp(0.0, 1.0);
-        bg.0 = Color::srgba(
-            flash.r,
-            flash.g,
-            flash.b,
-            PICKUP_FLASH_PEAK_ALPHA * frac,
-        );
+        bg.0 = Color::srgba(flash.r, flash.g, flash.b, PICKUP_FLASH_PEAK_ALPHA * frac);
     }
 }
 
@@ -943,9 +930,77 @@ fn pick_kind(r: f32) -> PowerKind {
     }
 }
 
+/// Horizontal unit forward for a car transform.
+fn horizontal_forward(rotation: Quat) -> Vec3 {
+    normalized_horizontal(rotation * Vec3::NEG_Z)
+}
+
+fn normalized_horizontal(direction: Vec3) -> Vec3 {
+    let horizontal = Vec3::new(direction.x, 0.0, direction.z);
+    if horizontal.length_squared() > f32::EPSILON {
+        horizontal.normalize()
+    } else {
+        Vec3::NEG_Z
+    }
+}
+
+/// Pure car-relative pickup placement. The cone always contributes a positive
+/// forward component, while lateral displacement is bounded around the car.
+fn pickup_spawn_pos(car_pos: Vec3, forward: Vec3, angle: f32, distance: f32) -> Vec3 {
+    let forward = normalized_horizontal(forward);
+    let right = Vec3::new(-forward.z, 0.0, forward.x);
+    let (sin, cos) = angle.clamp(-SPAWN_HALF_CONE, SPAWN_HALF_CONE).sin_cos();
+    let ahead = distance.max(0.0) * cos;
+    let lateral = (distance.max(0.0) * sin).clamp(-SPAWN_LATERAL_RANGE, SPAWN_LATERAL_RANGE);
+    let mut pos = car_pos + forward * ahead + right * lateral;
+    pos.y = ORB_HOVER_Y;
+    pos
+}
+
 /// Tiny LCG for deterministic-but-varied placement without pulling in `rand`
 /// (matches the `world.rs` / `chickens.rs` style).
 fn rand(seed: &mut u32) -> f32 {
     *seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
     (*seed as f32) / (u32::MAX as f32)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pickup_ahead_tracks_zero_ninety_and_one_eighty_degree_headings() {
+        let car_pos = Vec3::new(5.0, 0.0, 9.0);
+        let cases = [
+            (0.0, Vec3::new(5.0, ORB_HOVER_Y, -1.0)),
+            (
+                std::f32::consts::FRAC_PI_2,
+                Vec3::new(-5.0, ORB_HOVER_Y, 9.0),
+            ),
+            (std::f32::consts::PI, Vec3::new(5.0, ORB_HOVER_Y, 19.0)),
+        ];
+
+        for (yaw, expected) in cases {
+            let forward = horizontal_forward(Quat::from_rotation_y(yaw));
+            let actual = pickup_spawn_pos(car_pos, forward, 0.0, 10.0);
+            assert!(
+                (actual - expected).length() < 0.0001,
+                "{actual:?} != {expected:?}"
+            );
+            assert!((actual - car_pos).dot(forward) > 0.0);
+        }
+    }
+
+    #[test]
+    fn pickup_lateral_range_is_centered_on_car_not_world_x() {
+        let car_pos = Vec3::new(200.0, 0.0, -150.0);
+        let forward = horizontal_forward(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2));
+        let right = Vec3::new(-forward.z, 0.0, forward.x);
+        let pos = pickup_spawn_pos(car_pos, forward, SPAWN_HALF_CONE, 1_000.0);
+        let relative = pos - car_pos;
+
+        assert!((relative.dot(right) - SPAWN_LATERAL_RANGE).abs() < 0.0001);
+        assert!(relative.dot(forward) > 0.0);
+        assert!(pos.x.abs() > 22.0);
+    }
 }

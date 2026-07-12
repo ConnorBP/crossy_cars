@@ -11,14 +11,14 @@
 //!   handles for the chicken model and the hit particle burst (built together
 //!   via `resource_scope`, per risk E3).
 //! - `ChickensPlugin` — wires the spawn / wander / hit / particle / cleanup
-//!   systems. The fresh-round spawn runs inside `crate::game::SpawnSet` so it
-//!   executes before `reset_run` flips `RoundActive` (risk E11).
+//!   systems. Fresh-round spawn runs inside `crate::game::SpawnSet` and uses a
+//!   cleanup-driven latch so it is compatible with either reset ordering.
 //!
 //! Contracts honoured:
 //! - `ChickenHit` is already registered as a message in `game/mod.rs`; this
 //!   module only **writes** it via `MessageWriter` (never re-registers).
-//! - `spawn_chickens` runs `.in_set(SpawnSet)` and checks `RoundActive.0` to
-//!   skip on resume from `Paused`.
+//! - `spawn_chickens` runs `.in_set(SpawnSet)` and consumes a cleanup-driven
+//!   fresh-round latch, so pause/resume skips spawning regardless of reset order.
 //! - Shadows are gated by the directional light in `world.rs`; chicken
 //!   `StandardMaterial`s need no shadow config.
 
@@ -28,7 +28,7 @@ use std::f32::consts::TAU;
 use crate::car::Car;
 use crate::game::SpawnSet;
 use crate::game::events::ChickenHit;
-use crate::game::resources::{GameConfig, RoundActive, Score};
+use crate::game::resources::{GameConfig, Score};
 use crate::game::state::GameState;
 use crate::modifiers::ActiveModifier;
 
@@ -54,13 +54,12 @@ const HIT_RADIUS: f32 = 1.0;
 /// ahead) so the flock stays near the endless driver.
 const KEEP_RADIUS: f32 = 50.0;
 
-/// Chickens this far **behind** the car (in +Z) are recycled even if within
-/// `KEEP_RADIUS` — the car drives toward -Z, so a chicken at `z > car.z + 15`
-/// has been left behind.
+/// Chickens this far behind the car along its current heading are recycled
+/// even if they remain within `KEEP_RADIUS`.
 const BEHIND_THRESHOLD: f32 = 15.0;
 
-/// Recycled chickens respawn this many units ahead of the car (toward -Z),
-/// at a random offset within `[RESPAWN_AHEAD_MIN, RESPAWN_AHEAD_MIN + RANGE]`.
+/// Recycled chickens respawn this many units along the car's current forward
+/// axis, at a random offset within `[RESPAWN_AHEAD_MIN, ... + RANGE]`.
 const RESPAWN_AHEAD_MIN: f32 = 30.0;
 const RESPAWN_AHEAD_RANGE: f32 = 20.0;
 
@@ -69,9 +68,9 @@ const RESPAWN_AHEAD_RANGE: f32 = 20.0;
 const SCATTER_RADIUS: f32 = 40.0;
 const SCATTER_INNER: f32 = 5.0;
 
-/// X spread for scattered / respawned chickens (keeps them in the drivable
-/// corridor; the car's X clamp is ±24).
-const X_SPREAD: f32 = 22.0;
+/// Maximum lateral spread from the car's current position and heading for
+/// scattered / respawned chickens.
+const LATERAL_SPREAD: f32 = 22.0;
 
 /// Particle burst tuning (web-friendly: small, capped by natural despawn).
 const FEATHER_COUNT: usize = 8;
@@ -98,6 +97,18 @@ pub struct Chicken {
     pub dir: Vec3,
     pub timer: f32,
     pub bob: f32,
+}
+
+/// Set after round cleanup and consumed by the next fresh-round spawn. This
+/// remains reliable whether `reset_run` executes before or after `SpawnSet`,
+/// while pause/resume leaves it false.
+#[derive(Resource)]
+struct ChickenSpawnPending(bool);
+
+impl Default for ChickenSpawnPending {
+    fn default() -> Self {
+        Self(true)
+    }
 }
 
 /// The bob-animated body group of a chicken (parent of the body mesh, head,
@@ -259,9 +270,9 @@ pub struct ChickensPlugin;
 impl Plugin for ChickensPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ChickenAssets>()
-            // Fresh-round spawn: inside SpawnSet so it runs before reset_run
-            // flips RoundActive (risk E11). Checks RoundActive.0 to skip on
-            // resume from Paused.
+            .init_resource::<ChickenSpawnPending>()
+            // Fresh-round spawn: inside SpawnSet and guarded by a cleanup-
+            // driven latch, so reset ordering and pause/resume are both safe.
             .add_systems(OnEnter(GameState::Playing), spawn_chickens.in_set(SpawnSet))
             // Hit detection runs before wandering (chained — they share
             // Transform access on Chicken entities; ordering resolves the
@@ -294,33 +305,33 @@ impl Plugin for ChickensPlugin {
 // ---------------------------------------------------------------------------
 
 /// Fresh-round spawn: scatter the modifier-adjusted chicken target within
-/// radius `SCATTER_RADIUS` of the car. Runs in `SpawnSet` (before `reset_run`)
-/// and skips on resume from `Paused` (when `RoundActive.0` is already true).
+/// radius `SCATTER_RADIUS` of the car. Runs in `SpawnSet` and consumes the
+/// cleanup-driven fresh-round latch, so it is independent of reset ordering.
 fn spawn_chickens(
     mut commands: Commands,
     assets: Res<ChickenAssets>,
     modifier: Res<ActiveModifier>,
     car: Query<&Transform, (With<Car>, Without<Chicken>)>,
-    round_active: Res<RoundActive>,
+    mut spawn_pending: ResMut<ChickenSpawnPending>,
     mut seed: Local<u32>,
 ) {
-    if round_active.0 {
+    if !spawn_pending.0 {
         return;
     }
     ensure_seeded(&mut seed, 0x1234_5678);
     let Ok(car_t) = car.single() else {
         return;
     };
+    spawn_pending.0 = false;
     let car_pos = car_t.translation;
+    let forward = horizontal_forward(car_t.rotation);
 
     for _ in 0..effective_chicken_target(&modifier) {
         let angle = rand(&mut seed) * TAU;
         let radius = SCATTER_INNER + rand(&mut seed) * (SCATTER_RADIUS - SCATTER_INNER);
-        let pos = Vec3::new(
-            (car_pos.x + angle.cos() * radius).clamp(-X_SPREAD, X_SPREAD),
-            0.0,
-            car_pos.z + angle.sin() * radius,
-        );
+        let lateral = (angle.cos() * radius).clamp(-LATERAL_SPREAD, LATERAL_SPREAD);
+        let longitudinal = angle.sin() * radius;
+        let pos = car_relative_ground_pos(car_pos, forward, longitudinal, lateral);
         spawn_one_rich_chicken(
             &mut commands,
             &assets,
@@ -452,6 +463,7 @@ fn wander_chickens(
         return;
     };
     let car_pos = car_t.translation;
+    let car_forward = horizontal_forward(car_t.rotation);
     let dt = time.delta_secs();
     let speed = cfg.max_speed * CHICKEN_SPEED_RATIO;
 
@@ -471,11 +483,9 @@ fn wander_chickens(
         tf.rotation = Quat::from_rotation_y(heading);
 
         // --- Recycle chickens that fell behind or drifted too far away ---
-        let dist = tf.translation.distance(car_pos);
-        let behind = tf.translation.z > car_pos.z + BEHIND_THRESHOLD;
-        if dist > KEEP_RADIUS || behind {
+        if should_recycle(tf.translation, car_pos, car_forward) {
             commands.entity(e).despawn();
-            let new_pos = respawn_ahead_pos(car_pos, &mut seed);
+            let new_pos = respawn_ahead_pos(car_pos, car_forward, &mut seed);
             spawn_one_rich_chicken(
                 &mut commands,
                 &assets,
@@ -523,6 +533,7 @@ fn hit_chickens(
         return;
     };
     let car_pos = car_t.translation;
+    let car_forward = horizontal_forward(car_t.rotation);
     let hit_r2 = HIT_RADIUS * HIT_RADIUS;
 
     for (e, chicken_t) in &chickens {
@@ -536,7 +547,7 @@ fn hit_chickens(
             chicken_hits.write(ChickenHit);
             spawn_particle_burst(&mut commands, &assets, chicken_t.translation, &mut seed);
             // Respawn ahead so the player always has chickens to chase.
-            let new_pos = respawn_ahead_pos(car_pos, &mut seed);
+            let new_pos = respawn_ahead_pos(car_pos, car_forward, &mut seed);
             spawn_one_rich_chicken(
                 &mut commands,
                 &assets,
@@ -655,10 +666,15 @@ fn update_particles(
 // ---------------------------------------------------------------------------
 
 /// Despawn every chicken (recursive — nukes the mesh hierarchy, risk E2).
-fn cleanup_chickens(mut commands: Commands, chickens: Query<Entity, With<Chicken>>) {
+fn cleanup_chickens(
+    mut commands: Commands,
+    chickens: Query<Entity, With<Chicken>>,
+    mut spawn_pending: ResMut<ChickenSpawnPending>,
+) {
     for e in &chickens {
         commands.entity(e).despawn();
     }
+    spawn_pending.0 = true;
 }
 
 /// Despawn every lingering feather + puff particle.
@@ -703,13 +719,48 @@ fn rand_dir_xz(seed: &mut u32) -> Vec3 {
     Vec3::new(angle.cos(), 0.0, angle.sin())
 }
 
-/// A position ahead of the car (toward -Z, the driving direction) at a random
-/// distance within `[RESPAWN_AHEAD_MIN, RESPAWN_AHEAD_MIN + RANGE]`, with a
-/// random X offset inside the drivable corridor.
-fn respawn_ahead_pos(car_pos: Vec3, seed: &mut u32) -> Vec3 {
+/// Horizontal unit forward for a car transform. The fallback only matters for
+/// a malformed rotation that projects entirely onto Y.
+fn horizontal_forward(rotation: Quat) -> Vec3 {
+    normalized_horizontal(rotation * Vec3::NEG_Z)
+}
+
+fn normalized_horizontal(direction: Vec3) -> Vec3 {
+    let horizontal = Vec3::new(direction.x, 0.0, direction.z);
+    if horizontal.length_squared() > f32::EPSILON {
+        horizontal.normalize()
+    } else {
+        Vec3::NEG_Z
+    }
+}
+
+/// Place a point in the car's heading-relative frame. Positive `ahead` follows
+/// forward and positive `lateral` follows local +X (the car's right side).
+fn car_relative_ground_pos(car_pos: Vec3, forward: Vec3, ahead: f32, lateral: f32) -> Vec3 {
+    let forward = normalized_horizontal(forward);
+    let right = Vec3::new(-forward.z, 0.0, forward.x);
+    let mut pos =
+        car_pos + forward * ahead + right * lateral.clamp(-LATERAL_SPREAD, LATERAL_SPREAD);
+    pos.y = 0.0;
+    pos
+}
+
+/// Whether a point has fallen behind the car along the car's current heading.
+fn is_behind_car(pos: Vec3, car_pos: Vec3, car_forward: Vec3) -> bool {
+    (pos - car_pos).dot(normalized_horizontal(car_forward)) < -BEHIND_THRESHOLD
+}
+
+/// Keep/recycle decision expressed entirely in the car's current frame.
+fn should_recycle(pos: Vec3, car_pos: Vec3, car_forward: Vec3) -> bool {
+    pos.distance(car_pos) > KEEP_RADIUS || is_behind_car(pos, car_pos, car_forward)
+}
+
+/// A position ahead of the car at a random forward distance and a random
+/// car-relative lateral offset centered on the car.
+fn respawn_ahead_pos(car_pos: Vec3, car_forward: Vec3, seed: &mut u32) -> Vec3 {
     let ahead = RESPAWN_AHEAD_MIN + rand(seed) * RESPAWN_AHEAD_RANGE;
-    let x = (rand(seed) * 2.0 - 1.0) * X_SPREAD;
-    Vec3::new(x, 0.0, car_pos.z - ahead)
+    let lateral = (rand(seed) * 2.0 - 1.0) * LATERAL_SPREAD;
+    car_relative_ground_pos(car_pos, car_forward, ahead, lateral)
 }
 
 /// Seed a `Local<u32>` RNG on first use with a per-system constant so the three
@@ -746,5 +797,46 @@ mod tests {
         assert_eq!(chicken_score_per_hit(&standard), 1);
         assert_eq!(chicken_score_per_hit(&frenzy), 2);
         assert_eq!(chicken_score_per_hit(&glass_cannon), 1);
+    }
+
+    #[test]
+    fn ahead_placement_tracks_zero_ninety_and_one_eighty_degree_headings() {
+        let origin = Vec3::new(7.0, 3.0, -4.0);
+        let cases = [
+            (0.0, Vec3::new(7.0, 0.0, -14.0)),
+            (std::f32::consts::FRAC_PI_2, Vec3::new(-3.0, 0.0, -4.0)),
+            (std::f32::consts::PI, Vec3::new(7.0, 0.0, 6.0)),
+        ];
+
+        for (yaw, expected) in cases {
+            let forward = horizontal_forward(Quat::from_rotation_y(yaw));
+            let actual = car_relative_ground_pos(origin, forward, 10.0, 0.0);
+            assert!(
+                (actual - expected).length() < 0.0001,
+                "{actual:?} != {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn lateral_placement_is_car_relative_and_bounded() {
+        let car_pos = Vec3::new(100.0, 0.0, -80.0);
+        let forward = horizontal_forward(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2));
+        let right = Vec3::new(-forward.z, 0.0, forward.x);
+        let pos = car_relative_ground_pos(car_pos, forward, 12.0, LATERAL_SPREAD * 3.0);
+        let relative = pos - car_pos;
+
+        assert!((relative.dot(right) - LATERAL_SPREAD).abs() < 0.0001);
+        assert!((relative.dot(forward) - 12.0).abs() < 0.0001);
+    }
+
+    #[test]
+    fn behind_check_uses_the_current_heading() {
+        let car_pos = Vec3::new(20.0, 0.0, 30.0);
+        let east = Vec3::X;
+
+        assert!(is_behind_car(car_pos - east * 16.0, car_pos, east));
+        assert!(!is_behind_car(car_pos + east * 16.0, car_pos, east));
+        assert!(!is_behind_car(car_pos + Vec3::Z * 40.0, car_pos, east));
     }
 }
