@@ -1,10 +1,65 @@
-use bevy::audio::{AudioSink, AudioPlayer, AudioSource, PlaybackSettings, Volume};
+use bevy::audio::{
+    AudioPlayer, AudioSink, AudioSinkPlayback, AudioSource, GlobalVolume, PlaybackSettings,
+    SpatialAudioSink, Volume,
+};
 use bevy::prelude::*;
 
 use crate::car::Car;
 use crate::game::events::{ChickenHit, CoinCollected};
 use crate::game::resources::GameConfig;
 use crate::game::state::GameState;
+
+/// Web persistence key for the user's mute preference.
+#[cfg(target_arch = "wasm32")]
+const MUTE_STORAGE_KEY: &str = "roady_car_audio_muted";
+
+/// Global audio preferences. `master` is always exposed through a clamped
+/// accessor so an invalid value can never reach Bevy's global mixer.
+#[derive(Resource, Debug)]
+pub struct AudioSettings {
+    muted: bool,
+    master: f32,
+}
+
+impl Default for AudioSettings {
+    fn default() -> Self {
+        Self {
+            muted: false,
+            master: 1.0,
+        }
+    }
+}
+
+impl AudioSettings {
+    /// Whether all game audio is currently muted.
+    pub fn muted(&self) -> bool {
+        self.muted
+    }
+
+    /// Master gain in the inclusive 0..=1 range.
+    pub fn master(&self) -> f32 {
+        clamp_master(self.master)
+    }
+
+    /// Set the master gain, clamping out-of-range input.
+    pub fn set_master(&mut self, master: f32) {
+        self.master = clamp_master(master);
+    }
+
+    /// Linear gain that should currently reach the global mixer.
+    fn effective_volume(&self) -> f32 {
+        if self.muted { 0.0 } else { self.master() }
+    }
+}
+
+/// Clamp master gain and give nonsensical NaN input a safe, audible default.
+fn clamp_master(master: f32) -> f32 {
+    if master.is_nan() {
+        1.0
+    } else {
+        master.clamp(0.0, 1.0)
+    }
+}
 
 /// Handles for every sound effect plus the looping engine + ambient sources.
 /// Loaded once at startup so gameplay systems can fire them without
@@ -39,17 +94,153 @@ pub struct AudioPlugin;
 
 impl Plugin for AudioPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<AudioHandles>()
+        app.init_resource::<AudioSettings>()
+            .init_resource::<AudioHandles>()
+            // Load the persisted preference before gameplay can create audio.
+            .add_systems(Startup, initialize_audio_settings)
             .add_systems(
                 Update,
-                (play_hit, play_coin, update_engine.run_if(in_state(GameState::Playing))),
+                (
+                    play_hit,
+                    play_coin,
+                    // Both systems touch sinks. Chaining them and placing them
+                    // before the engine writer makes the access order explicit
+                    // and avoids a mutable AudioSink scheduling conflict.
+                    (toggle_mute, sync_new_audio_sinks)
+                        .chain()
+                        .before(update_engine),
+                    update_engine.run_if(in_state(GameState::Playing)),
+                ),
             )
             .add_systems(
                 OnEnter(GameState::Playing),
                 (spawn_engine, spawn_ambient, play_click),
             )
-            .add_systems(OnExit(GameState::Playing), (cleanup_engine, cleanup_ambient))
+            .add_systems(
+                OnExit(GameState::Playing),
+                (cleanup_engine, cleanup_ambient),
+            )
             .add_systems(OnEnter(GameState::Menu), play_click);
+    }
+}
+
+/// Load the persistent mute bit and configure Bevy's mixer. GlobalVolume is
+/// deliberately kept at either silence or the master gain so every one-shot
+/// spawned anywhere in the game inherits the setting automatically.
+fn initialize_audio_settings(
+    mut settings: ResMut<AudioSettings>,
+    mut global_volume: ResMut<GlobalVolume>,
+) {
+    settings.muted = load_muted();
+    apply_global_volume(&settings, &mut global_volume);
+}
+
+/// Toggle mute in every game state. GlobalVolume controls future playback;
+/// existing sinks must also be toggled because Bevy 0.19 does not retroactively
+/// apply GlobalVolume changes to sounds that are already playing.
+fn toggle_mute(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut settings: ResMut<AudioSettings>,
+    mut global_volume: ResMut<GlobalVolume>,
+    mut sinks: Query<(&mut AudioSink, Option<&AmbientSound>)>,
+    mut spatial_sinks: Query<&mut SpatialAudioSink>,
+) {
+    if !keys.just_pressed(KeyCode::KeyM) {
+        return;
+    }
+
+    settings.muted = !settings.muted;
+    apply_global_volume(&settings, &mut global_volume);
+
+    for (mut sink, ambient) in &mut sinks {
+        apply_sink_mute(&mut *sink, settings.muted);
+        // A loop first created while persistently muted captured a silent
+        // GlobalVolume. Restore its local gain when it is made audible; the
+        // engine's dynamic local gain is restored by `update_engine` below.
+        if !settings.muted && ambient.is_some() {
+            sink.set_volume(Volume::Linear(AMBIENT_VOLUME * settings.master()));
+        }
+    }
+    for mut sink in &mut spatial_sinks {
+        apply_sink_mute(&mut *sink, settings.muted);
+    }
+
+    save_muted(settings.muted);
+}
+
+/// Audio sinks are inserted asynchronously after an AudioPlayer is spawned.
+/// Applying the current state to newly inserted sinks keeps loops (notably the
+/// speed-driven engine) muted even when they are created after M was pressed
+/// or when the app starts with a persisted mute preference.
+fn sync_new_audio_sinks(
+    settings: Res<AudioSettings>,
+    mut sinks: Query<&mut AudioSink, Added<AudioSink>>,
+    mut spatial_sinks: Query<&mut SpatialAudioSink, Added<SpatialAudioSink>>,
+) {
+    for mut sink in &mut sinks {
+        apply_sink_mute(&mut *sink, settings.muted);
+    }
+    for mut sink in &mut spatial_sinks {
+        apply_sink_mute(&mut *sink, settings.muted);
+    }
+}
+
+fn apply_global_volume(settings: &AudioSettings, global_volume: &mut GlobalVolume) {
+    let effective = settings.effective_volume();
+    global_volume.volume = if settings.muted {
+        Volume::SILENT
+    } else {
+        Volume::Linear(effective)
+    };
+}
+
+fn apply_sink_mute(sink: &mut impl AudioSinkPlayback, muted: bool) {
+    if muted {
+        sink.mute();
+    } else {
+        sink.unmute();
+    }
+}
+
+/// Load the web mute preference. Missing, inaccessible, or malformed storage
+/// is treated as unmuted. Native persistence is intentionally optional here.
+fn load_muted() -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let Some(window) = web_sys::window() else {
+            return false;
+        };
+        let Ok(Some(storage)) = window.local_storage() else {
+            return false;
+        };
+        storage
+            .get_item(MUTE_STORAGE_KEY)
+            .ok()
+            .flatten()
+            .and_then(|value| value.parse::<bool>().ok())
+            .unwrap_or(false)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        false
+    }
+}
+
+/// Persist the web mute preference, ignoring storage/privacy errors.
+fn save_muted(muted: bool) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+        let Ok(Some(storage)) = window.local_storage() else {
+            return;
+        };
+        let _ = storage.set_item(MUTE_STORAGE_KEY, if muted { "true" } else { "false" });
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = muted;
     }
 }
 
@@ -134,7 +325,7 @@ fn spawn_engine(mut commands: Commands, handles: Res<AudioHandles>) {
 fn spawn_ambient(mut commands: Commands, handles: Res<AudioHandles>) {
     commands.spawn((
         AudioPlayer::new(handles.ambient.clone()),
-        PlaybackSettings::LOOP.with_volume(Volume::Linear(0.12)),
+        PlaybackSettings::LOOP.with_volume(Volume::Linear(AMBIENT_VOLUME)),
         AmbientSound,
     ));
 }
@@ -169,6 +360,7 @@ const ENGINE_IDLE_RATE: f32 = 0.8;
 const ENGINE_MAX_RATE: f32 = 1.8;
 const ENGINE_IDLE_VOL: f32 = 0.18;
 const ENGINE_MAX_VOL: f32 = 0.42;
+const AMBIENT_VOLUME: f32 = 0.12;
 /// Exponential-lerp time constant for smoothing (seconds). Larger = sluggish,
 /// smaller = snappy. ~0.12s tracks the car's eased speed without lagging or
 /// popping.
@@ -183,6 +375,7 @@ fn update_engine(
     car: Query<&Car>,
     cfg: Res<GameConfig>,
     time: Res<Time>,
+    settings: Res<AudioSettings>,
     mut engine: Query<(&mut AudioSink, &mut EngineSound)>,
 ) {
     let Ok(car) = car.single() else {
@@ -208,6 +401,41 @@ fn update_engine(
         // `set_speed` takes `&self`, `set_volume` takes `&mut self` — the
         // `&mut AudioSink` satisfies both.
         sink.set_speed(eng.smooth_rate);
-        sink.set_volume(Volume::Linear(eng.smooth_vol));
+        // GlobalVolume is captured when playback starts, while this local
+        // volume is rewritten each frame. Include master here so the dynamic
+        // engine loop continues to respect the configured master gain.
+        sink.set_volume(Volume::Linear(eng.smooth_vol * settings.master()));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn master_volume_is_clamped() {
+        let mut settings = AudioSettings::default();
+        assert!(!settings.muted());
+        assert_eq!(settings.master(), 1.0);
+
+        settings.set_master(1.5);
+        assert_eq!(settings.master(), 1.0);
+
+        settings.set_master(-0.25);
+        assert_eq!(settings.master(), 0.0);
+
+        settings.set_master(f32::NAN);
+        assert_eq!(settings.master(), 1.0);
+    }
+
+    #[test]
+    fn mute_controls_effective_volume_without_losing_master() {
+        let mut settings = AudioSettings::default();
+        settings.set_master(0.35);
+        assert_eq!(settings.effective_volume(), 0.35);
+
+        settings.muted = true;
+        assert_eq!(settings.effective_volume(), 0.0);
+        assert_eq!(settings.master(), 0.35);
     }
 }

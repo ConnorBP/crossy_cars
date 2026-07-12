@@ -4,6 +4,43 @@ use crate::car::Car;
 use crate::game::resources::{GameOverReason, Score, TimeLeft};
 use crate::game::state::GameState;
 use crate::palette;
+use crate::persist::BestAtRoundStart;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TimerUrgency {
+    Normal,
+    Urgent,
+    Critical,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TimerStyle {
+    urgency: TimerUrgency,
+    alpha: f32,
+}
+
+/// Pure countdown styling: the last ten seconds pulse red, with the final
+/// five pulsing twice as fast. No entities or effects are spawned.
+fn timer_style(remaining: f32, elapsed: f32) -> TimerStyle {
+    let (urgency, pulse_hz) = if remaining > 10.0 {
+        (TimerUrgency::Normal, 0.0)
+    } else if remaining > 5.0 {
+        (TimerUrgency::Urgent, 2.0)
+    } else {
+        (TimerUrgency::Critical, 4.0)
+    };
+    let alpha = if urgency == TimerUrgency::Normal {
+        1.0
+    } else {
+        let wave = (elapsed * pulse_hz * std::f32::consts::TAU).sin();
+        0.725 + 0.275 * wave
+    };
+    TimerStyle { urgency, alpha }
+}
+
+fn is_new_best(total: u32, best_at_round_start: u32) -> bool {
+    total > best_at_round_start
+}
 
 // --- UI root markers ---
 #[derive(Component)]
@@ -43,10 +80,7 @@ impl Plugin for UiPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(OnEnter(GameState::Menu), spawn_menu)
             .add_systems(OnExit(GameState::Menu), despawn_marker::<MenuRoot>)
-            .add_systems(
-                OnEnter(GameState::Playing),
-                (spawn_hud, spawn_hint),
-            )
+            .add_systems(OnEnter(GameState::Playing), (spawn_hud, spawn_hint))
             .add_systems(
                 OnExit(GameState::Playing),
                 (despawn_marker::<HudRoot>, despawn_marker::<HintRoot>),
@@ -54,10 +88,7 @@ impl Plugin for UiPlugin {
             .add_systems(OnEnter(GameState::Paused), spawn_pause)
             .add_systems(OnExit(GameState::Paused), despawn_marker::<PauseRoot>)
             .add_systems(OnEnter(GameState::GameOver), spawn_gameover)
-            .add_systems(
-                OnExit(GameState::GameOver),
-                despawn_marker::<GameOverRoot>,
-            )
+            .add_systems(OnExit(GameState::GameOver), despawn_marker::<GameOverRoot>)
             .add_systems(
                 Update,
                 (
@@ -197,45 +228,43 @@ fn spawn_hud(mut commands: Commands) {
                 },
             ));
             // Big digital speed (40px accent) + smaller " u/s" unit, laid out inline.
-            p.spawn((
-                Node {
-                    flex_direction: FlexDirection::Row,
-                    align_items: AlignItems::End,
-                    margin: UiRect::bottom(px(6.0)),
-                    ..default()
-                },
-            ))
-            .with_children(|s| {
-                s.spawn((
-                    Text::new(""),
-                    TextFont {
-                        font_size: FontSize::Px(40.0),
-                        ..default()
-                    },
-                    TextColor(palette::HUD_ACCENT.into()),
-                ))
-                .with_child((
-                    TextSpan::default(),
-                    TextFont {
-                        font_size: FontSize::Px(40.0),
-                        ..default()
-                    },
-                    TextColor(palette::HUD_ACCENT.into()),
-                    SpeedText,
-                ));
-                s.spawn((
-                    Text::new(" u/s"),
-                    TextFont {
-                        font_size: FontSize::Px(20.0),
-                        ..default()
-                    },
-                    TextColor(palette::HUD_TEXT.into()),
-                    Node {
-                        margin: UiRect::left(px(4.0)),
-                        ..default()
-                    },
-                ));
-            });
+            p.spawn((Node {
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::End,
+                margin: UiRect::bottom(px(6.0)),
+                ..default()
+            },))
+                .with_children(|s| {
+                    s.spawn((
+                        Text::new(""),
+                        TextFont {
+                            font_size: FontSize::Px(40.0),
+                            ..default()
+                        },
+                        TextColor(palette::HUD_ACCENT.into()),
+                    ))
+                    .with_child((
+                        TextSpan::default(),
+                        TextFont {
+                            font_size: FontSize::Px(40.0),
+                            ..default()
+                        },
+                        TextColor(palette::HUD_ACCENT.into()),
+                        SpeedText,
+                    ));
+                    s.spawn((
+                        Text::new(" u/s"),
+                        TextFont {
+                            font_size: FontSize::Px(20.0),
+                            ..default()
+                        },
+                        TextColor(palette::HUD_TEXT.into()),
+                        Node {
+                            margin: UiRect::left(px(4.0)),
+                            ..default()
+                        },
+                    ));
+                });
             // Gear / direction line
             p.spawn((
                 Text::new("GEAR "),
@@ -434,7 +463,7 @@ fn spawn_pause(mut commands: Commands) {
                 },
             ));
             p.spawn((
-                Text::new("ESC to resume"),
+                Text::new("ESC  Resume  •  R  Restart  •  Q  Menu"),
                 TextFont {
                     font_size: FontSize::Px(26.0),
                     ..default()
@@ -444,8 +473,19 @@ fn spawn_pause(mut commands: Commands) {
         });
 }
 
-fn spawn_gameover(mut commands: Commands, score: Res<Score>, reason: Res<GameOverReason>) {
+fn spawn_gameover(
+    mut commands: Commands,
+    score: Res<Score>,
+    reason: Res<GameOverReason>,
+    best_at_start: Res<BestAtRoundStart>,
+) {
     let total = score.chickens + score.coins;
+    let new_best = is_new_best(total, best_at_start.0);
+    let best_summary = if new_best {
+        "NEW BEST".to_string()
+    } else {
+        format!("BEST: {}", best_at_start.0)
+    };
     let title = match *reason {
         GameOverReason::Wrecked => "Wrecked!",
         GameOverReason::TimeUp => "Time's up!",
@@ -531,9 +571,27 @@ fn spawn_gameover(mut commands: Commands, score: Res<Score>, reason: Res<GameOve
                     ..default()
                 },
             ));
+            // Record status uses the pre-round snapshot, not the BestScore
+            // resource that may already have been updated during this run.
+            p.spawn((
+                Text::new(best_summary),
+                TextFont {
+                    font_size: FontSize::Px(26.0),
+                    ..default()
+                },
+                TextColor(if new_best {
+                    palette::HUD_ACCENT.into()
+                } else {
+                    palette::HUD_TEXT.into()
+                }),
+                Node {
+                    margin: UiRect::bottom(px(28.0)),
+                    ..default()
+                },
+            ));
             // Restart / menu prompt
             p.spawn((
-                Text::new("ENTER to play again  •  ESC for menu"),
+                Text::new("R / ENTER / SPACE to play again  •  Q / ESC for menu"),
                 TextFont {
                     font_size: FontSize::Px(22.0),
                     ..default()
@@ -580,10 +638,7 @@ fn update_score_text(score: Res<Score>, mut query: Query<&mut TextSpan, With<Sco
     }
 }
 
-fn update_chickens_text(
-    score: Res<Score>,
-    mut query: Query<&mut TextSpan, With<ChickensText>>,
-) {
+fn update_chickens_text(score: Res<Score>, mut query: Query<&mut TextSpan, With<ChickensText>>) {
     for mut span in &mut query {
         **span = format!("{}", score.chickens);
     }
@@ -595,12 +650,22 @@ fn update_coins_text(score: Res<Score>, mut query: Query<&mut TextSpan, With<Coi
     }
 }
 
-fn update_timer_text(timeleft: Res<TimeLeft>, mut query: Query<&mut TextSpan, With<TimerText>>) {
+fn update_timer_text(
+    timeleft: Res<TimeLeft>,
+    time: Res<Time>,
+    mut query: Query<(&mut TextSpan, &mut TextColor), With<TimerText>>,
+) {
     let t = timeleft.0.max(0.0);
     let mins = (t / 60.0).floor() as u32;
     let secs = (t % 60.0).floor() as u32;
-    for mut span in &mut query {
+    let style = timer_style(t, time.elapsed_secs());
+    let color = match style.urgency {
+        TimerUrgency::Normal => palette::HUD_ACCENT.into(),
+        TimerUrgency::Urgent | TimerUrgency::Critical => Color::srgba(1.0, 0.08, 0.08, style.alpha),
+    };
+    for (mut span, mut text_color) in &mut query {
         **span = format!("{}:{:02}", mins, secs);
+        text_color.0 = color;
     }
 }
 
@@ -610,5 +675,32 @@ fn update_hint(mut commands: Commands, time: Res<Time>, mut q: Query<(Entity, &m
         if hint.t <= 0.0 {
             commands.entity(e).despawn();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TimerUrgency, is_new_best, timer_style};
+
+    #[test]
+    fn timer_urgency_has_inclusive_thresholds_and_faster_final_pulse() {
+        let normal = timer_style(10.01, 0.0);
+        let urgent = timer_style(10.0, 0.0625);
+        let critical = timer_style(5.0, 0.0625);
+
+        assert_eq!(normal.urgency, TimerUrgency::Normal);
+        assert_eq!(normal.alpha, 1.0);
+        assert_eq!(urgent.urgency, TimerUrgency::Urgent);
+        assert_eq!(critical.urgency, TimerUrgency::Critical);
+        // At the same early instant the 4 Hz critical wave is further
+        // through its cycle than the 2 Hz urgent wave.
+        assert!(critical.alpha > urgent.alpha);
+    }
+
+    #[test]
+    fn new_best_requires_strict_improvement() {
+        assert!(is_new_best(11, 10));
+        assert!(!is_new_best(10, 10));
+        assert!(!is_new_best(9, 10));
     }
 }

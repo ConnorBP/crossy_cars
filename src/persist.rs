@@ -21,6 +21,13 @@ const FILE_PATH: &str = "best_score.txt";
 #[derive(Resource, Default)]
 pub struct BestScore(pub u32);
 
+/// The persisted best as it stood when the current round began.
+///
+/// This snapshot lets the game-over UI identify a record even though
+/// [`BestScore`] is updated continuously while the round is being played.
+#[derive(Resource, Default)]
+pub struct BestAtRoundStart(pub u32);
+
 /// Marker for the best-score UI root node (never despawned).
 #[derive(Component)]
 struct BestScoreRoot;
@@ -33,10 +40,8 @@ pub struct PersistPlugin;
 impl Plugin for PersistPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<BestScore>()
-            .add_systems(
-                Startup,
-                (load_best_score, spawn_best_score_ui).chain(),
-            )
+            .init_resource::<BestAtRoundStart>()
+            .add_systems(Startup, (load_best_score, spawn_best_score_ui).chain())
             // Runs every frame in every state; cheap (one u32 add + compare)
             // and only writes to storage when a new record is set, so it
             // reliably catches the final score at its peak.

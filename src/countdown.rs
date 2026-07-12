@@ -7,24 +7,107 @@
 //! GameOver, where `end_round` reset `RoundActive` to false); resuming from
 //! `Paused` skips it because `RoundActive` is still true there.
 
-use bevy::{prelude::*, text::FontSize};
+use bevy::{
+    audio::{AudioPlayer, AudioSource, PlaybackSettings, Volume},
+    prelude::*,
+    text::FontSize,
+};
 
 use crate::car::InputFrozen;
+use crate::game::SpawnSet;
 use crate::game::resources::RoundActive;
 use crate::game::state::GameState;
-use crate::game::SpawnSet;
 use crate::palette;
 
-/// Remaining seconds in the countdown (3.0 → 0.0). While `t > 0` the car is
-/// frozen and the overlay is visible; when `t` hits 0 the car is released.
+const PUNCH_DURATION: f32 = 0.2;
+const BASE_FONT_SIZE: f32 = 96.0;
+const PUNCH_FONT_SIZE: f32 = 128.0;
+const BEEP_VOLUME: f32 = 0.45;
+
+/// A cue is recorded in the resource rather than in system-local state so a
+/// fresh round and every cleanup can reset transition tracking explicitly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CountdownCue {
+    Three,
+    Two,
+    One,
+    Go,
+}
+
+impl CountdownCue {
+    fn index(self) -> u8 {
+        match self {
+            Self::Three => 0,
+            Self::Two => 1,
+            Self::One => 2,
+            Self::Go => 3,
+        }
+    }
+
+    fn from_index(index: u8) -> Option<Self> {
+        match index {
+            0 => Some(Self::Three),
+            1 => Some(Self::Two),
+            2 => Some(Self::One),
+            3 => Some(Self::Go),
+            _ => None,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Three => "3",
+            Self::Two => "2",
+            Self::One => "1",
+            Self::Go => "GO!",
+        }
+    }
+
+    fn speed(self) -> f32 {
+        match self {
+            Self::Three => 0.8,
+            Self::Two => 1.0,
+            Self::One => 1.2,
+            Self::Go => 1.6,
+        }
+    }
+}
+
+/// Remaining seconds in the countdown (3.0 → 0.0), together with explicit
+/// per-round visual/audio transition state. The overlay remains for the short
+/// GO punch after `t` reaches zero, while input is released immediately.
 #[derive(Resource)]
 pub struct Countdown {
     pub t: f32,
+    active: bool,
+    last_cue: Option<CountdownCue>,
+    punch_remaining: f32,
 }
 
 impl Default for Countdown {
     fn default() -> Self {
-        Self { t: 3.0 }
+        Self {
+            t: 0.0,
+            active: false,
+            last_cue: None,
+            punch_remaining: 0.0,
+        }
+    }
+}
+
+/// Countdown owns its click handle so it does not depend on the resources in
+/// `audio.rs`. Bevy's audio mixer still applies `GlobalVolume` automatically.
+#[derive(Resource)]
+struct CountdownAudio {
+    click: Handle<AudioSource>,
+}
+
+impl FromWorld for CountdownAudio {
+    fn from_world(world: &mut World) -> Self {
+        let asset_server = world.resource::<AssetServer>();
+        Self {
+            click: asset_server.load("audio/click.wav"),
+        }
     }
 }
 
@@ -41,6 +124,7 @@ pub struct CountdownPlugin;
 impl Plugin for CountdownPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Countdown>()
+            .init_resource::<CountdownAudio>()
             // Start (or skip) the countdown on entering Playing. Runs inside
             // SpawnSet so it executes BEFORE reset_run flips RoundActive on
             // (risk E11). The RoundActive.0 check skips resume-from-Paused.
@@ -53,15 +137,9 @@ impl Plugin for CountdownPlugin {
             // when resuming from Paused (OnExit(Paused) fires instead), so a
             // stale overlay can't linger and the car can't get stuck frozen
             // if a transition happens mid-countdown.
-            .add_systems(
-                OnExit(GameState::Playing),
-                cleanup_countdown,
-            )
+            .add_systems(OnExit(GameState::Playing), cleanup_countdown)
             // Tick the countdown down each frame while Playing.
-            .add_systems(
-                Update,
-                tick_countdown.run_if(in_state(GameState::Playing)),
-            );
+            .add_systems(Update, tick_countdown.run_if(in_state(GameState::Playing)));
     }
 }
 
@@ -79,8 +157,12 @@ fn start_countdown(
     if round_active.0 {
         return;
     }
-    // Fresh round: arm the countdown, freeze input, spawn the overlay.
+    // Fresh round: arm and explicitly reset every piece of transition state,
+    // freeze input, then spawn the overlay.
     countdown.t = 3.0;
+    countdown.active = true;
+    countdown.last_cue = None;
+    countdown.punch_remaining = 0.0;
     input_frozen.0 = true;
     spawn_countdown_overlay(&mut commands);
 }
@@ -109,7 +191,7 @@ fn spawn_countdown_overlay(commands: &mut Commands) {
             p.spawn((
                 Text::new(""),
                 TextFont {
-                    font_size: FontSize::Px(96.0),
+                    font_size: FontSize::Px(BASE_FONT_SIZE),
                     ..default()
                 },
                 TextColor(palette::HUD_ACCENT.into()),
@@ -117,7 +199,7 @@ fn spawn_countdown_overlay(commands: &mut Commands) {
             .with_child((
                 TextSpan::new("3"),
                 TextFont {
-                    font_size: FontSize::Px(96.0),
+                    font_size: FontSize::Px(BASE_FONT_SIZE),
                     ..default()
                 },
                 TextColor(palette::HUD_ACCENT.into()),
@@ -126,50 +208,94 @@ fn spawn_countdown_overlay(commands: &mut Commands) {
         });
 }
 
-/// Decrement the countdown, update the overlay text to "3" / "2" / "GO!",
-/// and when it reaches zero release the car (`InputFrozen = false`) and
-/// despawn the overlay. Early-returns when no countdown is active so this
-/// is a no-op during normal gameplay (after the countdown finishes) and on
-/// resume-from-Paused (where `start_countdown` skipped).
-///
-/// Text mapping (t starts at 3.0 and decrements):
-/// - `t` in `(2, 3]` → "3"   (first second)
-/// - `t` in `(1, 2]` → "2"   (second second)
-/// - `t` in `(0, 1]` → "GO!" (final second, per the task spec)
+/// Return the cue represented by a remaining-time value. Boundaries belong
+/// to the newly-entered cue, so exactly 2.0 means "2" and 0.0 means "GO".
+fn cue_for_remaining(t: f32) -> CountdownCue {
+    if t > 2.0 {
+        CountdownCue::Three
+    } else if t > 1.0 {
+        CountdownCue::Two
+    } else if t > 0.0 {
+        CountdownCue::One
+    } else {
+        CountdownCue::Go
+    }
+}
+
+/// Find the next not-yet-emitted cue up to `target`. Advancing one cue at a
+/// time makes transition handling robust to a long frame crossing multiple
+/// boundaries: each of 3, 2, 1, and GO is still emitted at most once.
+fn next_cue(last: Option<CountdownCue>, target: CountdownCue) -> Option<CountdownCue> {
+    let next_index = last.map_or(0, |cue| cue.index() + 1);
+    (next_index <= target.index())
+        .then(|| CountdownCue::from_index(next_index))
+        .flatten()
+}
+
+fn punch_strength(remaining: f32) -> f32 {
+    (remaining / PUNCH_DURATION).clamp(0.0, 1.0)
+}
+
+/// Advance 3 → 2 → 1 → GO, emitting one pitched click and restarting the
+/// short text punch on each transition. GO releases gameplay immediately;
+/// its overlay remains only long enough to finish the punch.
 fn tick_countdown(
     mut commands: Commands,
     time: Res<Time>,
+    audio: Res<CountdownAudio>,
     mut countdown: ResMut<Countdown>,
     mut input_frozen: ResMut<InputFrozen>,
     overlay: Query<Entity, With<CountdownRoot>>,
-    mut text: Query<&mut TextSpan, With<CountdownText>>,
+    mut text: Query<(&mut TextSpan, &mut TextFont, &mut TextColor), With<CountdownText>>,
 ) {
     // No active countdown — nothing to tick (normal gameplay or resume).
-    if countdown.t <= 0.0 {
+    if !countdown.active {
         return;
     }
-    countdown.t -= time.delta_secs();
 
-    if countdown.t <= 0.0 {
-        // Release the car + round timer; remove the overlay.
-        countdown.t = 0.0;
-        input_frozen.0 = false;
-        for e in &overlay {
-            commands.entity(e).despawn();
+    let dt = time.delta_secs();
+    countdown.t = (countdown.t - dt).max(0.0);
+    let target = cue_for_remaining(countdown.t);
+    let mut transitioned = false;
+
+    // Usually this loop runs zero or one time. It can run several times after
+    // a long frame, preserving exactly one beep for every crossed boundary.
+    while let Some(cue) = next_cue(countdown.last_cue, target) {
+        commands.spawn((
+            AudioPlayer::new(audio.click.clone()),
+            PlaybackSettings::DESPAWN
+                .with_speed(cue.speed())
+                .with_volume(Volume::Linear(BEEP_VOLUME)),
+        ));
+
+        countdown.last_cue = Some(cue);
+        countdown.punch_remaining = PUNCH_DURATION;
+        transitioned = true;
+        for (mut span, _, _) in &mut text {
+            **span = cue.label().to_owned();
         }
-        return;
     }
 
-    // Update the overlay text. `ceil` gives the number of whole seconds
-    // remaining: 3 for (2,3], 2 for (1,2]. The final second (0,1] shows
-    // "GO!" instead of "1" per the task spec.
-    let label = if countdown.t > 1.0 {
-        format!("{}", countdown.t.ceil() as i32)
-    } else {
-        "GO!".to_string()
-    };
-    for mut span in &mut text {
-        **span = label.clone();
+    // Give a transition a complete punch starting this frame. On subsequent
+    // frames it decays to the normal size/accent color over about 0.2s.
+    if !transitioned {
+        countdown.punch_remaining = (countdown.punch_remaining - dt).max(0.0);
+    }
+    let punch = punch_strength(countdown.punch_remaining);
+    for (_, mut font, mut color) in &mut text {
+        font.font_size = FontSize::Px(BASE_FONT_SIZE + (PUNCH_FONT_SIZE - BASE_FONT_SIZE) * punch);
+        // Fade from a bright creamy flash back to the normal gold accent.
+        color.0 = Color::srgb(1.0, 0.8 + 0.2 * punch, 0.35 * punch);
+    }
+
+    if countdown.last_cue == Some(CountdownCue::Go) {
+        input_frozen.0 = false;
+        if countdown.punch_remaining <= 0.0 {
+            countdown.active = false;
+            for e in &overlay {
+                commands.entity(e).despawn();
+            }
+        }
     }
 }
 
@@ -184,8 +310,53 @@ fn cleanup_countdown(
     overlay: Query<Entity, With<CountdownRoot>>,
 ) {
     countdown.t = 0.0;
+    countdown.active = false;
+    countdown.last_cue = None;
+    countdown.punch_remaining = 0.0;
     input_frozen.0 = false;
     for e in &overlay {
         commands.entity(e).despawn();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remaining_time_maps_to_all_four_cues() {
+        assert_eq!(cue_for_remaining(3.0), CountdownCue::Three);
+        assert_eq!(cue_for_remaining(2.0), CountdownCue::Two);
+        assert_eq!(cue_for_remaining(1.0), CountdownCue::One);
+        assert_eq!(cue_for_remaining(0.0), CountdownCue::Go);
+    }
+
+    #[test]
+    fn skipped_time_still_walks_each_transition_once() {
+        let target = CountdownCue::Go;
+        let mut last = None;
+        let mut cues = Vec::new();
+        while let Some(cue) = next_cue(last, target) {
+            cues.push(cue);
+            last = Some(cue);
+        }
+        assert_eq!(
+            cues,
+            vec![
+                CountdownCue::Three,
+                CountdownCue::Two,
+                CountdownCue::One,
+                CountdownCue::Go,
+            ]
+        );
+        assert_eq!(next_cue(last, target), None);
+    }
+
+    #[test]
+    fn punch_strength_clamps_and_decays() {
+        assert_eq!(punch_strength(PUNCH_DURATION), 1.0);
+        assert!((punch_strength(PUNCH_DURATION / 2.0) - 0.5).abs() < f32::EPSILON);
+        assert_eq!(punch_strength(0.0), 0.0);
+        assert_eq!(punch_strength(-1.0), 0.0);
     }
 }
