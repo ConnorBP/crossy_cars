@@ -11,11 +11,12 @@ The chicken-crossing riddle is reversed: **you are the traffic**. Race through a
 Each fresh round begins with a 3-2-1 countdown, followed by **60 seconds** of active play.
 
 - Hit chickens to score and keep chaining chicken or coin pickups to build a timed combo multiplier, up to 5x.
-- Collect ordinary coins for score and **+3 seconds** each.
+- Collect ordinary coins for score and **+1.5 seconds** each, with the round clock capped at 90 seconds.
 - Avoid pedestrians, cows, and moose. Hitting a critter costs health and removes chicken-score points.
 - Buildings, roadside obstacles, and moving traffic are solid. Hard impacts damage the car; reaching zero health ends the round.
 - Difficulty rises during the round, adding and accelerating oncoming traffic.
 - Two deterministic mid-run events temporarily surge traffic, chickens, critters, or combo rewards; banners announce each event.
+- Each fresh round assigns a bonus objective—hit chickens, collect coins, or reach a combo tier—for a one-time +10 score reward.
 - Power-ups provide speed boost, coin magnet, health recovery, bonus time, or a mega-coin reward.
 - The best total score persists between rounds: browser builds use `localStorage`; native builds use `best_score.txt` in the process working directory.
 

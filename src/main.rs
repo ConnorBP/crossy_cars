@@ -11,6 +11,7 @@ mod game;
 mod health;
 mod minimap;
 mod modifiers;
+mod objectives;
 mod palette;
 mod persist;
 mod pickups;
@@ -38,6 +39,7 @@ use game::GamePlugin;
 use health::HealthPlugin;
 use minimap::MinimapPlugin;
 use modifiers::ModifiersPlugin;
+use objectives::ObjectivesPlugin;
 use persist::PersistPlugin;
 use pickups::PickupsPlugin;
 use run_events::RunEventsPlugin;
@@ -100,6 +102,9 @@ fn main() {
         // Modifier selection must be registered independently of the feature
         // tuple so adding it cannot approach Bevy's plugin tuple limit.
         .add_plugins(ModifiersPlugin)
+        // Bonus objectives own their deterministic round state and HUD, and
+        // remain independent of persistence and the main feature tuple.
+        .add_plugins(ObjectivesPlugin)
         // Mid-run event scheduling is independent of the feature tuple for
         // the same tuple-limit reason as modifiers.
         .add_plugins(RunEventsPlugin)

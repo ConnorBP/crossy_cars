@@ -5,6 +5,7 @@ use crate::game::SpawnSet;
 use crate::game::resources::{GameOverReason, Score, TimeLeft};
 use crate::game::state::GameState;
 use crate::modifiers::{ActiveModifier, ModifierKind};
+use crate::objectives::ActiveObjective;
 use crate::palette;
 use crate::persist::{
     BestAtRoundStart, ConditionBests, ConditionBestsAtRoundStart, Medal, medal_for,
@@ -607,6 +608,7 @@ fn spawn_gameover(
     best_at_start: Res<BestAtRoundStart>,
     active_modifier: Res<ActiveModifier>,
     conditions_at_start: Res<ConditionBestsAtRoundStart>,
+    objective: Res<ActiveObjective>,
 ) {
     let total = score.chickens + score.coins;
     let new_best = is_new_best(total, best_at_start.0);
@@ -764,6 +766,22 @@ fn spawn_gameover(
                     },
                 ));
             }
+            p.spawn((
+                Text::new(format!("OBJECTIVE: {}", objective.summary())),
+                TextFont {
+                    font_size: FontSize::Px(20.0),
+                    ..default()
+                },
+                TextColor(if objective.completed {
+                    palette::HUD_ACCENT.into()
+                } else {
+                    palette::HUD_TEXT.into()
+                }),
+                Node {
+                    margin: UiRect::bottom(px(8.0)),
+                    ..default()
+                },
+            ));
             // Restart / menu prompt
             p.spawn((
                 Text::new("R / ENTER / SPACE to play again  •  Q / ESC for menu"),

@@ -1888,6 +1888,20 @@ fn reset_grid(
 // Coins (environment now — spawned in blocks, collected on pickup)
 // ---------------------------------------------------------------------------
 
+const COIN_TIME_BONUS: f32 = 1.5;
+const MAX_ROUND_TIME: f32 = 90.0;
+
+/// Apply one ordinary-coin time bonus after sanitizing the current timer.
+/// Invalid low values start from zero; high and infinite values stay capped.
+fn coin_time_after_collect(current: f32) -> f32 {
+    let current = if current.is_nan() {
+        0.0
+    } else {
+        current.clamp(0.0, MAX_ROUND_TIME)
+    };
+    (current + COIN_TIME_BONUS).min(MAX_ROUND_TIME)
+}
+
 fn spin_coins(mut coins: Query<&mut Transform, With<Coin>>, time: Res<Time>) {
     let t = time.elapsed_secs();
     for mut tf in &mut coins {
@@ -1925,7 +1939,7 @@ fn collect_coins(
         if car_t.translation.distance(coin_t.translation()) < 1.2 {
             commands.entity(e).despawn();
             score.coins += 1;
-            timeleft.0 += 3.0; // time bonus!
+            timeleft.0 = coin_time_after_collect(timeleft.0);
             coin_events.write(CoinCollected);
         }
     }
@@ -1935,8 +1949,8 @@ fn collect_coins(
 // Tests: grid recycling reliability + deterministic world generation
 // ---------------------------------------------------------------------------
 //
-// Pure tests cover the grid-window/set-difference contract and the road-line
-// seam contract that the traffic wave (and the rest of the world) rely on:
+// Pure tests cover the bounded coin-time economy, grid-window/set-difference
+// contract, and road-line seam contract that the world relies on:
 //   * line 0 is always a road on both axes (spawn intersection guarantee),
 //   * road-line decisions are deterministic across negative/positive indices,
 //   * `tile_from_edges` derives its four sockets from exactly the same four
@@ -1949,6 +1963,37 @@ fn collect_coins(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn coin_time_bonus_obeys_boundaries_and_sanitizes_invalid_values() {
+        assert_eq!(coin_time_after_collect(0.0), 1.5);
+        assert_eq!(coin_time_after_collect(60.0), 61.5);
+        assert_eq!(coin_time_after_collect(89.5), 90.0);
+        assert_eq!(coin_time_after_collect(90.0), 90.0);
+        assert_eq!(coin_time_after_collect(120.0), 90.0);
+
+        let from_nan = coin_time_after_collect(f32::NAN);
+        assert!(from_nan.is_finite());
+        assert!((0.0..=MAX_ROUND_TIME).contains(&from_nan));
+        assert_eq!(from_nan, COIN_TIME_BONUS);
+
+        assert_eq!(coin_time_after_collect(-10.0), COIN_TIME_BONUS);
+        assert_eq!(coin_time_after_collect(f32::NEG_INFINITY), COIN_TIME_BONUS);
+        assert_eq!(coin_time_after_collect(f32::INFINITY), MAX_ROUND_TIME);
+        assert_eq!(coin_time_after_collect(f32::MAX), MAX_ROUND_TIME);
+    }
+
+    #[test]
+    fn repeated_coin_time_bonuses_never_exceed_round_cap() {
+        let mut time = 0.0;
+        for _ in 0..100 {
+            let previous = time;
+            time = coin_time_after_collect(time);
+            assert!((0.0..=MAX_ROUND_TIME).contains(&time));
+            assert!(time - previous <= COIN_TIME_BONUS);
+        }
+        assert_eq!(time, MAX_ROUND_TIME);
+    }
 
     fn assert_contiguous_window(coords: &BTreeSet<GridCoord>, center: GridCoord, count: i32) {
         let count = count.max(1);
