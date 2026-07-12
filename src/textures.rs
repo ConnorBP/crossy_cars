@@ -43,7 +43,7 @@ pub struct TextureAssets {
     pub grass: Handle<StandardMaterial>,
     pub road: Handle<StandardMaterial>,
     pub sidewalk: Handle<StandardMaterial>,
-    pub car_paint: Handle<StandardMaterial>,
+    pub car_paint: Handle<crate::shaders::CarPaintMaterial>,
 }
 
 pub struct TexturesPlugin;
@@ -59,17 +59,16 @@ impl Plugin for TexturesPlugin {
 impl FromWorld for TextureAssets {
     fn from_world(world: &mut World) -> Self {
         world.resource_scope::<Assets<Image>, _>(|world, mut images| {
-            let mut materials = world.resource_mut::<Assets<StandardMaterial>>();
+            // StandardMaterial assets (grass/road/sidewalk) — borrow dropped at
+            // the end of this block so we can then borrow CarPaintMaterial
+            // assets without a double-mutable-borrow conflict on `world`.
+            let (grass, road, sidewalk) = {
+                let mut materials = world.resource_mut::<Assets<StandardMaterial>>();
 
         // --- Procedural normal maps ---
         // Road/asphalt gets a gravelly normal map (stronger) so the surface
         // catches light per-pixel instead of looking like flat paint.
         let road_normal = images.add(asphalt_normal_map());
-        // Car paint gets a fine orange-peel / metal-flake normal map: subtle
-        // high-frequency bumps that shimmer under IBL + bloom without
-        // reintroducing the crawling sparkle (the base_color_texture stays
-        // smooth — only the normal map carries the micro-surface detail).
-        let car_normal = images.add(orange_peel_normal_map());
         // Grass gets gentle blade bumps for natural light scatter.
         let grass_normal = images.add(grass_normal_map());
         // Sidewalk gets a bumpy normal for concrete texture.
@@ -114,30 +113,21 @@ impl FromWorld for TextureAssets {
             ..default()
         });
 
-        // CAR_PAINT — realistic metallic car paint. T15: high metallic
-        // (0.8) + low roughness (0.18) for a glossy clearcoat that reflects
-        // the IBL environment map; a fine orange-peel/metal-flake NORMAL
-        // map provides the micro-surface shimmer under bloom. The
-        // base_color_texture stays SMOOTH (no high-frequency sparkle — that
-        // reads as a crawling pattern as the car moves; the micro-detail
-        // lives in the normal map, which stays fixed to the body and
-        // shimmers via reflections instead of crawling). Tile 1× (no
-        // visible repeat). `emissive` stays off (the body isn't a light).
-        let car_paint = materials.add(StandardMaterial {
-            base_color: Color::WHITE,
-            base_color_texture: Some(images.add(car_paint_texture())),
-            normal_map_texture: Some(car_normal),
-            // Car-paint metallic: near-full metal (0.9) + mirror-low roughness
-            // (0.05) + the procedural sun-disc HDR env map (shaders.rs, IBL
-            // intensity 10) -> the car is essentially a red-tinted mirror that
-            // reflects a sharp bright sun streak + sky/ground. This is the
-            // most unmistakably-metallic setup; if it still reads flat, the env
-            // map isn't reflecting and the cubemap/application needs debugging.
-            metallic: 0.9,
-            perceptual_roughness: 0.05,
-            uv_transform: Affine2::from_scale(Vec2::splat(1.0)),
-            ..default()
-        });
+                (grass, road, sidewalk)
+            }; // `materials` borrow released here.
+
+        // CAR_PAINT — fake-metallic custom shader (CarPaintMaterial). Bevy's
+        // EnvironmentMapLight reflections don't land on WebGL2 for our setup,
+        // so the car body uses a custom shader (shaders/car_paint.wgsl) that
+        // fakes a metallic look: a hemispherical sky/ground reflection driven
+        // by the reflection vector (shifts as the car turns) + a sharp sun
+        // glint + a Fresnel rim. `color` tints the reflection so it reads as
+        // red painted metal.
+        let car_paint = world
+            .resource_mut::<Assets<crate::shaders::CarPaintMaterial>>()
+            .add(crate::shaders::CarPaintMaterial {
+                color: LinearRgba::new(0.85, 0.12, 0.10, 1.0),
+            });
 
         TextureAssets {
             grass,

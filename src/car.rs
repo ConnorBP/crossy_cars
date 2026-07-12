@@ -1,5 +1,6 @@
-use bevy::prelude::*;
 use bevy::color::LinearRgba;
+use bevy::mesh::VertexAttributeValues;
+use bevy::prelude::*;
 use std::f32::consts::FRAC_PI_2;
 
 use crate::game::events::ObstacleHit;
@@ -48,11 +49,51 @@ impl Plugin for CarPlugin {
                 Update,
                 // move_car first, then resolve curb hops + obstacle collisions,
                 // then the juice systems read the fresh speed.
-                (move_car, physics_collisions, spin_wheels, roll_body, brake_lights)
+                (
+                    move_car,
+                    physics_collisions,
+                    spin_wheels,
+                    roll_body,
+                    brake_lights,
+                )
                     .chain()
                     .run_if(in_state(GameState::Playing)),
             );
     }
+}
+
+/// Build a smooth ellipsoid body with the car's dimensions baked into its
+/// vertices. Baking avoids non-uniform `Transform` scale (which distorts mesh
+/// normals) and the analytic ellipsoid normals give the paint shader a real,
+/// continuous reflection sweep instead of one flat color per cuboid face.
+fn car_body_mesh() -> Mesh {
+    const AXES: Vec3 = Vec3::new(0.5, 0.25, 1.0);
+
+    let mut mesh = Sphere::new(0.5)
+        .mesh()
+        .ico(4)
+        .expect("car body icosphere subdivision is valid");
+    let positions = match mesh.remove_attribute(Mesh::ATTRIBUTE_POSITION) {
+        Some(VertexAttributeValues::Float32x3(values)) => values,
+        _ => panic!("icosphere positions must be Float32x3"),
+    };
+    let (positions, normals): (Vec<[f32; 3]>, Vec<[f32; 3]>) = positions
+        .into_iter()
+        .map(|position| {
+            let sphere_position = Vec3::from_array(position);
+            let p = sphere_position * (AXES / 0.5);
+            let n = Vec3::new(
+                p.x / AXES.x.powi(2),
+                p.y / AXES.y.powi(2),
+                p.z / AXES.z.powi(2),
+            )
+            .normalize();
+            (p.to_array(), n.to_array())
+        })
+        .unzip();
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+    mesh
 }
 
 fn spawn_car(
@@ -126,7 +167,7 @@ fn spawn_car(
             // Painted body shell (car paint). Cabin + glass + lights nest
             // under it so the whole upper structure rolls together.
             car.spawn((
-                Mesh3d(meshes.add(Cuboid::new(1.0, 0.5, 2.0))),
+                Mesh3d(meshes.add(car_body_mesh())),
                 MeshMaterial3d(textures.car_paint.clone()),
                 Transform::from_xyz(0.0, 0.35, 0.0),
                 CarBody,
@@ -169,8 +210,7 @@ fn spawn_car(
                 car.spawn((
                     Mesh3d(wheel_mesh.clone()),
                     MeshMaterial3d(wheel_mat.clone()),
-                    Transform::from_xyz(x, 0.15, z)
-                        .with_rotation(Quat::from_rotation_z(FRAC_PI_2)),
+                    Transform::from_xyz(x, 0.15, z).with_rotation(Quat::from_rotation_z(FRAC_PI_2)),
                     Wheel { spin: 0.0 },
                 ));
             }
@@ -299,12 +339,7 @@ fn brake_lights(
     let intensity = if braking { 1.0 } else { 0.25 };
     for mat in &brake_q {
         if let Some(mut m) = materials.get_mut(mat) {
-            m.emissive = LinearRgba::new(
-                0.8 * intensity,
-                0.05 * intensity,
-                0.05 * intensity,
-                1.0,
-            );
+            m.emissive = LinearRgba::new(0.8 * intensity, 0.05 * intensity, 0.05 * intensity, 1.0);
         }
     }
 }

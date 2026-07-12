@@ -27,6 +27,7 @@ impl Plugin for ShaderPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(MaterialPlugin::<SkyMaterial>::default())
             .add_plugins(MaterialPlugin::<WaterMaterial>::default())
+            .add_plugins(MaterialPlugin::<CarPaintMaterial>::default())
             .add_systems(Startup, (spawn_sky, spawn_water))
             .add_systems(
                 Update,
@@ -50,6 +51,28 @@ pub struct SkyMaterial {
 impl Material for SkyMaterial {
     fn fragment_shader() -> ShaderRef {
         "shaders/sky.wgsl".into()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Car paint — fake-metallic custom shader
+// ---------------------------------------------------------------------------
+// Bevy's EnvironmentMapLight reflections don't land on WebGL2 for our setup
+// (the car read as flat/dark). This custom material fakes metallic car paint
+// with a hemispherical sky/ground reflection driven by the reflection vector
+// (so it shifts as the car turns), a sharp Blinn-Phong sun glint, and a
+// Fresnel rim. It's our own WGSL, so it works on WebGL2 independent of the
+// env-map pipeline. The camera is a fixed iso angle, so the view direction
+// is a constant (no camera uniform needed).
+#[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
+pub struct CarPaintMaterial {
+    #[uniform(0)]
+    pub color: LinearRgba,
+}
+
+impl Material for CarPaintMaterial {
+    fn fragment_shader() -> ShaderRef {
+        "shaders/car_paint.wgsl".into()
     }
 }
 
