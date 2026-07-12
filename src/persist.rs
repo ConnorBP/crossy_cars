@@ -1,9 +1,10 @@
 //! Best-score persistence: `localStorage` on web, a tiny file on native.
 //!
-//! Loads the saved best at startup, updates the in-memory value whenever the
-//! current run beats it, and persists a new record once when the round ends.
-//! It also renders a small "BEST: N" UI node in the bottom-left corner (away
-//! from the HUD, which occupies the top-left panel and top-right timer).
+//! Loads the saved best at startup and records only terminal scores from
+//! completed rounds. In-progress peaks and abandoned rounds never become
+//! records. It also renders a small "BEST: N" UI node in the bottom-left
+//! corner (away from the HUD, which occupies the top-left panel and top-right
+//! timer).
 
 use bevy::{prelude::*, text::FontSize};
 
@@ -19,19 +20,21 @@ const STORAGE_KEY: &str = "car_game_best";
 #[cfg(not(target_arch = "wasm32"))]
 const FILE_PATH: &str = "best_score.txt";
 
-/// The best score seen across runs. Loaded from storage at startup.
+/// Best terminal score from completed rounds. Loaded from storage at startup
+/// and changed only after a completed-round snapshot is successfully saved.
 #[derive(Resource, Default)]
 pub struct BestScore(pub u32);
 
-/// Best score for each road condition, indexed by [`ModifierKind::index`].
+/// Best completed-round terminal score for each road condition, indexed by
+/// [`ModifierKind::index`].
 #[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ConditionBests {
     pub by_kind: [u32; 5],
 }
 
-/// Per-condition records as they stood when the current round began. The
-/// live `ConditionBests` resource updates during play, while this snapshot
-/// lets Game Over report a strict condition record and medal upgrade.
+/// Per-condition records as they stood when the current round began. This
+/// lets Game Over report a strict condition record and medal upgrade without
+/// depending on persistence-system ordering.
 #[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ConditionBestsAtRoundStart {
     pub by_kind: [u32; 5],
@@ -39,8 +42,8 @@ pub struct ConditionBestsAtRoundStart {
 
 /// The persisted best as it stood when the current round began.
 ///
-/// This snapshot lets the game-over UI identify a record even though
-/// [`BestScore`] is updated continuously while the round is being played.
+/// [`BestScore`] remains unchanged during play; this explicit snapshot also
+/// makes the game-over presentation independent of OnEnter system ordering.
 #[derive(Resource, Default)]
 pub struct BestAtRoundStart(pub u32);
 
@@ -62,6 +65,12 @@ struct PersistedBest(u32);
 struct PersistedConditionBests {
     by_kind: [u32; 5],
 }
+
+/// A completed-round snapshot whose write failed. Menu entry may retry this
+/// exact snapshot, but never derives a record from the current `Score`; this
+/// keeps startup and paused/abandoned Menu transitions harmless.
+#[derive(Resource, Default)]
+struct PendingBests(Option<BestsSnapshot>);
 
 /// Medal earned for a condition-specific best score.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -133,15 +142,14 @@ impl Plugin for PersistPlugin {
             .init_resource::<BestAtRoundStart>()
             .init_resource::<PersistedBest>()
             .init_resource::<PersistedConditionBests>()
+            .init_resource::<PendingBests>()
             .add_systems(Startup, (load_best_score, spawn_best_score_ui).chain())
-            // Keep the live value current for the persistent BEST UI, but do
-            // not touch storage in the per-frame path.
-            .add_systems(Update, update_best.run_if(in_state(GameState::Playing)))
             .add_systems(Update, update_best_score_text)
-            // Either terminal destination ends a round. Persisted snapshots
-            // make GameOver -> Menu idempotent; paused restarts route via Menu.
+            // Only GameOver completes a round. Menu entry (including startup
+            // and paused restart/quit) may retry a failed completed-round
+            // write, but never applies an in-progress score.
             .add_systems(OnEnter(GameState::GameOver), persist_best_on_round_end)
-            .add_systems(OnEnter(GameState::Menu), persist_best_on_round_end);
+            .add_systems(OnEnter(GameState::Menu), retry_pending_best_write);
     }
 }
 
@@ -192,14 +200,18 @@ fn spawn_best_score_ui(mut commands: Commands) {
         ));
 }
 
-/// Apply a round total to both the global and active-condition records.
-/// Returns whether either value strictly improved.
-fn apply_total(snapshot: &mut BestsSnapshot, kind: ModifierKind, total: u32) -> bool {
-    let previous = *snapshot;
-    snapshot.global = snapshot.global.max(total);
+/// Return the records produced by one completed round's terminal total.
+/// Gameplay peaks are intentionally not an input: only the final total can
+/// improve the global and active-condition records.
+fn with_terminal_total(
+    mut snapshot: BestsSnapshot,
+    kind: ModifierKind,
+    terminal_total: u32,
+) -> BestsSnapshot {
+    snapshot.global = snapshot.global.max(terminal_total);
     let condition = &mut snapshot.by_kind[kind.index()];
-    *condition = (*condition).max(total);
-    *snapshot != previous
+    *condition = (*condition).max(terminal_total);
+    snapshot
 }
 
 fn current_snapshot(best: &BestScore, conditions: &ConditionBests) -> BestsSnapshot {
@@ -207,34 +219,6 @@ fn current_snapshot(best: &BestScore, conditions: &ConditionBests) -> BestsSnaps
         global: best.0,
         by_kind: conditions.by_kind,
     }
-}
-
-fn apply_to_resources(
-    best: &mut BestScore,
-    conditions: &mut ConditionBests,
-    kind: ModifierKind,
-    total: u32,
-) {
-    let mut snapshot = current_snapshot(best, conditions);
-    apply_total(&mut snapshot, kind, total);
-    best.0 = snapshot.global;
-    conditions.by_kind = snapshot.by_kind;
-}
-
-/// If the current run's total (chickens + coins) beats either record, update
-/// only memory so live UI remains current without per-hit I/O.
-fn update_best(
-    score: Res<Score>,
-    active: Res<ActiveModifier>,
-    mut best: ResMut<BestScore>,
-    mut conditions: ResMut<ConditionBests>,
-) {
-    apply_to_resources(
-        &mut best,
-        &mut conditions,
-        active.0,
-        score.chickens + score.coins,
-    );
 }
 
 /// A round writes if any component strictly improves over the last snapshot
@@ -248,32 +232,88 @@ fn should_persist_bests(current: BestsSnapshot, persisted: BestsSnapshot) -> boo
             .any(|(current, persisted)| *current > persisted)
 }
 
-/// Capture any final score update and persist a new record at a terminal round
-/// boundary. Updating `persisted` only after a successful write permits a
-/// failed GameOver write to retry on Menu while suppressing duplicate writes.
+/// Try the pending completed-round write. The persisted mirrors and public
+/// record resources advance only after success, making retries idempotent and
+/// preserving a failed write for a later Menu transition.
+fn flush_pending_best_write(
+    pending: &mut PendingBests,
+    best: &mut BestScore,
+    conditions: &mut ConditionBests,
+    persisted_best: &mut PersistedBest,
+    persisted_conditions: &mut PersistedConditionBests,
+) {
+    let Some(snapshot) = pending.0 else {
+        return;
+    };
+    let persisted = BestsSnapshot {
+        global: persisted_best.0,
+        by_kind: persisted_conditions.by_kind,
+    };
+    if !should_persist_bests(snapshot, persisted) {
+        pending.0 = None;
+        return;
+    }
+    if save_bests(snapshot) {
+        persisted_best.0 = snapshot.global;
+        persisted_conditions.by_kind = snapshot.by_kind;
+        best.0 = snapshot.global;
+        conditions.by_kind = snapshot.by_kind;
+        pending.0 = None;
+    }
+}
+
+/// Apply the terminal score of a completed round exactly once to the pending
+/// snapshot, then persist the resulting versioned schema. This system is
+/// registered only for GameOver; entering Menu abandons an active round and
+/// cannot create records.
 fn persist_best_on_round_end(
     score: Res<Score>,
     active: Res<ActiveModifier>,
     mut best: ResMut<BestScore>,
     mut conditions: ResMut<ConditionBests>,
+    mut pending: ResMut<PendingBests>,
     mut persisted_best: ResMut<PersistedBest>,
     mut persisted_conditions: ResMut<PersistedConditionBests>,
 ) {
-    apply_to_resources(
-        &mut best,
-        &mut conditions,
-        active.0,
-        score.chickens + score.coins,
-    );
-    let current = current_snapshot(&best, &conditions);
+    // Preserve an earlier failed completed-round result when a player starts
+    // another round directly from Game Over. A later terminal score can only
+    // add to that pending snapshot, never replace it with a lower record.
+    let base = pending
+        .0
+        .unwrap_or_else(|| current_snapshot(&best, &conditions));
+    let completed = with_terminal_total(base, active.0, score.chickens + score.coins);
     let persisted = BestsSnapshot {
         global: persisted_best.0,
         by_kind: persisted_conditions.by_kind,
     };
-    if should_persist_bests(current, persisted) && save_bests(current) {
-        persisted_best.0 = current.global;
-        persisted_conditions.by_kind = current.by_kind;
+    if should_persist_bests(completed, persisted) {
+        pending.0 = Some(completed);
     }
+    flush_pending_best_write(
+        &mut pending,
+        &mut best,
+        &mut conditions,
+        &mut persisted_best,
+        &mut persisted_conditions,
+    );
+}
+
+/// Menu is not a completed-round boundary. It can only retry a snapshot that
+/// was already computed at GameOver and failed to reach storage.
+fn retry_pending_best_write(
+    mut pending: ResMut<PendingBests>,
+    mut best: ResMut<BestScore>,
+    mut conditions: ResMut<ConditionBests>,
+    mut persisted_best: ResMut<PersistedBest>,
+    mut persisted_conditions: ResMut<PersistedConditionBests>,
+) {
+    flush_pending_best_write(
+        &mut pending,
+        &mut best,
+        &mut conditions,
+        &mut persisted_best,
+        &mut persisted_conditions,
+    );
 }
 
 /// Refresh the "BEST: N" number span each frame.
@@ -502,20 +542,42 @@ mod tests {
     }
 
     #[test]
-    fn update_math_tracks_global_and_only_the_active_condition() {
-        let mut bests = BestsSnapshot {
+    fn terminal_update_tracks_global_and_only_the_active_condition() {
+        let bests = BestsSnapshot {
             global: 50,
             by_kind: [10, 20, 30, 40, 5],
         };
-        assert!(apply_total(&mut bests, ModifierKind::GlassCannon, 60));
+        let bests = with_terminal_total(bests, ModifierKind::GlassCannon, 60);
         assert_eq!(bests.global, 60);
         assert_eq!(bests.by_kind, [10, 20, 30, 40, 60]);
 
         // A condition may improve even when the all-condition global does not.
-        assert!(apply_total(&mut bests, ModifierKind::Standard, 45));
+        let bests = with_terminal_total(bests, ModifierKind::Standard, 45);
         assert_eq!(bests.global, 60);
         assert_eq!(bests.by_kind, [45, 20, 30, 40, 60]);
-        assert!(!apply_total(&mut bests, ModifierKind::Standard, 44));
+
+        // Lower and equal terminal totals are not record improvements.
+        assert_eq!(
+            with_terminal_total(bests, ModifierKind::Standard, 44),
+            bests
+        );
+        assert_eq!(
+            with_terminal_total(bests, ModifierKind::Standard, 45),
+            bests
+        );
+    }
+
+    #[test]
+    fn peak_during_play_is_irrelevant_and_terminal_total_is_recorded() {
+        let start = BestsSnapshot::default();
+        let peak_during_play = 20;
+        let terminal_total = 18;
+
+        // Only terminal_total is passed to record calculation.
+        let completed = with_terminal_total(start, ModifierKind::Standard, terminal_total);
+        assert_eq!(completed.global, 18);
+        assert_eq!(completed.by_kind[ModifierKind::Standard.index()], 18);
+        assert_ne!(completed.global, peak_during_play);
     }
 
     #[test]

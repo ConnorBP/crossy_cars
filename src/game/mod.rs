@@ -22,6 +22,53 @@ enum PauseDecision {
     Menu,
 }
 
+/// State action shared by touch and keyboard state controls. Every non-`None`
+/// action also carries an explicit restart-latch result, preventing an older
+/// restart request from surviving a later resume/menu/play action.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StateAction {
+    None,
+    Playing,
+    Paused,
+    Menu,
+    Restart,
+}
+
+fn state_action_transition(action: StateAction) -> Option<(GameState, bool)> {
+    match action {
+        StateAction::None => None,
+        StateAction::Playing => Some((GameState::Playing, false)),
+        StateAction::Paused => Some((GameState::Paused, false)),
+        StateAction::Menu => Some((GameState::Menu, false)),
+        StateAction::Restart => Some((GameState::Menu, true)),
+    }
+}
+
+/// Apply one resolved action. Update ordering determines which input source is
+/// applied last; a later non-empty action deterministically replaces both the
+/// target state and restart latch.
+pub(crate) fn apply_state_action(
+    action: StateAction,
+    restart: &mut RestartRequested,
+    next: &mut NextState<GameState>,
+) {
+    if let Some((target, requests_restart)) = state_action_transition(action) {
+        restart.0 = requests_restart;
+        next.set(target);
+    }
+}
+
+/// Pure test model of the chained input sets: an available keyboard action is
+/// the later writer and therefore wins over a simultaneous touch action.
+#[cfg(test)]
+fn resolve_ordered_actions(touch: StateAction, keyboard: StateAction) -> StateAction {
+    if keyboard != StateAction::None {
+        keyboard
+    } else {
+        touch
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RoundEntryDecision {
     Fresh,
@@ -61,6 +108,14 @@ fn pause_decision(escape: bool, restart: bool, menu: bool) -> PauseDecision {
 #[derive(SystemSet, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct SpawnSet;
 
+/// Touch-driven game-state transitions run before keyboard transitions.
+#[derive(SystemSet, Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct TouchStateSet;
+
+/// Keyboard state transitions run last so they win simultaneous conflicts.
+#[derive(SystemSet, Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct KeyboardStateSet;
+
 pub struct GamePlugin;
 
 impl Plugin for GamePlugin {
@@ -76,6 +131,7 @@ impl Plugin for GamePlugin {
             .add_message::<ChickenHit>()
             .add_message::<CoinCollected>()
             .add_message::<ObstacleHit>()
+            .configure_sets(Update, (TouchStateSet, KeyboardStateSet).chain())
             // Keep RoundActive false across SpawnSet so all fresh-only spawn
             // systems can distinguish a new round from a pause resume. Reset
             // state first, spawn second, then activate the completed round.
@@ -95,10 +151,30 @@ impl Plugin for GamePlugin {
                 (end_round, consume_restart_request).chain(),
             )
             .add_systems(Update, tick_timeleft.run_if(in_state(GameState::Playing)))
-            .add_systems(Update, menu_input.run_if(in_state(GameState::Menu)))
-            .add_systems(Update, pause_to_paused.run_if(in_state(GameState::Playing)))
-            .add_systems(Update, pause_to_playing.run_if(in_state(GameState::Paused)))
-            .add_systems(Update, gameover_input.run_if(in_state(GameState::GameOver)));
+            .add_systems(
+                Update,
+                menu_input
+                    .in_set(KeyboardStateSet)
+                    .run_if(in_state(GameState::Menu)),
+            )
+            .add_systems(
+                Update,
+                pause_to_paused
+                    .in_set(KeyboardStateSet)
+                    .run_if(in_state(GameState::Playing)),
+            )
+            .add_systems(
+                Update,
+                pause_to_playing
+                    .in_set(KeyboardStateSet)
+                    .run_if(in_state(GameState::Paused)),
+            )
+            .add_systems(
+                Update,
+                gameover_input
+                    .in_set(KeyboardStateSet)
+                    .run_if(in_state(GameState::GameOver)),
+            );
     }
 }
 
@@ -171,16 +247,30 @@ fn tick_timeleft(
     }
 }
 
-fn menu_input(keys: Res<ButtonInput<KeyCode>>, mut next: ResMut<NextState<GameState>>) {
-    if keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::Space) {
-        next.set(GameState::Playing);
-    }
+fn menu_input(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut restart: ResMut<RestartRequested>,
+    mut next: ResMut<NextState<GameState>>,
+) {
+    let action = if keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::Space) {
+        StateAction::Playing
+    } else {
+        StateAction::None
+    };
+    apply_state_action(action, &mut restart, &mut next);
 }
 
-fn pause_to_paused(keys: Res<ButtonInput<KeyCode>>, mut next: ResMut<NextState<GameState>>) {
-    if keys.just_pressed(KeyCode::Escape) {
-        next.set(GameState::Paused);
-    }
+fn pause_to_paused(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut restart: ResMut<RestartRequested>,
+    mut next: ResMut<NextState<GameState>>,
+) {
+    let action = if keys.just_pressed(KeyCode::Escape) {
+        StateAction::Paused
+    } else {
+        StateAction::None
+    };
+    apply_state_action(action, &mut restart, &mut next);
 }
 
 fn pause_to_playing(
@@ -188,35 +278,43 @@ fn pause_to_playing(
     mut restart: ResMut<RestartRequested>,
     mut next: ResMut<NextState<GameState>>,
 ) {
-    match pause_decision(
+    let action = match pause_decision(
         keys.just_pressed(KeyCode::Escape),
         keys.just_pressed(KeyCode::KeyR),
         keys.just_pressed(KeyCode::KeyQ),
     ) {
-        PauseDecision::Resume => next.set(GameState::Playing),
-        PauseDecision::Restart => {
-            restart.0 = true;
-            next.set(GameState::Menu);
-        }
-        PauseDecision::Menu => next.set(GameState::Menu),
-        PauseDecision::None => {}
-    }
+        PauseDecision::Resume => StateAction::Playing,
+        PauseDecision::Restart => StateAction::Restart,
+        PauseDecision::Menu => StateAction::Menu,
+        PauseDecision::None => StateAction::None,
+    };
+    apply_state_action(action, &mut restart, &mut next);
 }
 
-fn gameover_input(keys: Res<ButtonInput<KeyCode>>, mut next: ResMut<NextState<GameState>>) {
-    if keys.just_pressed(KeyCode::Enter)
+fn gameover_input(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut restart: ResMut<RestartRequested>,
+    mut next: ResMut<NextState<GameState>>,
+) {
+    let action = if keys.just_pressed(KeyCode::Enter)
         || keys.just_pressed(KeyCode::Space)
         || keys.just_pressed(KeyCode::KeyR)
     {
-        next.set(GameState::Playing);
+        StateAction::Playing
     } else if keys.just_pressed(KeyCode::Escape) || keys.just_pressed(KeyCode::KeyQ) {
-        next.set(GameState::Menu);
-    }
+        StateAction::Menu
+    } else {
+        StateAction::None
+    };
+    apply_state_action(action, &mut restart, &mut next);
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{PauseDecision, RoundEntryDecision, pause_decision, round_entry_decision};
+    use super::{
+        GameState, PauseDecision, RoundEntryDecision, StateAction, pause_decision,
+        resolve_ordered_actions, round_entry_decision, state_action_transition,
+    };
 
     #[test]
     fn round_entry_is_fresh_only_while_inactive() {
@@ -235,5 +333,35 @@ mod tests {
     #[test]
     fn restart_wins_if_pause_keys_arrive_together() {
         assert_eq!(pause_decision(true, true, true), PauseDecision::Restart);
+    }
+
+    #[test]
+    fn keyboard_restart_wins_over_simultaneous_touch_resume() {
+        assert_eq!(
+            resolve_ordered_actions(StateAction::Playing, StateAction::Restart),
+            StateAction::Restart
+        );
+        assert_eq!(
+            state_action_transition(StateAction::Restart),
+            Some((GameState::Menu, true))
+        );
+        // Ordering, not cross-device action priority, is authoritative.
+        assert_eq!(
+            resolve_ordered_actions(StateAction::Restart, StateAction::Playing),
+            StateAction::Playing
+        );
+    }
+
+    #[test]
+    fn later_non_restart_actions_clear_the_restart_latch() {
+        assert_eq!(
+            state_action_transition(StateAction::Playing),
+            Some((GameState::Playing, false))
+        );
+        assert_eq!(
+            state_action_transition(StateAction::Menu),
+            Some((GameState::Menu, false))
+        );
+        assert_eq!(state_action_transition(StateAction::None), None);
     }
 }

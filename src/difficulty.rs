@@ -7,8 +7,8 @@
 //!   current round has been running (only ticks while input is NOT frozen,
 //!   mirroring `tick_timeleft`) and the derived difficulty level
 //!   (`level = (elapsed / 10) as u32`, capped at 6).
-//! - `Traffic { speed, axis, dir }` — a moving car the player must avoid.
-//!   Traffic entities are top-level (world `Transform`) and carry an
+//! - `Traffic { speed, axis, dir, speed_roll }` — a moving car the player must
+//!   avoid. Traffic entities are top-level (world `Transform`) and carry an
 //!   axis-correct `world::Collider` matching the 1×2 visual footprint, so
 //!   `car.rs::physics_collisions` treats them as solid obstacles — crashing into one
 //!   emits `ObstacleHit` → damage. The baseline count scales with `level`
@@ -34,9 +34,10 @@
 use bevy::color::LinearRgba;
 use bevy::prelude::*;
 use bevy::text::FontSize;
+use std::cmp::Ordering;
 use std::f32::consts::{FRAC_PI_2, TAU};
 
-use crate::car::{Car, InputFrozen};
+use crate::car::{Car, DrivingSet, InputFrozen};
 use crate::game::SpawnSet;
 use crate::game::resources::RoundActive;
 use crate::game::state::GameState;
@@ -272,20 +273,24 @@ impl FromWorld for TrafficAssets {
 
 /// A moving traffic car the player must avoid.
 ///
-/// - `speed` — units per second along the movement axis.
+/// - `speed` — current units per second along the movement axis.
 /// - `axis`  — `true` => drives along world X; `false` => along world Z.
 /// - `dir`   — `+1.0` or `-1.0` (direction along the axis).
+/// - `speed_roll` — immutable deterministic jitter sampled at spawn. The
+///   effective `speed` is rebuilt from this roll every frame, so difficulty,
+///   modifier, and event transitions affect existing traffic immediately.
 ///
 /// The entity is **top-level** (world `Transform`) and also carries a
 /// axis-correct `Collider` matching its 1×2 footprint so `physics_collisions`
 /// crashes the car into it. The root `Transform`'s rotation is set at spawn so the
 /// body's front (-Z, where the headlights are) faces the movement direction;
-/// `manage_traffic` only advances `translation` each frame.
+/// `manage_traffic` rebuilds `speed` and advances `translation` each frame.
 #[derive(Component)]
 pub struct Traffic {
-    pub speed: f32,
-    pub axis: bool,
-    pub dir: f32,
+    pub(crate) speed: f32,
+    pub(crate) axis: bool,
+    pub(crate) dir: f32,
+    pub(crate) speed_roll: f32,
 }
 
 /// A wheel directly parented to a [`Traffic`] root. Keeping spin as a scalar
@@ -336,7 +341,7 @@ impl Plugin for DifficultyPlugin {
                 Update,
                 (
                     tick_difficulty,
-                    manage_traffic,
+                    manage_traffic.after(tick_difficulty).before(DrivingSet),
                     spin_traffic_wheels.after(manage_traffic),
                 )
                     .run_if(in_state(GameState::Playing)),
@@ -386,13 +391,13 @@ fn reset_difficulty(mut difficulty: ResMut<Difficulty>, round_active: Res<RoundA
 // ===========================================================================
 
 /// Per-frame traffic management while `Playing`:
-/// 1. advance each traffic car along its axis/direction;
-/// 2. despawn any that drifted beyond `TRAFFIC_KEEP_RADIUS` from the car;
-/// 3. top up to the level-, modifier-, and event-derived target count.
+/// 1. rebuild every car's speed from its fixed jitter and current effects;
+/// 2. advance each traffic car along its axis/direction;
+/// 3. recycle out-of-range cars and deterministically trim target surplus;
+/// 4. top up to the level-, modifier-, and event-derived target count.
 ///
-/// The car query excludes `Traffic` (and the traffic query fetches `&Traffic`,
-/// implying `With<Traffic>`), so the two `Transform` accesses are disjoint →
-/// no B0001.
+/// Explicit opposing `Car`/`Traffic` and root/wheel filters keep mutable
+/// component accesses disjoint and prevent B0001 as these queries evolve.
 fn manage_traffic(
     mut commands: Commands,
     assets: Res<TrafficAssets>,
@@ -400,7 +405,10 @@ fn manage_traffic(
     modifier: Res<ActiveModifier>,
     event: Res<ActiveEvent>,
     car: Query<&Transform, (With<Car>, Without<Traffic>)>,
-    mut traffic: Query<(Entity, &Traffic, &mut Transform), (With<Traffic>, Without<TrafficWheel>)>,
+    mut traffic: Query<
+        (Entity, &mut Traffic, &mut Transform),
+        (With<Traffic>, Without<TrafficWheel>, Without<Car>),
+    >,
     time: Res<Time>,
     mut seed: Local<u32>,
 ) {
@@ -410,14 +418,25 @@ fn manage_traffic(
     };
     let car_pos = car_t.translation;
     let dt = time.delta_secs();
+    let modifier_speed = modifier.traffic_speed_multiplier();
+    let event_speed = event.traffic_speed_multiplier();
+    let target = target_traffic_count(
+        difficulty.level,
+        modifier.traffic_count_multiplier(),
+        event.traffic_count_multiplier(),
+    );
 
-    // --- Move + recycle far-away traffic ---
-    // Collect entities to recycle first (we can't despawn+spawn inside the
-    // mutable iteration without borrow issues; collecting the ids then
-    // despawning after is clean and avoids double-mutation).
+    // --- Recompute speed, move, recycle, and trim a decreased target. ---
+    // `speed_roll` is fixed at spawn, so every existing car responds to a
+    // difficulty/modifier/event transition without consuming another random
+    // number. Only in-radius survivors enter the surplus ordering, preventing
+    // deferred despawns from being counted as alive or selected twice.
     let mut to_despawn: Vec<Entity> = Vec::new();
-    let mut alive = 0usize;
-    for (e, traffic, mut tf) in &mut traffic {
+    let mut survivors: Vec<(Entity, f32)> = Vec::new();
+    for (entity, mut traffic, mut tf) in &mut traffic {
+        let speed_roll = traffic.speed_roll;
+        traffic.speed =
+            traffic_speed_for_roll(difficulty.level, speed_roll, modifier_speed, event_speed);
         let axis_vec = if traffic.axis {
             Vec3::new(traffic.dir, 0.0, 0.0)
         } else {
@@ -427,22 +446,30 @@ fn manage_traffic(
 
         let dx = tf.translation.x - car_pos.x;
         let dz = tf.translation.z - car_pos.z;
-        if dx * dx + dz * dz > TRAFFIC_KEEP_RADIUS * TRAFFIC_KEEP_RADIUS {
-            to_despawn.push(e);
+        let distance_squared = dx * dx + dz * dz;
+        if distance_squared > TRAFFIC_KEEP_RADIUS * TRAFFIC_KEEP_RADIUS {
+            to_despawn.push(entity);
         } else {
-            alive += 1;
+            survivors.push((entity, distance_squared));
         }
     }
-    for e in &to_despawn {
-        commands.entity(*e).despawn();
+
+    let surplus = traffic_surplus(survivors.len(), target);
+    if surplus > 0 {
+        survivors.sort_by(|(entity_a, distance_a), (entity_b, distance_b)| {
+            traffic_despawn_order(
+                (entity_a.to_bits(), *distance_a),
+                (entity_b.to_bits(), *distance_b),
+            )
+        });
+        to_despawn.extend(survivors.drain(..surplus).map(|(entity, _)| entity));
+    }
+    let alive = survivors.len();
+    for entity in to_despawn {
+        commands.entity(entity).despawn();
     }
 
-    // --- Top up to the level-derived, modifier- and event-adjusted target ---
-    let target = target_traffic_count(
-        difficulty.level,
-        modifier.traffic_count_multiplier(),
-        event.traffic_count_multiplier(),
-    );
+    // --- Top up to the level-derived, modifier- and event-adjusted target. ---
     let mut needed = target.saturating_sub(alive);
 
     // Car forward (heading 0 => -Z); bias spawns ahead of the driver so
@@ -456,17 +483,25 @@ fn manage_traffic(
         needed -= 1;
         let axis = rand(&mut seed) < 0.5; // true = X, false = Z
         let dir = if rand(&mut seed) < 0.5 { 1.0 } else { -1.0 };
-        let speed = traffic_speed(
-            difficulty.level,
-            modifier.traffic_speed_multiplier(),
-            event.traffic_speed_multiplier(),
-            &mut seed,
-        );
+        // Keep this roll in the original speed-roll position in the shared
+        // spawn LCG sequence. Storing it changes no subsequent spawn rolls.
+        let speed_roll = rand(&mut seed);
+        let speed =
+            traffic_speed_for_roll(difficulty.level, speed_roll, modifier_speed, event_speed);
         // Choose axis + direction before position: the cross-axis coordinate
         // is placed on a real deterministic road line, then offset into the
         // direction's lane so opposing traffic does not overlap.
         let pos = traffic_spawn_pos_on_road(car_pos, forward, right, axis, dir, &mut seed);
-        spawn_one_traffic(&mut commands, &assets, pos, axis, dir, speed, &mut seed);
+        spawn_one_traffic(
+            &mut commands,
+            &assets,
+            pos,
+            axis,
+            dir,
+            speed,
+            speed_roll,
+            &mut seed,
+        );
     }
 }
 
@@ -551,20 +586,17 @@ fn traffic_speed_for_roll(
     (jittered * modifier_speed_multiplier * event_speed_multiplier).min(TRAFFIC_MAX_SPEED)
 }
 
-/// Traffic speed using exactly one deterministic roll from the shared spawn
-/// LCG, preserving the existing spawn-roll order.
-fn traffic_speed(
-    level: u32,
-    modifier_speed_multiplier: f32,
-    event_speed_multiplier: f32,
-    seed: &mut u32,
-) -> f32 {
-    traffic_speed_for_roll(
-        level,
-        rand(seed),
-        modifier_speed_multiplier,
-        event_speed_multiplier,
-    )
+/// Number of currently live traffic cars that must be removed to satisfy a
+/// target. Kept pure so deferred ECS despawns never influence the accounting.
+fn traffic_surplus(alive: usize, target: usize) -> usize {
+    alive.saturating_sub(target)
+}
+
+/// Deterministic removal order: farther traffic first, then ascending entity
+/// bits as a stable tie-break. Inputs are `(entity_bits, distance_squared)` so
+/// the policy is pure and independently testable.
+fn traffic_despawn_order(a: (u64, f32), b: (u64, f32)) -> Ordering {
+    b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0))
 }
 
 /// Translate `Traffic::axis` into `world::is_road_line`'s axis convention.
@@ -658,6 +690,7 @@ fn spawn_one_traffic(
     axis: bool,
     dir: f32,
     speed: f32,
+    speed_roll: f32,
     seed: &mut u32,
 ) {
     // Movement direction vector in the XZ plane.
@@ -681,7 +714,12 @@ fn spawn_one_traffic(
         .spawn((
             Transform::from_translation(pos).with_rotation(rotation),
             Visibility::default(),
-            Traffic { speed, axis, dir },
+            Traffic {
+                speed,
+                axis,
+                dir,
+                speed_roll,
+            },
             Collider {
                 // Collider is an axis-aligned world box, so swap the visual
                 // local extents when the root is rotated onto world X.
@@ -890,6 +928,82 @@ mod tests {
                 .abs()
                 < 1e-5
         );
+    }
+
+    #[test]
+    fn neutral_to_surge_to_neutral_restores_speed_and_population() {
+        let level = 2;
+        let modifier = ModifierKind::Standard;
+        let neutral = ActiveEvent(None);
+        let surge = ActiveEvent(Some(EventKind::TrafficSurge));
+        let roll = 0.37;
+
+        let neutral_speed = traffic_speed_for_roll(
+            level,
+            roll,
+            modifier.traffic_speed_multiplier(),
+            neutral.traffic_speed_multiplier(),
+        );
+        let surge_speed = traffic_speed_for_roll(
+            level,
+            roll,
+            modifier.traffic_speed_multiplier(),
+            surge.traffic_speed_multiplier(),
+        );
+        let restored_speed = traffic_speed_for_roll(
+            level,
+            roll,
+            modifier.traffic_speed_multiplier(),
+            neutral.traffic_speed_multiplier(),
+        );
+        assert!(surge_speed > neutral_speed);
+        assert_eq!(restored_speed, neutral_speed);
+
+        let neutral_target = target_traffic_count(
+            level,
+            modifier.traffic_count_multiplier(),
+            neutral.traffic_count_multiplier(),
+        );
+        let surge_target = target_traffic_count(
+            level,
+            modifier.traffic_count_multiplier(),
+            surge.traffic_count_multiplier(),
+        );
+        assert_eq!((neutral_target, surge_target), (2, 4));
+        assert_eq!(traffic_surplus(surge_target, neutral_target), 2);
+        assert_eq!(traffic_surplus(neutral_target, surge_target), 0);
+
+        // A second car with a different immutable roll also returns exactly
+        // to its own neutral speed, proving the transition is not based on a
+        // shared or newly sampled jitter value.
+        let other_roll = 0.81;
+        let other_neutral = traffic_speed_for_roll(
+            level,
+            other_roll,
+            modifier.traffic_speed_multiplier(),
+            neutral.traffic_speed_multiplier(),
+        );
+        let other_surge = traffic_speed_for_roll(
+            level,
+            other_roll,
+            modifier.traffic_speed_multiplier(),
+            surge.traffic_speed_multiplier(),
+        );
+        let other_restored = traffic_speed_for_roll(
+            level,
+            other_roll,
+            modifier.traffic_speed_multiplier(),
+            neutral.traffic_speed_multiplier(),
+        );
+        assert!(other_surge > other_neutral);
+        assert_eq!(other_restored, other_neutral);
+    }
+
+    #[test]
+    fn surplus_despawn_order_is_farthest_then_stable_entity_bits() {
+        let mut candidates: [(u64, f32); 4] = [(30, 25.0), (20, 100.0), (10, 25.0), (40, 4.0)];
+        candidates.sort_by(|a, b| traffic_despawn_order(*a, *b));
+        assert_eq!(candidates, [(20, 100.0), (10, 25.0), (30, 25.0), (40, 4.0)]);
     }
 
     #[test]

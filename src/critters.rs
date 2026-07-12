@@ -2,8 +2,9 @@
 //! that you must **NOT** hit.
 //!
 //! Distinct from chickens (which **award** score): hitting a critter is a
-//! **PENALTY** — at most once per short contact window the car loses 25 health
-//! and 2 chicken-score; every hit still fires particles, SFX, and `CritterHit`.
+//! **PENALTY** — at most once per short contact window the car loses 25 base
+//! health (scaled by the active modifier) and 2 chicken-score; every hit still
+//! fires particles, SFX, and `CritterHit`.
 //!
 //! The module mirrors `chickens.rs` (wander + recycle-ahead + bob + particle
 //! burst + cleanup) but:
@@ -73,7 +74,7 @@ const SCATTER_INNER: f32 = 8.0;
 /// scattered / respawned critters.
 const LATERAL_SPREAD: f32 = 22.0;
 
-/// Health lost per critter hit.
+/// Base health lost per critter hit, before the active damage multiplier.
 const HIT_HEALTH_PENALTY: f32 = 25.0;
 /// Minimum interval between health/score penalties. Contacts during this
 /// bounded window still receive all visual, audio, message and respawn work.
@@ -831,7 +832,8 @@ fn wander_critters(
 // ---------------------------------------------------------------------------
 
 /// On car-to-critter contact (XZ distance < `HIT_RADIUS`): despawn the
-/// critter, apply a cooldown-gated **PENALTY** (`health.0 -= 25`, score -2),
+/// critter, apply a cooldown-gated **PENALTY** (25 base health scaled by the
+/// active modifier, score -2),
 /// write a `CritterHit` message, spawn a **red** particle burst, play a
 /// bad-thud SFX, and respawn ahead. Visual/message handling is retained for
 /// every clustered contact; lethal admitted damage ends the round as Wrecked.
@@ -839,6 +841,7 @@ fn hit_critters(
     mut commands: Commands,
     assets: Res<CritterAssets>,
     cfg: Res<GameConfig>,
+    modifier: Res<ActiveModifier>,
     mut car: Query<(&mut Car, &Transform), Without<Critter>>,
     critters: Query<(Entity, &Transform, &CritterKind, Has<CritterBurstExtra>), With<Critter>>,
     mut health: ResMut<Health>,
@@ -869,7 +872,8 @@ fn hit_critters(
             // --- PENALTY: one health/score loss per short contact window ---
             // Clustered critters are still visibly hit below, but cannot stack
             // several penalties in the same frame or immediate aftermath.
-            let decision = critter_damage_decision(health.0, penalty_cooldown.0);
+            let decision =
+                critter_damage_decision(health.0, penalty_cooldown.0, modifier.damage_multiplier());
             if decision.apply {
                 health.0 = decision.health;
                 score.chickens = score.chickens.saturating_sub(HIT_SCORE_PENALTY);
@@ -1141,17 +1145,35 @@ struct CritterDamageDecision {
     lethal: bool,
 }
 
-/// Pure cooldown/damage decision. A blocked hit preserves health; an admitted
-/// hit clamps at zero and reports lethality for the GameOver transition.
-fn critter_damage_decision(health: f32, cooldown_remaining: f32) -> CritterDamageDecision {
+/// Pure cooldown/damage decision. A blocked hit preserves bounded health; an
+/// admitted hit applies modifier-scaled base damage with finite arithmetic,
+/// clamps health to its representable non-negative range, and reports lethal
+/// boundaries for the GameOver transition.
+fn critter_damage_decision(
+    health: f32,
+    cooldown_remaining: f32,
+    damage_multiplier: f32,
+) -> CritterDamageDecision {
+    let bounded_health = if health.is_nan() {
+        0.0
+    } else {
+        health.clamp(0.0, f32::MAX)
+    };
     if !should_apply_penalty(cooldown_remaining) {
         return CritterDamageDecision {
             apply: false,
-            health,
+            health: bounded_health,
             lethal: false,
         };
     }
-    let health = (health - HIT_HEALTH_PENALTY).max(0.0);
+
+    let multiplier = if damage_multiplier.is_nan() || damage_multiplier <= 0.0 {
+        0.0
+    } else {
+        damage_multiplier
+    };
+    let damage = ((HIT_HEALTH_PENALTY as f64) * (multiplier as f64)).clamp(0.0, f32::MAX as f64);
+    let health = ((bounded_health as f64) - damage).clamp(0.0, f32::MAX as f64) as f32;
     CritterDamageDecision {
         apply: true,
         health,
@@ -1237,17 +1259,9 @@ mod tests {
     }
 
     #[test]
-    fn cooldown_gates_damage_and_admitted_damage_is_bounded() {
+    fn standard_and_glass_cannon_critter_damage_are_exact() {
         assert_eq!(
-            critter_damage_decision(100.0, HIT_PENALTY_COOLDOWN),
-            CritterDamageDecision {
-                apply: false,
-                health: 100.0,
-                lethal: false,
-            }
-        );
-        assert_eq!(
-            critter_damage_decision(100.0, 0.0),
+            critter_damage_decision(100.0, 0.0, ModifierKind::Standard.damage_multiplier()),
             CritterDamageDecision {
                 apply: true,
                 health: 75.0,
@@ -1255,11 +1269,63 @@ mod tests {
             }
         );
         assert_eq!(
-            critter_damage_decision(10.0, 0.0),
+            critter_damage_decision(100.0, 0.0, ModifierKind::GlassCannon.damage_multiplier(),),
+            CritterDamageDecision {
+                apply: true,
+                health: 50.0,
+                lethal: false,
+            }
+        );
+    }
+
+    #[test]
+    fn critter_damage_lethal_boundaries_are_clamped() {
+        assert_eq!(
+            critter_damage_decision(25.0, 0.0, 1.0),
             CritterDamageDecision {
                 apply: true,
                 health: 0.0,
                 lethal: true,
+            }
+        );
+        assert_eq!(
+            critter_damage_decision(25.5, 0.0, 1.0),
+            CritterDamageDecision {
+                apply: true,
+                health: 0.5,
+                lethal: false,
+            }
+        );
+        assert_eq!(
+            critter_damage_decision(10.0, 0.0, f32::INFINITY),
+            CritterDamageDecision {
+                apply: true,
+                health: 0.0,
+                lethal: true,
+            }
+        );
+        assert_eq!(
+            critter_damage_decision(f32::INFINITY, 0.0, 1.0),
+            CritterDamageDecision {
+                apply: true,
+                health: f32::MAX,
+                lethal: false,
+            }
+        );
+    }
+
+    #[test]
+    fn cooldown_preserves_health_and_blocks_scaled_damage() {
+        assert_eq!(
+            critter_damage_decision(
+                100.0,
+                HIT_PENALTY_COOLDOWN,
+                ModifierKind::GlassCannon.damage_multiplier(),
+            ),
+            CritterDamageDecision {
+                apply: false,
+                health: 100.0,
+                lethal: false,
             }
         );
     }

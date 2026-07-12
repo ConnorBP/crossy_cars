@@ -3,6 +3,7 @@ use bevy::mesh::VertexAttributeValues;
 use bevy::prelude::*;
 use std::f32::consts::{FRAC_PI_2, TAU};
 
+use crate::difficulty::Traffic;
 use crate::game::events::ObstacleHit;
 use crate::game::resources::GameConfig;
 use crate::game::state::GameState;
@@ -524,15 +525,41 @@ fn brake_lights(
     }
 }
 
+/// Player velocity in the world XZ plane. Keeping this separate from the
+/// collision query makes signed reverse speed and heading behavior explicit.
+fn player_velocity(heading: f32, speed: f32) -> Vec2 {
+    Vec2::new(-heading.sin(), -heading.cos()) * speed
+}
+
+/// Traffic velocity in the world XZ plane from its axis/direction contract.
+fn traffic_velocity(axis: bool, dir: f32, speed: f32) -> Vec2 {
+    if axis {
+        Vec2::new(dir * speed, 0.0)
+    } else {
+        Vec2::new(0.0, dir * speed)
+    }
+}
+
+/// Impact magnitude against either an immobile obstacle or moving traffic.
+/// Static obstacles retain the player's absolute speed; traffic uses relative
+/// velocity, covering a parked player being rammed as well as closing speeds.
+fn obstacle_impact_speed(player: Vec2, traffic: Option<Vec2>) -> f32 {
+    (player - traffic.unwrap_or(Vec2::ZERO)).length()
+}
+
 /// Ground-level physics + obstacle collisions, run right after `move_car`:
 /// - hop the car up onto any raised curb it drives over (smoothed Y lerp);
-/// - push the car out of any solid obstacle (buildings / trees / lamp posts)
-///   via circle-vs-AABB and kill speed into the wall, emitting an
-///   `ObstacleHit` message so the health system can apply damage.
+/// - push the car out of any solid static obstacle or traffic car via
+///   circle-vs-AABB and kill speed into it, emitting an `ObstacleHit` message
+///   whose impact is the player speed for static objects and relative speed
+///   for traffic.
 pub fn physics_collisions(
-    mut car: Query<(&mut Car, &mut Transform), With<Car>>,
+    mut car: Query<(&mut Car, &mut Transform), (With<Car>, Without<Traffic>)>,
     curbs: Query<(&Curb, &GlobalTransform), (With<Curb>, Without<Car>, Without<Collider>)>,
-    obstacles: Query<(&Collider, &GlobalTransform), (With<Collider>, Without<Car>, Without<Curb>)>,
+    obstacles: Query<
+        (&Collider, &GlobalTransform, Option<&Traffic>),
+        (With<Collider>, Without<Car>, Without<Curb>),
+    >,
     time: Res<Time>,
     mut obstacle_hits: MessageWriter<ObstacleHit>,
 ) {
@@ -557,13 +584,11 @@ pub fn physics_collisions(
     }
     tf.translation.y += (target_y - tf.translation.y) * (1.0 - (-10.0 * dt).exp());
 
-    // --- Obstacle collision: circle-vs-AABB pushout + kill speed into wall. ---
-    let forward = Vec3::new(-car.heading.sin(), 0.0, -car.heading.cos());
-    // Minimum speed for a hit to deal damage — low-speed wall taps (e.g.
-    // pressing into a wall from a standstill) shouldn't hurt, and this also
-    // ignores the tiny speed a freshly-spawned car has.
+    // --- Obstacle collision: circle-vs-AABB pushout + kill speed into it. ---
+    // Minimum relative speed for a hit to deal damage — low-speed wall taps
+    // and gentle traffic contacts should not hurt.
     const MIN_IMPACT_SPEED: f32 = 3.0;
-    for (collider, ot) in &obstacles {
+    for (collider, ot, traffic) in &obstacles {
         let opos = ot.translation();
         // Skip colliders whose GlobalTransform hasn't propagated yet (still
         // IDENTITY at the world origin). No real obstacle sits at the origin
@@ -597,15 +622,18 @@ pub fn physics_collisions(
             };
             tf.translation.x += nx * pen;
             tf.translation.z += nz * pen;
-            let into = forward.x * nx + forward.z * nz;
-            if car.speed.abs() > MIN_IMPACT_SPEED
-                && ((into < 0.0 && car.speed > 0.0) || (into > 0.0 && car.speed < 0.0))
-            {
-                // The car was driving into the wall fast enough to hurt:
-                // report the impact for damage, then kill the speed.
-                obstacle_hits.write(ObstacleHit {
-                    impact_speed: car.speed.abs(),
-                });
+
+            let player_vel = player_velocity(car.heading, car.speed);
+            let traffic_vel =
+                traffic.map(|traffic| traffic_velocity(traffic.axis, traffic.dir, traffic.speed));
+            let relative_velocity = player_vel - traffic_vel.unwrap_or(Vec2::ZERO);
+            let impact_speed = obstacle_impact_speed(player_vel, traffic_vel);
+            let collision_normal = Vec2::new(nx, nz);
+            if impact_speed > MIN_IMPACT_SPEED && relative_velocity.dot(collision_normal) < 0.0 {
+                // The player and obstacle are closing fast enough to hurt.
+                // Report relative impact for traffic, then kill player speed
+                // exactly as for a static obstacle.
+                obstacle_hits.write(ObstacleHit { impact_speed });
                 car.speed = 0.0;
             }
         }
@@ -717,5 +745,39 @@ mod tests {
         assert_eq!(input.throttle, 1.0);
         assert_eq!(input.steer, 1.0);
         assert!(input.brake);
+    }
+
+    #[test]
+    fn static_obstacle_impact_is_absolute_player_speed() {
+        let player = player_velocity(0.0, -7.0);
+        assert!((obstacle_impact_speed(player, None) - 7.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn parked_player_rammed_by_traffic_has_traffic_impact() {
+        let player = player_velocity(0.0, 0.0);
+        let traffic = traffic_velocity(true, 1.0, 6.0);
+        assert!((obstacle_impact_speed(player, Some(traffic)) - 6.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn head_on_traffic_impact_sums_speeds() {
+        let player = player_velocity(0.0, 8.0);
+        let traffic = traffic_velocity(false, 1.0, 5.0);
+        assert!((obstacle_impact_speed(player, Some(traffic)) - 13.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn same_direction_traffic_impact_is_speed_difference() {
+        let player = player_velocity(0.0, 8.0);
+        let traffic = traffic_velocity(false, -1.0, 5.0);
+        assert!((obstacle_impact_speed(player, Some(traffic)) - 3.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn orthogonal_traffic_impact_uses_vector_relative_speed() {
+        let player = player_velocity(0.0, 8.0);
+        let traffic = traffic_velocity(true, 1.0, 6.0);
+        assert!((obstacle_impact_speed(player, Some(traffic)) - 10.0).abs() < 1e-5);
     }
 }

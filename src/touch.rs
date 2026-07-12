@@ -1,7 +1,9 @@
 use bevy::{prelude::*, text::FontSize, window::PrimaryWindow};
 
 use crate::car::{InputFrozen, PlayerInput, TouchInputSet};
-use crate::game::{RestartRequested, state::GameState};
+use crate::game::{
+    RestartRequested, StateAction, TouchStateSet, apply_state_action, state::GameState,
+};
 
 const ACTIVE_Y: f32 = 0.55;
 const STEER_END_X: f32 = 0.45;
@@ -34,21 +36,12 @@ struct ActiveTouch {
     current: Vec2,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TouchStateAction {
-    None,
-    Playing,
-    Paused,
-    Menu,
-    Restart,
-}
-
 pub struct TouchPlugin;
 
 impl Plugin for TouchPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<TouchControlsActive>()
-            .add_systems(Update, touch_state_transitions)
+            .add_systems(Update, touch_state_transitions.in_set(TouchStateSet))
             .add_systems(
                 Update,
                 read_touch_input
@@ -145,33 +138,52 @@ fn merge_touch_input(keyboard: PlayerInput, touches: &[ActiveTouch]) -> PlayerIn
     result
 }
 
-fn touch_state_action(state: GameState, position: Vec2) -> TouchStateAction {
+fn touch_state_action(state: GameState, position: Vec2) -> StateAction {
     match state {
-        GameState::Menu => TouchStateAction::Playing,
+        GameState::Menu => StateAction::Playing,
         GameState::Playing => {
             if position.y < 0.14 && (0.44..=0.56).contains(&position.x) {
-                TouchStateAction::Paused
+                StateAction::Paused
             } else {
-                TouchStateAction::None
+                StateAction::None
             }
         }
         GameState::Paused => {
             if position.x < 1.0 / 3.0 {
-                TouchStateAction::Playing
+                StateAction::Playing
             } else if position.x < 2.0 / 3.0 {
-                TouchStateAction::Restart
+                StateAction::Restart
             } else {
-                TouchStateAction::Menu
+                StateAction::Menu
             }
         }
         GameState::GameOver => {
             if position.x < 2.0 / 3.0 {
-                TouchStateAction::Playing
+                StateAction::Playing
             } else {
-                TouchStateAction::Menu
+                StateAction::Menu
             }
         }
     }
+}
+
+/// Resolve every just-pressed touch without relying on hash iteration order.
+/// The stable priority favors the most consequential state action.
+fn resolve_touch_actions(actions: impl IntoIterator<Item = StateAction>) -> StateAction {
+    fn priority(action: StateAction) -> u8 {
+        match action {
+            StateAction::None => 0,
+            StateAction::Playing => 1,
+            StateAction::Paused => 2,
+            StateAction::Menu => 3,
+            StateAction::Restart => 4,
+        }
+    }
+
+    actions
+        .into_iter()
+        .max_by_key(|&action| priority(action))
+        .unwrap_or(StateAction::None)
 }
 
 fn primary_window_size(windows: &Query<&Window, With<PrimaryWindow>>) -> Option<Vec2> {
@@ -187,28 +199,20 @@ fn touch_state_transitions(
     mut restart: ResMut<RestartRequested>,
     mut next: ResMut<NextState<GameState>>,
 ) {
-    let Some(touch) = touches.iter_just_pressed().next() else {
+    let mut just_pressed = touches.iter_just_pressed().peekable();
+    if just_pressed.peek().is_none() {
         return;
-    };
+    }
     active.0 = true;
 
     let Some(window_size) = primary_window_size(&windows) else {
         return;
     };
-    let Some(position) = normalize_position(touch.position(), window_size) else {
-        return;
-    };
-
-    match touch_state_action(*state.get(), position) {
-        TouchStateAction::None => {}
-        TouchStateAction::Playing => next.set(GameState::Playing),
-        TouchStateAction::Paused => next.set(GameState::Paused),
-        TouchStateAction::Menu => next.set(GameState::Menu),
-        TouchStateAction::Restart => {
-            restart.0 = true;
-            next.set(GameState::Menu);
-        }
-    }
+    let action = resolve_touch_actions(just_pressed.filter_map(|touch| {
+        let position = normalize_position(touch.position(), window_size)?;
+        Some(touch_state_action(*state.get(), position))
+    }));
+    apply_state_action(action, &mut restart, &mut next);
 }
 
 fn read_touch_input(
@@ -468,35 +472,55 @@ mod tests {
     fn state_actions_cover_menu_pause_thirds_and_gameover() {
         assert_eq!(
             touch_state_action(GameState::Menu, Vec2::ZERO),
-            TouchStateAction::Playing
+            StateAction::Playing
         );
         assert_eq!(
             touch_state_action(GameState::Playing, Vec2::new(0.5, 0.1)),
-            TouchStateAction::Paused
+            StateAction::Paused
         );
         assert_eq!(
             touch_state_action(GameState::Playing, Vec2::new(0.9, 0.8)),
-            TouchStateAction::None
+            StateAction::None
         );
         assert_eq!(
             touch_state_action(GameState::Paused, Vec2::new(0.1, 0.9)),
-            TouchStateAction::Playing
+            StateAction::Playing
         );
         assert_eq!(
             touch_state_action(GameState::Paused, Vec2::new(0.5, 0.1)),
-            TouchStateAction::Restart
+            StateAction::Restart
         );
         assert_eq!(
             touch_state_action(GameState::Paused, Vec2::new(0.9, 0.1)),
-            TouchStateAction::Menu
+            StateAction::Menu
         );
         assert_eq!(
             touch_state_action(GameState::GameOver, Vec2::new(0.65, 0.5)),
-            TouchStateAction::Playing
+            StateAction::Playing
         );
         assert_eq!(
             touch_state_action(GameState::GameOver, Vec2::new(0.8, 0.5)),
-            TouchStateAction::Menu
+            StateAction::Menu
+        );
+    }
+
+    #[test]
+    fn simultaneous_touch_actions_have_order_independent_priority() {
+        let forward = resolve_touch_actions([
+            StateAction::Playing,
+            StateAction::Menu,
+            StateAction::Restart,
+        ]);
+        let reverse = resolve_touch_actions([
+            StateAction::Restart,
+            StateAction::Menu,
+            StateAction::Playing,
+        ]);
+        assert_eq!(forward, StateAction::Restart);
+        assert_eq!(reverse, StateAction::Restart);
+        assert_eq!(
+            resolve_touch_actions([StateAction::Playing, StateAction::Menu]),
+            StateAction::Menu
         );
     }
 }

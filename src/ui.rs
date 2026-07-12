@@ -78,6 +78,33 @@ fn is_medal_upgrade(previous: Medal, current: Medal) -> bool {
     medal_points(current) > medal_points(previous)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TerminalConditionResult {
+    displayed_best: u32,
+    new_best: bool,
+    medal: Medal,
+    medal_upgrade: bool,
+}
+
+/// Derive all condition record presentation from the round-start snapshot and
+/// terminal score. This deliberately ignores the live `ConditionBests`
+/// resource so OnEnter persistence ordering cannot change the Game Over UI.
+fn terminal_condition_result(
+    kind: ModifierKind,
+    best_at_round_start: u32,
+    terminal_total: u32,
+) -> TerminalConditionResult {
+    let displayed_best = best_at_round_start.max(terminal_total);
+    let previous_medal = medal_for(kind, best_at_round_start);
+    let medal = medal_for(kind, displayed_best);
+    TerminalConditionResult {
+        displayed_best,
+        new_best: terminal_total > best_at_round_start,
+        medal,
+        medal_upgrade: is_medal_upgrade(previous_medal, medal),
+    }
+}
+
 fn total_medal_points(condition_bests: &ConditionBests) -> u32 {
     ALL_CONDITIONS
         .into_iter()
@@ -579,7 +606,6 @@ fn spawn_gameover(
     reason: Res<GameOverReason>,
     best_at_start: Res<BestAtRoundStart>,
     active_modifier: Res<ActiveModifier>,
-    condition_bests: Res<ConditionBests>,
     conditions_at_start: Res<ConditionBestsAtRoundStart>,
 ) {
     let total = score.chickens + score.coins;
@@ -591,16 +617,9 @@ fn spawn_gameover(
     };
 
     let kind = active_modifier.0;
-    // The persistence system also captures the terminal total on this state
-    // transition. Include it here so presentation is independent of system
-    // ordering while still honoring the live condition record.
-    let condition_best = condition_bests.by_kind[kind.index()].max(total);
-    let condition_best_at_start = conditions_at_start.by_kind[kind.index()];
-    let condition_medal = medal_for(kind, condition_best);
-    let previous_medal = medal_for(kind, condition_best_at_start);
-    let condition_summary = condition_summary(kind, condition_best);
-    let new_condition_best = total > condition_best_at_start;
-    let medal_upgrade = is_medal_upgrade(previous_medal, condition_medal);
+    let condition_result =
+        terminal_condition_result(kind, conditions_at_start.by_kind[kind.index()], total);
+    let condition_summary = condition_summary(kind, condition_result.displayed_best);
 
     let title = match *reason {
         GameOverReason::Wrecked => "Wrecked!",
@@ -687,8 +706,8 @@ fn spawn_gameover(
                     ..default()
                 },
             ));
-            // Record status uses the pre-round snapshot, not the BestScore
-            // resource that may already have been updated during this run.
+            // Record status uses the pre-round snapshot plus terminal score,
+            // independent of persistence-system ordering on this transition.
             p.spawn((
                 Text::new(best_summary),
                 TextFont {
@@ -717,7 +736,7 @@ fn spawn_gameover(
                     ..default()
                 },
             ));
-            if new_condition_best {
+            if condition_result.new_best {
                 p.spawn((
                     Text::new("NEW CONDITION BEST"),
                     TextFont {
@@ -731,9 +750,9 @@ fn spawn_gameover(
                     },
                 ));
             }
-            if medal_upgrade {
+            if condition_result.medal_upgrade {
                 p.spawn((
-                    Text::new(format!("MEDAL UPGRADE: {}", condition_medal.label())),
+                    Text::new(format!("MEDAL UPGRADE: {}", condition_result.medal.label())),
                     TextFont {
                         font_size: FontSize::Px(20.0),
                         ..default()
@@ -854,7 +873,8 @@ fn update_hint(mut commands: Commands, time: Res<Time>, mut q: Query<(Entity, &m
 #[cfg(test)]
 mod tests {
     use super::{
-        TimerUrgency, condition_summary, is_medal_upgrade, is_new_best, medal_points, timer_style,
+        TimerUrgency, condition_summary, is_medal_upgrade, is_new_best, medal_points,
+        terminal_condition_result, timer_style,
     };
     use crate::modifiers::ModifierKind;
     use crate::persist::Medal;
@@ -914,5 +934,24 @@ mod tests {
         assert!(is_medal_upgrade(Medal::None, Medal::Gold));
         assert!(!is_medal_upgrade(Medal::Bronze, Medal::Bronze));
         assert!(!is_medal_upgrade(Medal::Gold, Medal::Silver));
+    }
+
+    #[test]
+    fn terminal_condition_score_drives_summary_and_medal_upgrade() {
+        let upgraded = terminal_condition_result(ModifierKind::Standard, 19, 20);
+        assert_eq!(upgraded.displayed_best, 20);
+        assert!(upgraded.new_best);
+        assert_eq!(upgraded.medal, Medal::Bronze);
+        assert!(upgraded.medal_upgrade);
+
+        let lower_terminal = terminal_condition_result(ModifierKind::Standard, 40, 18);
+        assert_eq!(lower_terminal.displayed_best, 40);
+        assert!(!lower_terminal.new_best);
+        assert_eq!(lower_terminal.medal, Medal::Silver);
+        assert!(!lower_terminal.medal_upgrade);
+
+        let equal = terminal_condition_result(ModifierKind::Standard, 20, 20);
+        assert!(!equal.new_best);
+        assert!(!equal.medal_upgrade);
     }
 }
