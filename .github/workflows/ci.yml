@@ -42,7 +42,7 @@ jobs:
         timeout-minutes: 5
         run: |
           sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends libasound2-dev libudev-dev pkg-config
+          sudo apt-get install --yes --no-install-recommends libasound2-dev libudev-dev libwayland-dev pkg-config
 
       - name: Cache Trunk
         id: trunk-cache
