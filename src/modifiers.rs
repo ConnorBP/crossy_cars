@@ -27,6 +27,18 @@ pub enum ModifierKind {
 }
 
 impl ModifierKind {
+    /// Stable storage index. Do not reorder these values: persisted condition
+    /// bests use this exact Standard-through-Glass-Cannon layout.
+    pub const fn index(self) -> usize {
+        match self {
+            Self::Standard => 0,
+            Self::RushHour => 1,
+            Self::ChickenFrenzy => 2,
+            Self::Stampede => 3,
+            Self::GlassCannon => 4,
+        }
+    }
+
     /// Stable player-facing label for HUDs and round-intro screens.
     pub(crate) const fn display_name(self) -> &'static str {
         match self {
@@ -231,6 +243,13 @@ mod tests {
         ModifierKind::Stampede,
         ModifierKind::GlassCannon,
     ];
+
+    #[test]
+    fn modifier_storage_indices_are_stable() {
+        for (expected, kind) in ALL.into_iter().enumerate() {
+            assert_eq!(kind.index(), expected);
+        }
+    }
 
     #[test]
     fn resources_and_kind_have_safe_defaults() {
