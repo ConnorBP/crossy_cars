@@ -8,7 +8,7 @@ use crate::car::{Car, InputFrozen};
 use crate::game::events::{ChickenHit, CoinCollected, ObstacleHit};
 use crate::game::resources::{GameConfig, GameOverReason, RoundActive, Score, TimeLeft};
 use crate::game::state::GameState;
-use crate::persist::{BestAtRoundStart, BestScore};
+use crate::persist::{BestAtRoundStart, BestScore, ConditionBests, ConditionBestsAtRoundStart};
 
 /// Set while a paused run is being routed through Menu for a safe restart.
 #[derive(Resource, Default)]
@@ -107,16 +107,19 @@ fn reset_car_and_resources(
     mut timeleft: ResMut<TimeLeft>,
     round_active: Res<RoundActive>,
     best: Res<BestScore>,
+    condition_bests: Res<ConditionBests>,
     mut best_at_start: ResMut<BestAtRoundStart>,
+    mut condition_bests_at_start: ResMut<ConditionBestsAtRoundStart>,
     mut car: Query<(&mut Car, &mut Transform)>,
 ) {
-    // Resuming from Paused preserves the entire run, including the original
-    // best-score snapshot and the car's exact state.
+    // Resuming from Paused preserves the entire run, including both original
+    // best-score snapshots and the car's exact state.
     if round_entry_decision(round_active.0) == RoundEntryDecision::Resume {
         return;
     }
 
     best_at_start.0 = best.0;
+    condition_bests_at_start.by_kind = condition_bests.by_kind;
     *score = Score::default();
     *timeleft = TimeLeft::default();
     if let Ok((mut car, mut tf)) = car.single_mut() {

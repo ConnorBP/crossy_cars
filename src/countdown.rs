@@ -17,8 +17,9 @@ use crate::car::InputFrozen;
 use crate::game::SpawnSet;
 use crate::game::resources::RoundActive;
 use crate::game::state::GameState;
-use crate::modifiers::ActiveModifier;
+use crate::modifiers::{ActiveModifier, ModifierKind};
 use crate::palette;
+use crate::persist::{ConditionBestsAtRoundStart, Medal, medal_for};
 
 const PUNCH_DURATION: f32 = 0.2;
 const BASE_FONT_SIZE: f32 = 96.0;
@@ -154,6 +155,7 @@ fn start_countdown(
     mut countdown: ResMut<Countdown>,
     mut input_frozen: ResMut<InputFrozen>,
     active_modifier: Res<ActiveModifier>,
+    condition_bests: Res<ConditionBestsAtRoundStart>,
 ) {
     // Resume from Paused: round already active -> no countdown.
     if round_active.0 {
@@ -166,13 +168,30 @@ fn start_countdown(
     countdown.last_cue = None;
     countdown.punch_remaining = 0.0;
     input_frozen.0 = true;
-    spawn_countdown_overlay(&mut commands, &active_modifier);
+    spawn_countdown_overlay(&mut commands, &active_modifier, &condition_bests);
+}
+
+/// Format the active condition's pre-round record and its earned medal.
+fn format_best_medal(kind: ModifierKind, best: u32) -> String {
+    let medal = match medal_for(kind, best) {
+        Medal::None => "NO MEDAL",
+        Medal::Bronze => "BRONZE",
+        Medal::Silver => "SILVER",
+        Medal::Gold => "GOLD",
+    };
+    format!("BEST {best} · {medal}")
 }
 
 /// Spawn the full-screen centered overlay with a big number/word that
 /// `tick_countdown` updates each frame. The initial span is "3" so there's
 /// no one-frame flash before the first tick fires.
-fn spawn_countdown_overlay(commands: &mut Commands, active_modifier: &ActiveModifier) {
+fn spawn_countdown_overlay(
+    commands: &mut Commands,
+    active_modifier: &ActiveModifier,
+    condition_bests: &ConditionBestsAtRoundStart,
+) {
+    let best = condition_bests.by_kind[active_modifier.0.index()];
+    let best_medal = format_best_medal(active_modifier.0, best);
     commands
         .spawn((
             Node {
@@ -212,6 +231,18 @@ fn spawn_countdown_overlay(commands: &mut Commands, active_modifier: &ActiveModi
                     ..default()
                 },
                 TextColor(active_modifier.color()),
+                Node {
+                    margin: UiRect::bottom(px(3.0)),
+                    ..default()
+                },
+            ));
+            p.spawn((
+                Text::new(best_medal),
+                TextFont {
+                    font_size: FontSize::Px(16.0),
+                    ..default()
+                },
+                TextColor(Color::srgba(0.85, 0.85, 0.9, 1.0).into()),
                 Node {
                     margin: UiRect::bottom(px(18.0)),
                     ..default()
@@ -387,5 +418,37 @@ mod tests {
         assert!((punch_strength(PUNCH_DURATION / 2.0) - 0.5).abs() < f32::EPSILON);
         assert_eq!(punch_strength(0.0), 0.0);
         assert_eq!(punch_strength(-1.0), 0.0);
+    }
+
+    #[test]
+    fn best_medal_format_covers_no_medal_and_all_medals() {
+        assert_eq!(
+            format_best_medal(ModifierKind::Standard, 19),
+            "BEST 19 · NO MEDAL"
+        );
+        assert_eq!(
+            format_best_medal(ModifierKind::Standard, 20),
+            "BEST 20 · BRONZE"
+        );
+        assert_eq!(
+            format_best_medal(ModifierKind::Standard, 40),
+            "BEST 40 · SILVER"
+        );
+        assert_eq!(
+            format_best_medal(ModifierKind::Standard, 70),
+            "BEST 70 · GOLD"
+        );
+    }
+
+    #[test]
+    fn best_medal_format_uses_the_active_conditions_thresholds() {
+        assert_eq!(
+            format_best_medal(ModifierKind::RushHour, 15),
+            "BEST 15 · BRONZE"
+        );
+        assert_eq!(
+            format_best_medal(ModifierKind::ChickenFrenzy, 20),
+            "BEST 20 · NO MEDAL"
+        );
     }
 }

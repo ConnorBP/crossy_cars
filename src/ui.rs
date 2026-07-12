@@ -4,9 +4,19 @@ use crate::car::Car;
 use crate::game::SpawnSet;
 use crate::game::resources::{GameOverReason, Score, TimeLeft};
 use crate::game::state::GameState;
-use crate::modifiers::ActiveModifier;
+use crate::modifiers::{ActiveModifier, ModifierKind};
 use crate::palette;
-use crate::persist::BestAtRoundStart;
+use crate::persist::{
+    BestAtRoundStart, ConditionBests, ConditionBestsAtRoundStart, Medal, medal_for,
+};
+
+const ALL_CONDITIONS: [ModifierKind; 5] = [
+    ModifierKind::Standard,
+    ModifierKind::RushHour,
+    ModifierKind::ChickenFrenzy,
+    ModifierKind::Stampede,
+    ModifierKind::GlassCannon,
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TimerUrgency {
@@ -44,6 +54,36 @@ fn is_new_best(total: u32, best_at_round_start: u32) -> bool {
     total > best_at_round_start
 }
 
+/// Format one condition's record without displaying a meaningless None tier.
+fn condition_summary(kind: ModifierKind, best: u32) -> String {
+    let prefix = format!("{} BEST: {}", kind.display_name(), best);
+    match medal_for(kind, best) {
+        Medal::None => prefix,
+        medal => format!("{prefix} · {}", medal.label()),
+    }
+}
+
+/// Number of earned tiers represented by a medal (maximum three per condition).
+const fn medal_points(medal: Medal) -> u32 {
+    match medal {
+        Medal::None => 0,
+        Medal::Bronze => 1,
+        Medal::Silver => 2,
+        Medal::Gold => 3,
+    }
+}
+
+fn is_medal_upgrade(previous: Medal, current: Medal) -> bool {
+    medal_points(current) > medal_points(previous)
+}
+
+fn total_medal_points(condition_bests: &ConditionBests) -> u32 {
+    ALL_CONDITIONS
+        .into_iter()
+        .map(|kind| medal_points(medal_for(kind, condition_bests.by_kind[kind.index()])))
+        .sum()
+}
+
 // --- UI root markers ---
 #[derive(Component)]
 struct MenuRoot;
@@ -69,6 +109,8 @@ struct ChickensText;
 struct CoinsText;
 #[derive(Component)]
 struct TimerText;
+#[derive(Component)]
+struct MenuMedalsText;
 
 /// Countdown for the transient controls hint; entity is despawned when it hits zero.
 #[derive(Component)]
@@ -108,11 +150,17 @@ impl Plugin for UiPlugin {
                     update_hint,
                 )
                     .run_if(in_state(GameState::Playing)),
-            );
+            )
+            // Persistence loads during Startup, after the initial Menu may
+            // already exist. Refreshing this marker makes the saved medal
+            // tally visible immediately without rebuilding the menu.
+            .add_systems(Update, update_menu_medals);
     }
 }
 
-fn spawn_menu(mut commands: Commands) {
+fn spawn_menu(mut commands: Commands, condition_bests: Res<ConditionBests>) {
+    let earned_medals = total_medal_points(&condition_bests);
+
     commands
         .spawn((
             Node {
@@ -189,9 +237,22 @@ fn spawn_menu(mut commands: Commands) {
                 },
                 TextColor(Color::srgba(0.8, 0.8, 0.85, 1.0).into()),
                 Node {
-                    margin: UiRect::bottom(px(32.0)),
+                    margin: UiRect::bottom(px(18.0)),
                     ..default()
                 },
+            ));
+            p.spawn((
+                Text::new(format!("MEDALS: {earned_medals} / 15")),
+                TextFont {
+                    font_size: FontSize::Px(20.0),
+                    ..default()
+                },
+                TextColor(palette::HUD_TEXT.into()),
+                Node {
+                    margin: UiRect::bottom(px(18.0)),
+                    ..default()
+                },
+                MenuMedalsText,
             ));
             // Prompt
             p.spawn((
@@ -511,6 +572,9 @@ fn spawn_gameover(
     score: Res<Score>,
     reason: Res<GameOverReason>,
     best_at_start: Res<BestAtRoundStart>,
+    active_modifier: Res<ActiveModifier>,
+    condition_bests: Res<ConditionBests>,
+    conditions_at_start: Res<ConditionBestsAtRoundStart>,
 ) {
     let total = score.chickens + score.coins;
     let new_best = is_new_best(total, best_at_start.0);
@@ -519,6 +583,19 @@ fn spawn_gameover(
     } else {
         format!("BEST: {}", best_at_start.0)
     };
+
+    let kind = active_modifier.0;
+    // The persistence system also captures the terminal total on this state
+    // transition. Include it here so presentation is independent of system
+    // ordering while still honoring the live condition record.
+    let condition_best = condition_bests.by_kind[kind.index()].max(total);
+    let condition_best_at_start = conditions_at_start.by_kind[kind.index()];
+    let condition_medal = medal_for(kind, condition_best);
+    let previous_medal = medal_for(kind, condition_best_at_start);
+    let condition_summary = condition_summary(kind, condition_best);
+    let new_condition_best = total > condition_best_at_start;
+    let medal_upgrade = is_medal_upgrade(previous_medal, condition_medal);
+
     let title = match *reason {
         GameOverReason::Wrecked => "Wrecked!",
         GameOverReason::TimeUp => "Time's up!",
@@ -544,12 +621,12 @@ fn spawn_gameover(
             p.spawn((
                 Text::new(title),
                 TextFont {
-                    font_size: FontSize::Px(64.0),
+                    font_size: FontSize::Px(56.0),
                     ..default()
                 },
                 TextColor(palette::HUD_ACCENT.into()),
                 Node {
-                    margin: UiRect::bottom(px(22.0)),
+                    margin: UiRect::bottom(px(14.0)),
                     ..default()
                 },
             ));
@@ -569,12 +646,12 @@ fn spawn_gameover(
             p.spawn((
                 Text::new(format!("{}", total)),
                 TextFont {
-                    font_size: FontSize::Px(40.0),
+                    font_size: FontSize::Px(38.0),
                     ..default()
                 },
                 TextColor(palette::HUD_ACCENT.into()),
                 Node {
-                    margin: UiRect::bottom(px(16.0)),
+                    margin: UiRect::bottom(px(10.0)),
                     ..default()
                 },
             ));
@@ -582,12 +659,12 @@ fn spawn_gameover(
             p.spawn((
                 Text::new(format!("Chickens: {}", score.chickens)),
                 TextFont {
-                    font_size: FontSize::Px(24.0),
+                    font_size: FontSize::Px(21.0),
                     ..default()
                 },
                 TextColor(palette::HUD_TEXT.into()),
                 Node {
-                    margin: UiRect::bottom(px(4.0)),
+                    margin: UiRect::bottom(px(2.0)),
                     ..default()
                 },
             ));
@@ -595,12 +672,12 @@ fn spawn_gameover(
             p.spawn((
                 Text::new(format!("Coins: {}", score.coins)),
                 TextFont {
-                    font_size: FontSize::Px(24.0),
+                    font_size: FontSize::Px(21.0),
                     ..default()
                 },
                 TextColor(palette::HUD_TEXT.into()),
                 Node {
-                    margin: UiRect::bottom(px(28.0)),
+                    margin: UiRect::bottom(px(14.0)),
                     ..default()
                 },
             ));
@@ -609,7 +686,7 @@ fn spawn_gameover(
             p.spawn((
                 Text::new(best_summary),
                 TextFont {
-                    font_size: FontSize::Px(26.0),
+                    font_size: FontSize::Px(24.0),
                     ..default()
                 },
                 TextColor(if new_best {
@@ -618,18 +695,62 @@ fn spawn_gameover(
                     palette::HUD_TEXT.into()
                 }),
                 Node {
-                    margin: UiRect::bottom(px(28.0)),
+                    margin: UiRect::bottom(px(10.0)),
                     ..default()
                 },
             ));
-            // Restart / menu prompt
             p.spawn((
-                Text::new("R / ENTER / SPACE to play again  •  Q / ESC for menu"),
+                Text::new(condition_summary),
                 TextFont {
                     font_size: FontSize::Px(22.0),
                     ..default()
                 },
+                TextColor(active_modifier.color()),
+                Node {
+                    margin: UiRect::bottom(px(6.0)),
+                    ..default()
+                },
+            ));
+            if new_condition_best {
+                p.spawn((
+                    Text::new("NEW CONDITION BEST"),
+                    TextFont {
+                        font_size: FontSize::Px(20.0),
+                        ..default()
+                    },
+                    TextColor(palette::HUD_ACCENT.into()),
+                    Node {
+                        margin: UiRect::bottom(px(4.0)),
+                        ..default()
+                    },
+                ));
+            }
+            if medal_upgrade {
+                p.spawn((
+                    Text::new(format!("MEDAL UPGRADE: {}", condition_medal.label())),
+                    TextFont {
+                        font_size: FontSize::Px(20.0),
+                        ..default()
+                    },
+                    TextColor(palette::HUD_ACCENT.into()),
+                    Node {
+                        margin: UiRect::bottom(px(8.0)),
+                        ..default()
+                    },
+                ));
+            }
+            // Restart / menu prompt
+            p.spawn((
+                Text::new("R / ENTER / SPACE to play again  •  Q / ESC for menu"),
+                TextFont {
+                    font_size: FontSize::Px(19.0),
+                    ..default()
+                },
                 TextColor(Color::srgba(0.8, 0.8, 0.85, 1.0).into()),
+                Node {
+                    margin: UiRect::top(px(8.0)),
+                    ..default()
+                },
             ));
         });
 }
@@ -637,6 +758,19 @@ fn spawn_gameover(
 fn despawn_marker<M: Component>(mut commands: Commands, q: Query<Entity, With<M>>) {
     for e in &q {
         commands.entity(e).despawn();
+    }
+}
+
+fn update_menu_medals(
+    condition_bests: Res<ConditionBests>,
+    mut query: Query<&mut Text, With<MenuMedalsText>>,
+) {
+    if !condition_bests.is_changed() {
+        return;
+    }
+    let earned = total_medal_points(&condition_bests);
+    for mut text in &mut query {
+        **text = format!("MEDALS: {earned} / 15");
     }
 }
 
@@ -713,7 +847,11 @@ fn update_hint(mut commands: Commands, time: Res<Time>, mut q: Query<(Entity, &m
 
 #[cfg(test)]
 mod tests {
-    use super::{TimerUrgency, is_new_best, timer_style};
+    use super::{
+        TimerUrgency, condition_summary, is_medal_upgrade, is_new_best, medal_points, timer_style,
+    };
+    use crate::modifiers::ModifierKind;
+    use crate::persist::Medal;
 
     #[test]
     fn timer_urgency_has_inclusive_thresholds_and_faster_final_pulse() {
@@ -735,5 +873,40 @@ mod tests {
         assert!(is_new_best(11, 10));
         assert!(!is_new_best(10, 10));
         assert!(!is_new_best(9, 10));
+    }
+
+    #[test]
+    fn condition_summary_omits_none_and_includes_threshold_medals() {
+        assert_eq!(
+            condition_summary(ModifierKind::Standard, 19),
+            "Standard BEST: 19"
+        );
+        assert_eq!(
+            condition_summary(ModifierKind::Standard, 20),
+            "Standard BEST: 20 · Bronze"
+        );
+        assert_eq!(
+            condition_summary(ModifierKind::RushHour, 30),
+            "Rush Hour BEST: 30 · Silver"
+        );
+        assert_eq!(
+            condition_summary(ModifierKind::GlassCannon, 80),
+            "Glass Cannon BEST: 80 · Gold"
+        );
+    }
+
+    #[test]
+    fn medal_points_and_upgrades_follow_tier_boundaries() {
+        assert_eq!(medal_points(Medal::None), 0);
+        assert_eq!(medal_points(Medal::Bronze), 1);
+        assert_eq!(medal_points(Medal::Silver), 2);
+        assert_eq!(medal_points(Medal::Gold), 3);
+
+        assert!(is_medal_upgrade(Medal::None, Medal::Bronze));
+        assert!(is_medal_upgrade(Medal::Bronze, Medal::Silver));
+        assert!(is_medal_upgrade(Medal::Silver, Medal::Gold));
+        assert!(is_medal_upgrade(Medal::None, Medal::Gold));
+        assert!(!is_medal_upgrade(Medal::Bronze, Medal::Bronze));
+        assert!(!is_medal_upgrade(Medal::Gold, Medal::Silver));
     }
 }
