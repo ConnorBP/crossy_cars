@@ -29,9 +29,17 @@ from typing import Any, Callable
 DEFAULT_URL = "http://localhost:8080"
 DEFAULT_OUT_DIR = "tools/scenarios"
 BOOT_TIMEOUT_MS = 120_000
-MUTE_STORAGE_KEY = "roady_car_audio_muted"
-# A fresh browser context has fresh sessionStorage. This marker lets us make the
-# initial mute state deterministic without overwriting the value on final reload.
+# M toggles the shared Settings resource, which SettingsPlugin persists as the
+# v1 schema string "v1:<volume>:<muted>:<reduced_motion>" (e.g. "v1:100:1:0")
+# under roady_car_settings. The legacy roady_car_audio_muted key is migrated
+# only when the schema is absent, so we wipe both to start deterministically.
+SETTINGS_STORAGE_KEY = "roady_car_settings"
+LEGACY_MUTE_STORAGE_KEY = "roady_car_audio_muted"
+DEFAULT_SCHEMA = "v1:100:0:0"
+MUTED_SCHEMA = "v1:100:1:0"
+# A fresh browser context has fresh sessionStorage. This marker makes the
+# initial localStorage wipe one-shot, so the later reload genuinely verifies
+# persistence instead of being reset by the init script.
 QA_SESSION_MARKER = "__roady_car_browser_qa_initialized"
 
 
@@ -188,15 +196,19 @@ def run_scenario(args: argparse.Namespace, summary: dict[str, Any]) -> None:
                 device_scale_factor=1,
             )
 
-            # Ensure M always performs false -> true, including when a previous QA
-            # run left the origin muted. sessionStorage makes this initialization
-            # one-shot, so the later reload genuinely verifies persistence.
+            # Ensure M always performs false -> true by starting from the
+            # deterministic fresh schema, including when a previous QA run left
+            # the origin with persisted settings. Wiping both the v1 schema and
+            # the legacy mute bit guarantees the app boots unmuted at v1:100:0:0.
+            # sessionStorage makes this initialization one-shot, so the later
+            # reload genuinely verifies persistence instead of being reset.
             context.add_init_script(
                 script=f"""
                     (() => {{
                         try {{
                             if (sessionStorage.getItem({json.dumps(QA_SESSION_MARKER)}) !== '1') {{
-                                localStorage.setItem({json.dumps(MUTE_STORAGE_KEY)}, 'false');
+                                localStorage.removeItem({json.dumps(SETTINGS_STORAGE_KEY)});
+                                localStorage.removeItem({json.dumps(LEGACY_MUTE_STORAGE_KEY)});
                                 sessionStorage.setItem({json.dumps(QA_SESSION_MARKER)}, '1');
                             }}
                         }} catch (_) {{}}
@@ -366,21 +378,28 @@ def run_scenario(args: argparse.Namespace, summary: dict[str, Any]) -> None:
             )
 
             def toggle_mute() -> str:
+                # The app may have already persisted the default schema on its
+                # first update; either null or the fresh default is unmuted.
                 before = page.evaluate(
-                    f"localStorage.getItem({json.dumps(MUTE_STORAGE_KEY)})"
+                    f"localStorage.getItem({json.dumps(SETTINGS_STORAGE_KEY)})"
                 )
                 assert_condition(
-                    before == "false",
-                    f"mute precondition should be 'false', got {before!r}",
+                    before in (None, DEFAULT_SCHEMA),
+                    f"mute precondition should be {DEFAULT_SCHEMA!r} or absent, got {before!r}",
                 )
                 page.keyboard.press("m")
+                # M flips Settings.muted; SettingsPlugin persists the full v1
+                # schema. Only the muted bit changes (volume/reduced-motion stay).
                 page.wait_for_function(
-                    f"localStorage.getItem({json.dumps(MUTE_STORAGE_KEY)}) === 'true'"
+                    f"localStorage.getItem({json.dumps(SETTINGS_STORAGE_KEY)}) === {json.dumps(MUTED_SCHEMA)}"
                 )
                 after = page.evaluate(
-                    f"localStorage.getItem({json.dumps(MUTE_STORAGE_KEY)})"
+                    f"localStorage.getItem({json.dumps(SETTINGS_STORAGE_KEY)})"
                 )
-                assert_condition(after == "true", "M did not persist muted=true")
+                assert_condition(
+                    after == MUTED_SCHEMA,
+                    f"M did not persist muted schema {MUTED_SCHEMA!r}, got {after!r}",
+                )
                 return after
 
             summary["mute_after_toggle"] = run_step(
@@ -408,11 +427,11 @@ def run_scenario(args: argparse.Namespace, summary: dict[str, Any]) -> None:
                 page.wait_for_load_state("networkidle", timeout=BOOT_TIMEOUT_MS)
                 page.wait_for_timeout(500)
                 persisted = page.evaluate(
-                    f"localStorage.getItem({json.dumps(MUTE_STORAGE_KEY)})"
+                    f"localStorage.getItem({json.dumps(SETTINGS_STORAGE_KEY)})"
                 )
                 assert_condition(
-                    persisted == "true",
-                    f"mute preference did not survive reload: {persisted!r}",
+                    persisted == MUTED_SCHEMA,
+                    f"mute preference did not survive reload: expected {MUTED_SCHEMA!r}, got {persisted!r}",
                 )
                 return persisted
 

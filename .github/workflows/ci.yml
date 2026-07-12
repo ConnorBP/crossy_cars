@@ -137,9 +137,14 @@ jobs:
             --url http://127.0.0.1:8080 \
             --browser-channel chromium \
             --out-dir tools/scenarios/touch || touch_status=$?
+          settings_status=0
+          python tools/browser_settings_scenarios.py \
+            --url http://127.0.0.1:8080 \
+            --browser-channel chromium \
+            --out-dir tools/scenarios/settings || settings_status=$?
 
-          if [ "$audit_status" -ne 0 ] || [ "$scenario_status" -ne 0 ] || [ "$touch_status" -ne 0 ]; then
-            echo "Browser QA failed (audit=$audit_status, desktop=$scenario_status, touch=$touch_status)" >&2
+          if [ "$audit_status" -ne 0 ] || [ "$scenario_status" -ne 0 ] || [ "$touch_status" -ne 0 ] || [ "$settings_status" -ne 0 ]; then
+            echo "Browser QA failed (audit=$audit_status, desktop=$scenario_status, touch=$touch_status, settings=$settings_status)" >&2
             cat /tmp/roady-car-server.log >&2
             exit 1
           fi
