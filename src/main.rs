@@ -16,6 +16,7 @@ mod palette;
 mod persist;
 mod pickups;
 mod run_events;
+mod settings;
 mod shaders;
 mod textures;
 mod touch;
@@ -43,6 +44,7 @@ use objectives::ObjectivesPlugin;
 use persist::PersistPlugin;
 use pickups::PickupsPlugin;
 use run_events::RunEventsPlugin;
+use settings::SettingsPlugin;
 use shaders::ShaderPlugin;
 use textures::TexturesPlugin;
 use touch::TouchPlugin;
@@ -82,6 +84,9 @@ fn main() {
             brightness: 40.0,
             ..default()
         })
+        // Settings is registered separately so its shared resource exists
+        // before audio installs the live mixer bridge.
+        .add_plugins(SettingsPlugin)
         .add_plugins((
             GamePlugin,
             CameraPlugin,

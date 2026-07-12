@@ -21,6 +21,7 @@ use crate::game::events::ObstacleHit;
 use crate::game::resources::RoundActive;
 use crate::game::state::GameState;
 use crate::modifiers::ActiveModifier;
+use crate::settings::Settings;
 
 /// Damage multiplier: `impact_speed * DAMAGE_K` health lost per hit.
 /// A full-speed (~12 u/s) hit => ~48 dmg, so 2-3 hard hits wreck the car.
@@ -163,6 +164,7 @@ fn apply_damage(
     mut commands: Commands,
     audio: Res<DamageAudioHandles>,
     modifier: Res<ActiveModifier>,
+    settings: Res<Settings>,
 ) {
     let mut damaged_this_frame = false;
     for hit in hits.read() {
@@ -196,7 +198,9 @@ fn apply_damage(
             AudioPlayer::new(audio.thud.clone()),
             PlaybackSettings::DESPAWN.with_volume(Volume::Linear(0.5)),
         ));
-        spawn_damage_flash(&mut commands);
+        if should_spawn_damage_flash(settings.reduced_motion) {
+            spawn_damage_flash(&mut commands);
+        }
     }
 }
 
@@ -349,6 +353,11 @@ fn health_color(frac: f32) -> Color {
 // Damage flash vignette
 // ---------------------------------------------------------------------------
 
+/// Whether new damage should produce a full-screen flash.
+fn should_spawn_damage_flash(reduced_motion: bool) -> bool {
+    !reduced_motion
+}
+
 /// Spawn a full-screen red overlay that fades over [`FLASH_DURATION`].
 fn spawn_damage_flash(commands: &mut Commands) {
     commands.spawn((
@@ -395,7 +404,7 @@ fn despawn_marker<M: Component>(mut commands: Commands, q: Query<Entity, With<M>
 
 #[cfg(test)]
 mod tests {
-    use super::{DAMAGE_K, obstacle_damage};
+    use super::{DAMAGE_K, obstacle_damage, should_spawn_damage_flash};
     use crate::modifiers::{ActiveModifier, ModifierKind};
 
     #[test]
@@ -405,6 +414,12 @@ mod tests {
 
         assert_eq!(obstacle_damage(12.0, &standard), 12.0 * DAMAGE_K);
         assert_eq!(obstacle_damage(12.0, &glass_cannon), 12.0 * DAMAGE_K * 2.0);
+    }
+
+    #[test]
+    fn damage_flash_respects_reduced_motion() {
+        assert!(should_spawn_damage_flash(false));
+        assert!(!should_spawn_damage_flash(true));
     }
 
     #[test]

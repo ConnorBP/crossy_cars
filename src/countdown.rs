@@ -20,6 +20,7 @@ use crate::game::state::GameState;
 use crate::modifiers::{ActiveModifier, ModifierKind};
 use crate::palette;
 use crate::persist::{ConditionBestsAtRoundStart, Medal, medal_for};
+use crate::settings::Settings;
 
 const PUNCH_DURATION: f32 = 0.2;
 const BASE_FONT_SIZE: f32 = 96.0;
@@ -296,6 +297,46 @@ fn punch_strength(remaining: f32) -> f32 {
     (remaining / PUNCH_DURATION).clamp(0.0, 1.0)
 }
 
+/// Presentation policy derived from the live accessibility preference.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CountdownMotionFlags {
+    size_punch: bool,
+    color_punch: bool,
+}
+
+fn countdown_motion_flags(reduced_motion: bool) -> CountdownMotionFlags {
+    CountdownMotionFlags {
+        size_punch: !reduced_motion,
+        color_punch: !reduced_motion,
+    }
+}
+
+/// Pure final visual values for the countdown cue. Reduced motion keeps the
+/// cue at its readable base size and accent color while cue text and audio
+/// continue to transition normally.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CountdownVisualValues {
+    font_size: f32,
+    red: f32,
+    green: f32,
+    blue: f32,
+}
+
+fn countdown_visual_values(
+    flags: CountdownMotionFlags,
+    punch_remaining: f32,
+) -> CountdownVisualValues {
+    let punch = punch_strength(punch_remaining);
+    let size_punch = if flags.size_punch { punch } else { 0.0 };
+    let color_punch = if flags.color_punch { punch } else { 0.0 };
+    CountdownVisualValues {
+        font_size: BASE_FONT_SIZE + (PUNCH_FONT_SIZE - BASE_FONT_SIZE) * size_punch,
+        red: 1.0,
+        green: 0.8 + 0.2 * color_punch,
+        blue: 0.35 * color_punch,
+    }
+}
+
 /// Advance 3 → 2 → 1 → GO, emitting one pitched click and restarting the
 /// short text punch on each transition. GO releases gameplay immediately;
 /// its overlay remains only long enough to finish the punch.
@@ -303,6 +344,7 @@ fn tick_countdown(
     mut commands: Commands,
     time: Res<Time>,
     audio: Res<CountdownAudio>,
+    settings: Res<Settings>,
     mut countdown: ResMut<Countdown>,
     mut input_frozen: ResMut<InputFrozen>,
     overlay: Query<Entity, With<CountdownRoot>>,
@@ -341,11 +383,15 @@ fn tick_countdown(
     if !transitioned {
         countdown.punch_remaining = (countdown.punch_remaining - dt).max(0.0);
     }
-    let punch = punch_strength(countdown.punch_remaining);
+    let visual = countdown_visual_values(
+        countdown_motion_flags(settings.reduced_motion),
+        countdown.punch_remaining,
+    );
     for (_, mut font, mut color) in &mut text {
-        font.font_size = FontSize::Px(BASE_FONT_SIZE + (PUNCH_FONT_SIZE - BASE_FONT_SIZE) * punch);
-        // Fade from a bright creamy flash back to the normal gold accent.
-        color.0 = Color::srgb(1.0, 0.8 + 0.2 * punch, 0.35 * punch);
+        font.font_size = FontSize::Px(visual.font_size);
+        // Normal mode fades from a bright creamy flash to the gold accent;
+        // reduced motion holds the accent steady from the next frame onward.
+        color.0 = Color::srgb(visual.red, visual.green, visual.blue);
     }
 
     if countdown.last_cue == Some(CountdownCue::Go) {
@@ -418,6 +464,40 @@ mod tests {
         assert!((punch_strength(PUNCH_DURATION / 2.0) - 0.5).abs() < f32::EPSILON);
         assert_eq!(punch_strength(0.0), 0.0);
         assert_eq!(punch_strength(-1.0), 0.0);
+    }
+
+    #[test]
+    fn reduced_motion_countdown_values_are_static() {
+        let flags = countdown_motion_flags(true);
+        assert!(!flags.size_punch);
+        assert!(!flags.color_punch);
+
+        let transition = countdown_visual_values(flags, PUNCH_DURATION);
+        let settled = countdown_visual_values(flags, 0.0);
+        assert_eq!(transition, settled);
+        assert_eq!(transition.font_size, BASE_FONT_SIZE);
+        assert_eq!(
+            (transition.red, transition.green, transition.blue),
+            (1.0, 0.8, 0.0)
+        );
+    }
+
+    #[test]
+    fn normal_countdown_values_preserve_existing_punch() {
+        let flags = countdown_motion_flags(false);
+        assert!(flags.size_punch);
+        assert!(flags.color_punch);
+
+        let transition = countdown_visual_values(flags, PUNCH_DURATION);
+        assert_eq!(transition.font_size, PUNCH_FONT_SIZE);
+        assert_eq!(
+            (transition.red, transition.green, transition.blue),
+            (1.0, 1.0, 0.35)
+        );
+
+        let settled = countdown_visual_values(flags, 0.0);
+        assert_eq!(settled.font_size, BASE_FONT_SIZE);
+        assert_eq!((settled.red, settled.green, settled.blue), (1.0, 0.8, 0.0));
     }
 
     #[test]

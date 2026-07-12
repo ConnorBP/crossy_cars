@@ -22,6 +22,7 @@ use crate::game::state::GameState;
 use crate::modifiers::ActiveModifier;
 use crate::palette;
 use crate::run_events::ActiveEvent;
+use crate::settings::Settings;
 
 // ---------------------------------------------------------------------------
 // Tuning constants
@@ -104,7 +105,10 @@ fn combo_bonus_for_hit(multiplier: u32, modifier: &ActiveModifier, event: &Activ
 
 #[cfg(test)]
 mod tests {
-    use super::{Combo, combo_bonus_for_hit};
+    use super::{
+        BASE_FONT_SIZE, Combo, PUNCH_FONT_BOOST, combo_bonus_for_hit, combo_motion_flags,
+        combo_visual_values,
+    };
     use crate::modifiers::{ActiveModifier, ModifierKind};
     use crate::run_events::{ActiveEvent, EventKind};
 
@@ -187,6 +191,37 @@ mod tests {
             u32::MAX
         );
     }
+
+    #[test]
+    fn reduced_motion_combo_values_are_static() {
+        let flags = combo_motion_flags(true);
+        assert!(!flags.punch);
+        assert!(!flags.reveal_fade);
+        assert!(!flags.urgency_pulse);
+
+        let start = combo_visual_values(flags, true, 0.05, 1.0, true, 0.0);
+        let later = combo_visual_values(flags, true, 0.95, 0.1, true, 1.0);
+        assert_eq!(start, later);
+        assert_eq!(start.font_size, BASE_FONT_SIZE);
+        assert_eq!(start.alpha, 1.0);
+        assert_eq!(start.reveal, 1.0);
+        assert_eq!(start.warning_mix, 0.0);
+    }
+
+    #[test]
+    fn normal_combo_values_preserve_existing_animation() {
+        let flags = combo_motion_flags(false);
+        assert!(flags.punch);
+        assert!(flags.reveal_fade);
+        assert!(flags.urgency_pulse);
+
+        let values = combo_visual_values(flags, true, 0.5, 1.0, true, 0.5);
+        assert_eq!(values.reveal, 0.5); // smoothstep(0.5)
+        assert_eq!(values.font_size, BASE_FONT_SIZE + PUNCH_FONT_BOOST + 1.0);
+        assert_eq!(values.alpha, 0.5 * (0.72 + 0.28 * 0.5));
+        assert_eq!(values.warning_mix, 0.25 + 0.55 * 0.5);
+        assert_eq!(values.track_alpha, 0.6 * 0.5);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -203,8 +238,8 @@ struct ComboRoot;
 #[derive(Component)]
 struct ComboText;
 
-/// Both parts of the `xN` label. Font size, tier color, and alpha are animated
-/// together by [`update_combo_ui`].
+/// Both parts of the `xN` label. Font size, tier color, and alpha are updated
+/// together by [`update_combo_ui`] (or held stable under reduced motion).
 #[derive(Component)]
 struct ComboLabel;
 
@@ -417,12 +452,94 @@ fn spawn_combo_ui(mut commands: Commands, combo: Res<Combo>) {
         });
 }
 
+/// Presentation switches derived from the live reduced-motion preference.
+/// Keeping these separate makes the policy explicit and independently
+/// testable without advancing gameplay state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ComboMotionFlags {
+    punch: bool,
+    reveal_fade: bool,
+    urgency_pulse: bool,
+}
+
+fn combo_motion_flags(reduced_motion: bool) -> ComboMotionFlags {
+    ComboMotionFlags {
+        punch: !reduced_motion,
+        reveal_fade: !reduced_motion,
+        urgency_pulse: !reduced_motion,
+    }
+}
+
+/// Final presentation values for one frame. Reduced motion uses immediate
+/// visibility, a fixed base font size, stable opacity, and the unchanged tier
+/// color rather than cycling urgency presentation.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ComboVisualValues {
+    reveal: f32,
+    font_size: f32,
+    alpha: f32,
+    warning_mix: f32,
+    track_alpha: f32,
+}
+
+fn combo_visual_values(
+    flags: ComboMotionFlags,
+    active: bool,
+    reveal: f32,
+    punch: f32,
+    urgent: bool,
+    urgency_pulse: f32,
+) -> ComboVisualValues {
+    let reveal = if flags.reveal_fade {
+        let reveal = reveal.clamp(0.0, 1.0);
+        // Smoothstep keeps the first and last reveal frames from popping.
+        reveal * reveal * (3.0 - 2.0 * reveal)
+    } else if active {
+        1.0
+    } else {
+        0.0
+    };
+    let animated_punch = if flags.punch { punch * punch } else { 0.0 };
+    let animated_urgency = if flags.urgency_pulse && urgent {
+        urgency_pulse
+    } else {
+        0.0
+    };
+    let font_size = BASE_FONT_SIZE
+        + PUNCH_FONT_BOOST * animated_punch
+        + if flags.urgency_pulse && urgent {
+            2.0 * animated_urgency
+        } else {
+            0.0
+        };
+    let alpha_pulse = if flags.urgency_pulse && urgent {
+        0.72 + 0.28 * animated_urgency
+    } else {
+        1.0
+    };
+    let warning_mix = if flags.urgency_pulse && urgent {
+        0.25 + 0.55 * animated_urgency
+    } else {
+        0.0
+    };
+
+    ComboVisualValues {
+        reveal,
+        font_size,
+        alpha: reveal * alpha_pulse,
+        warning_mix,
+        track_alpha: 0.6 * reveal,
+    }
+}
+
 /// Refresh and animate the multiplier label, timer bar, and visibility. A hit
 /// punches the existing text, tier changes recolor it, reveal/hide is eased,
-/// and the final part of the timer pulses toward red. No entities are spawned
-/// by this per-frame system.
+/// and the final part of the timer pulses toward red. With reduced motion,
+/// those animations become immediate, stable presentation values. No entities
+/// are spawned by this per-frame system.
 fn update_combo_ui(
     combo: Res<Combo>,
+    settings: Res<Settings>,
     time: Res<Time>,
     mut root: Query<(&mut Visibility, &mut ComboPresentation), With<ComboRoot>>,
     mut text: Query<&mut TextSpan, With<ComboText>>,
@@ -439,11 +556,12 @@ fn update_combo_ui(
 
     let dt = time.delta_secs();
     let active = combo.multiplier > 1;
+    let motion = combo_motion_flags(settings.reduced_motion);
 
     // A count increase means one or more hits landed this frame. Restarting a
     // single component timer gives every increment a crisp punch without
     // creating transient UI entities.
-    if combo.count > presentation.last_count && active {
+    if motion.punch && combo.count > presentation.last_count && active {
         presentation.punch = 1.0;
     }
     presentation.last_count = combo.count;
@@ -451,21 +569,24 @@ fn update_combo_ui(
         presentation.displayed_multiplier = combo.multiplier;
     }
 
-    let reveal_target = if active { 1.0 } else { 0.0 };
-    let reveal_speed = if active {
-        REVEAL_IN_SPEED
+    if motion.reveal_fade {
+        let reveal_target = if active { 1.0 } else { 0.0 };
+        let reveal_speed = if active {
+            REVEAL_IN_SPEED
+        } else {
+            REVEAL_OUT_SPEED
+        };
+        let reveal_step = 1.0 - (-reveal_speed * dt).exp();
+        presentation.reveal += (reveal_target - presentation.reveal) * reveal_step;
+        if !active && presentation.reveal < 0.01 {
+            presentation.reveal = 0.0;
+        }
     } else {
-        REVEAL_OUT_SPEED
-    };
-    let reveal_step = 1.0 - (-reveal_speed * dt).exp();
-    presentation.reveal += (reveal_target - presentation.reveal) * reveal_step;
-    if !active && presentation.reveal < 0.01 {
-        presentation.reveal = 0.0;
+        presentation.reveal = if active { 1.0 } else { 0.0 };
+        presentation.punch = 0.0;
     }
     let reveal = presentation.reveal.clamp(0.0, 1.0);
-    // Smoothstep keeps the first and last reveal frames from popping.
-    let eased_reveal = reveal * reveal * (3.0 - 2.0 * reveal);
-    *visibility = if active || reveal > 0.0 {
+    *visibility = if active || (motion.reveal_fade && reveal > 0.0) {
         Visibility::Visible
     } else {
         Visibility::Hidden
@@ -473,41 +594,40 @@ fn update_combo_ui(
 
     let timer_frac = (combo.timer / COMBO_WINDOW).clamp(0.0, 1.0);
     let urgent = active && timer_frac <= URGENCY_THRESHOLD;
-    if urgent {
+    if motion.urgency_pulse && urgent {
         presentation.urgency_phase += dt * URGENCY_PULSE_SPEED;
     } else {
         presentation.urgency_phase = 0.0;
     }
-    let urgency_pulse = if urgent {
+    let urgency_pulse = if motion.urgency_pulse && urgent {
         (presentation.urgency_phase.sin() + 1.0) * 0.5
     } else {
         0.0
     };
 
-    let punch = presentation.punch * presentation.punch;
-    let font_size =
-        BASE_FONT_SIZE + PUNCH_FONT_BOOST * punch + if urgent { 2.0 * urgency_pulse } else { 0.0 };
-    presentation.punch = (presentation.punch - dt / PUNCH_DURATION).max(0.0);
-
-    let alpha_pulse = if urgent {
-        0.72 + 0.28 * urgency_pulse
-    } else {
-        1.0
-    };
-    let alpha = eased_reveal * alpha_pulse;
-    let warning_mix = if urgent {
-        0.25 + 0.55 * urgency_pulse
-    } else {
-        0.0
-    };
-    let color = combo_tier_color(presentation.displayed_multiplier, warning_mix, alpha);
+    let visual = combo_visual_values(
+        motion,
+        active,
+        reveal,
+        presentation.punch,
+        urgent,
+        urgency_pulse,
+    );
+    if motion.punch {
+        presentation.punch = (presentation.punch - dt / PUNCH_DURATION).max(0.0);
+    }
+    let color = combo_tier_color(
+        presentation.displayed_multiplier,
+        visual.warning_mix,
+        visual.alpha,
+    );
 
     let multiplier_text = format!("{}", presentation.displayed_multiplier);
     for mut span in &mut text {
         **span = multiplier_text.clone();
     }
     for (mut font, mut text_color) in &mut labels {
-        font.font_size = FontSize::Px(font_size);
+        font.font_size = FontSize::Px(visual.font_size);
         text_color.0 = color;
     }
     for (mut node, mut fill_color) in &mut bar_fill {
@@ -515,7 +635,7 @@ fn update_combo_ui(
         fill_color.0 = color;
     }
     for mut track_color in &mut bar_track {
-        track_color.0 = Color::srgba(0.0, 0.0, 0.0, 0.6 * eased_reveal);
+        track_color.0 = Color::srgba(0.0, 0.0, 0.0, visual.track_alpha);
     }
 }
 

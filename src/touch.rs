@@ -2,7 +2,8 @@ use bevy::{prelude::*, text::FontSize, window::PrimaryWindow};
 
 use crate::car::{InputFrozen, PlayerInput, TouchInputSet};
 use crate::game::{
-    RestartRequested, StateAction, TouchStateSet, apply_state_action, state::GameState,
+    RestartRequested, StateAction, TouchStateSet, apply_state_action, settings_closed,
+    state::GameState,
 };
 
 const ACTIVE_Y: f32 = 0.55;
@@ -41,7 +42,12 @@ pub struct TouchPlugin;
 impl Plugin for TouchPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<TouchControlsActive>()
-            .add_systems(Update, touch_state_transitions.in_set(TouchStateSet))
+            .add_systems(
+                Update,
+                touch_state_transitions
+                    .in_set(TouchStateSet)
+                    .run_if(settings_closed),
+            )
             .add_systems(
                 Update,
                 read_touch_input

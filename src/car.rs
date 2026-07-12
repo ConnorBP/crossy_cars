@@ -43,6 +43,67 @@ const COAST_RESPONSE_RATE: f32 = 2.0;
 const BRAKE_RESPONSE_RATE: f32 = 4.0;
 const STOP_SPEED_THRESHOLD: f32 = 0.01;
 
+// Pure player-car geometry shared by spawning and footprint tests. Keeping the
+// wheel/chassis/fascia dimensions together makes it difficult for a cosmetic
+// tweak to separate the running gear from the body again.
+const CAR_RADIUS: f32 = 0.9;
+const BODY_AXES: Vec3 = Vec3::new(0.5, 0.25, 1.0);
+const BODY_CENTER_Y: f32 = 0.35;
+const CHASSIS_WIDTH: f32 = 0.82;
+const CHASSIS_HEIGHT: f32 = 0.16;
+const CHASSIS_LENGTH: f32 = 1.55;
+const CHASSIS_Y: f32 = 0.20;
+const ROCKER_LENGTH: f32 = 1.02;
+const WHEEL_RADIUS: f32 = 0.15;
+const WHEEL_WIDTH: f32 = 0.18;
+const WHEEL_X: f32 = 0.47;
+const WHEEL_Y: f32 = 0.17;
+const WHEEL_Z: f32 = 0.66;
+const BUMPER_WIDTH: f32 = 0.94;
+const BUMPER_DEPTH: f32 = 0.08;
+const BUMPER_Z: f32 = 0.90;
+const SHADOW_BODY_WIDTH: f32 = 1.02;
+const SHADOW_BODY_LENGTH: f32 = 2.0;
+const SHADOW_WHEEL_WIDTH: f32 = 0.28;
+const SHADOW_WHEEL_LENGTH: f32 = 0.34;
+const WHEEL_POSITIONS: [(f32, f32); 4] = [
+    (WHEEL_X, WHEEL_Z),
+    (-WHEEL_X, WHEEL_Z),
+    (WHEEL_X, -WHEEL_Z),
+    (-WHEEL_X, -WHEEL_Z),
+];
+
+#[cfg(test)]
+const fn max_f32(a: f32, b: f32) -> f32 {
+    if a > b { a } else { b }
+}
+
+#[cfg(test)]
+const fn bumper_outer_z() -> f32 {
+    BUMPER_Z + BUMPER_DEPTH * 0.5
+}
+
+/// Half-extents of everything that contacts or overhangs the ground plane.
+#[cfg(test)]
+const fn car_footprint_half_extents() -> (f32, f32) {
+    (
+        max_f32(BODY_AXES.x, WHEEL_X + WHEEL_WIDTH * 0.5),
+        max_f32(BODY_AXES.z, WHEEL_Z + WHEEL_RADIUS),
+    )
+}
+
+/// Aggregate half-extents of the central body patch plus wheel patches.
+#[cfg(test)]
+const fn shadow_footprint_half_extents() -> (f32, f32) {
+    (
+        max_f32(SHADOW_BODY_WIDTH * 0.5, WHEEL_X + SHADOW_WHEEL_WIDTH * 0.5),
+        max_f32(
+            SHADOW_BODY_LENGTH * 0.5,
+            WHEEL_Z + SHADOW_WHEEL_LENGTH * 0.5,
+        ),
+    )
+}
+
 /// Pure speed integration shared by gameplay and tests. Exponential response
 /// keeps the feel consistent across frame rates and makes braking progressively
 /// ease toward rest rather than applying an abrupt fixed-speed cut.
@@ -179,8 +240,6 @@ impl Plugin for CarPlugin {
 /// normals) and the analytic ellipsoid normals give the paint shader a real,
 /// continuous reflection sweep instead of one flat color per cuboid face.
 fn car_body_mesh() -> Mesh {
-    const AXES: Vec3 = Vec3::new(0.5, 0.25, 1.0);
-
     let mut mesh = Sphere::new(0.5)
         .mesh()
         .ico(4)
@@ -193,11 +252,11 @@ fn car_body_mesh() -> Mesh {
         .into_iter()
         .map(|position| {
             let sphere_position = Vec3::from_array(position);
-            let p = sphere_position * (AXES / 0.5);
+            let p = sphere_position * (BODY_AXES / 0.5);
             let n = Vec3::new(
-                p.x / AXES.x.powi(2),
-                p.y / AXES.y.powi(2),
-                p.z / AXES.z.powi(2),
+                p.x / BODY_AXES.x.powi(2),
+                p.y / BODY_AXES.y.powi(2),
+                p.z / BODY_AXES.z.powi(2),
             )
             .normalize();
             (p.to_array(), n.to_array())
@@ -235,10 +294,14 @@ fn spawn_car(
         ..default()
     });
 
-    // Front and rear fascia share the paint and geometry. Thin lamps sit just
-    // proud of their face rather than floating at the ellipsoid's tips.
-    let fascia_mesh = meshes.add(Cuboid::new(0.82, 0.16, 0.09));
-    let bumper_mesh = meshes.add(Cuboid::new(0.9, 0.065, 0.07));
+    // Front and rear fascia overlap the ellipsoid; lower valances overlap both
+    // fascia and chassis so the bumpers have no visible air gap beneath them.
+    let fascia_mesh = meshes.add(Cuboid::new(0.84, 0.17, 0.10));
+    let bumper_mesh = meshes.add(Cuboid::new(BUMPER_WIDTH, 0.075, BUMPER_DEPTH));
+    let valance_mesh = meshes.add(Cuboid::new(0.78, 0.10, 0.16));
+    let chassis_mesh = meshes.add(Cuboid::new(CHASSIS_WIDTH, CHASSIS_HEIGHT, CHASSIS_LENGTH));
+    let rocker_mesh = meshes.add(Cuboid::new(0.10, 0.15, ROCKER_LENGTH));
+    let axle_mesh = meshes.add(Cylinder::new(0.025, 0.88));
     let trim_mat = materials.add(StandardMaterial {
         base_color: Color::srgb(0.06, 0.07, 0.075),
         metallic: 0.65,
@@ -271,10 +334,10 @@ fn spawn_car(
         ..default()
     });
 
-    // Wheels: cylinders with the axle along X, tire-black. Width 0.18 (not 0.3) so
-    // they read as tires, not fat blocks. One slightly wider hub cylinder exposes
-    // a metallic cap on both outside faces without extra entities per side.
-    let wheel_mesh = meshes.add(Cylinder::new(0.15, 0.18));
+    // Wheels: cylinders with the axle along X, tire-black. Their inner sidewalls
+    // overlap the chassis/axles slightly, while the tread remains clear of the
+    // body shell. One shared hub mesh exposes a metallic cap on each outside.
+    let wheel_mesh = meshes.add(Cylinder::new(WHEEL_RADIUS, WHEEL_WIDTH));
     let wheel_mat = materials.add(StandardMaterial {
         base_color: palette::CAR_WHEEL,
         perceptual_roughness: 0.9,
@@ -288,11 +351,29 @@ fn spawn_car(
         ..default()
     });
 
-    // Fake blob shadow: dark alpha-blended patch under the car.
-    let shadow_mesh = meshes.add(Plane3d::default().mesh().size(1.6, 2.4));
-    let shadow_mat = materials.add(StandardMaterial {
-        base_color: Color::srgba(0.0, 0.0, 0.0, 0.35),
+    // Composite fake shadow: a restrained central body patch plus four shared
+    // tire-contact patches follows the actual footprint much more closely than
+    // the old oversized rectangle. All assets are allocated once at startup.
+    let body_shadow_mesh = meshes.add(
+        Plane3d::default()
+            .mesh()
+            .size(SHADOW_BODY_WIDTH, SHADOW_BODY_LENGTH),
+    );
+    let wheel_shadow_mesh = meshes.add(
+        Plane3d::default()
+            .mesh()
+            .size(SHADOW_WHEEL_WIDTH, SHADOW_WHEEL_LENGTH),
+    );
+    let body_shadow_mat = materials.add(StandardMaterial {
+        base_color: Color::srgba(0.0, 0.0, 0.0, 0.24),
         alpha_mode: AlphaMode::Blend,
+        perceptual_roughness: 1.0,
+        ..default()
+    });
+    let wheel_shadow_mat = materials.add(StandardMaterial {
+        base_color: Color::srgba(0.0, 0.0, 0.0, 0.30),
+        alpha_mode: AlphaMode::Blend,
+        perceptual_roughness: 1.0,
         ..default()
     });
 
@@ -311,7 +392,7 @@ fn spawn_car(
             car.spawn((
                 Mesh3d(meshes.add(car_body_mesh())),
                 MeshMaterial3d(textures.car_paint.clone()),
-                Transform::from_xyz(0.0, 0.35, 0.0),
+                Transform::from_xyz(0.0, BODY_CENTER_Y, 0.0),
                 CarBody,
                 BodyMotion::default(),
             ))
@@ -348,47 +429,80 @@ fn spawn_car(
                     Transform::from_xyz(0.0, 0.575, 0.2),
                 ));
 
-                // Painted fascia and dark lower bumper are shared nose-to-tail.
-                for z in [-0.87, 0.87] {
+                // Painted fascia, seated bumper, and subtle lower valance are
+                // shared nose-to-tail. These remain body children so every
+                // painted/lit upper detail follows visual pitch and roll.
+                for z in [-0.88_f32, 0.88] {
+                    let sign = z.signum();
                     body.spawn((
                         Mesh3d(fascia_mesh.clone()),
                         MeshMaterial3d(textures.car_paint.clone()),
-                        Transform::from_xyz(0.0, -0.08, z),
+                        Transform::from_xyz(0.0, -0.07, z),
                     ));
                     body.spawn((
                         Mesh3d(bumper_mesh.clone()),
                         MeshMaterial3d(trim_mat.clone()),
-                        Transform::from_xyz(0.0, -0.18, z.signum() * 0.9),
+                        Transform::from_xyz(0.0, -0.14, sign * BUMPER_Z),
+                    ));
+                    body.spawn((
+                        Mesh3d(valance_mesh.clone()),
+                        MeshMaterial3d(trim_mat.clone()),
+                        Transform::from_xyz(0.0, -0.19, sign * 0.84),
                     ));
                 }
                 // The recessed black grille marks the nose (front is -Z).
                 body.spawn((
                     Mesh3d(grille_mesh.clone()),
                     MeshMaterial3d(grille_mat.clone()),
-                    Transform::from_xyz(0.0, -0.1, -0.922),
+                    Transform::from_xyz(0.0, -0.07, -0.942),
                 ));
                 for x in [-0.27, 0.27] {
                     body.spawn((
                         Mesh3d(headlight_mesh.clone()),
                         MeshMaterial3d(headlight_mat.clone()),
-                        Transform::from_xyz(x, -0.055, -0.929),
+                        Transform::from_xyz(x, -0.055, -0.941),
                     ));
                     body.spawn((
                         Mesh3d(brake_mesh.clone()),
                         MeshMaterial3d(brake_mat.clone()),
-                        Transform::from_xyz(x, -0.055, 0.929),
+                        Transform::from_xyz(x, -0.055, 0.941),
                         BrakeLight,
                     ));
                 }
             });
 
-            // Wheels at the four corners, resting on the ground (radius 0.15
-            // => center y = 0.15). Axle lies along X via from_rotation_z.
-            for &(x, z) in &[(0.6, 0.7), (-0.6, 0.7), (0.6, -0.7), (-0.6, -0.7)] {
+            // The dark running gear stays root-level: pitch/roll is visual body
+            // motion only. Chassis and rockers overlap the wheel inner faces and
+            // the lower valances, making one connected silhouette.
+            car.spawn((
+                Mesh3d(chassis_mesh.clone()),
+                MeshMaterial3d(trim_mat.clone()),
+                Transform::from_xyz(0.0, CHASSIS_Y, 0.0),
+            ));
+            for x in [-0.43, 0.43] {
+                car.spawn((
+                    Mesh3d(rocker_mesh.clone()),
+                    MeshMaterial3d(trim_mat.clone()),
+                    Transform::from_xyz(x, 0.27, 0.0),
+                ));
+            }
+            for z in [-WHEEL_Z, WHEEL_Z] {
+                car.spawn((
+                    Mesh3d(axle_mesh.clone()),
+                    MeshMaterial3d(trim_mat.clone()),
+                    Transform::from_xyz(0.0, WHEEL_Y, z)
+                        .with_rotation(Quat::from_rotation_z(FRAC_PI_2)),
+                ));
+            }
+
+            // Wheels sit modestly inward/up and overlap the axle ends without
+            // penetrating the smooth painted shell. Negative Z remains front.
+            for &(x, z) in &WHEEL_POSITIONS {
                 let mut wheel = car.spawn((
                     Mesh3d(wheel_mesh.clone()),
                     MeshMaterial3d(wheel_mat.clone()),
-                    Transform::from_xyz(x, 0.15, z).with_rotation(Quat::from_rotation_z(FRAC_PI_2)),
+                    Transform::from_xyz(x, WHEEL_Y, z)
+                        .with_rotation(Quat::from_rotation_z(FRAC_PI_2)),
                     Wheel {
                         spin: 0.0,
                         steer: 0.0,
@@ -406,16 +520,20 @@ fn spawn_car(
                 });
             }
 
-            // Blob shadow, flat on the ground under the car. Plane3d::default()
-            // already lies in the XZ plane (normal +Y), so no extra rotation is
-            // needed — only the parent's heading rotation orients the footprint.
-            // y is kept just above the ground; too low (e.g. 0.02) z-fights with
-            // the ground plane under the ortho camera's depth precision.
+            // Plane3d lies in XZ. Separate heights avoid coplanar alpha z-fight;
+            // both stay high enough to avoid the ground plane's depth precision.
             car.spawn((
-                Mesh3d(shadow_mesh.clone()),
-                MeshMaterial3d(shadow_mat.clone()),
-                Transform::from_xyz(0.0, 0.06, 0.0),
+                Mesh3d(body_shadow_mesh.clone()),
+                MeshMaterial3d(body_shadow_mat.clone()),
+                Transform::from_xyz(0.0, 0.058, 0.0),
             ));
+            for &(x, z) in &WHEEL_POSITIONS {
+                car.spawn((
+                    Mesh3d(wheel_shadow_mesh.clone()),
+                    MeshMaterial3d(wheel_shadow_mat.clone()),
+                    Transform::from_xyz(x, 0.062, z),
+                ));
+            }
         });
 }
 
@@ -486,7 +604,7 @@ fn spin_wheels(
     // Rolling: distance travelled / radius => radians. Rebuild the quaternion
     // from independent yaw/base/roll terms every frame so steering cannot
     // accumulate into a tumbling wheel.
-    let spin_delta = car.speed.abs() * dt / 0.15;
+    let spin_delta = car.speed.abs() * dt / WHEEL_RADIUS;
     let steer_alpha = 1.0 - (-14.0 * dt).exp();
     for (mut tf, mut wheel, front) in &mut wheels {
         wheel.spin = (wheel.spin + spin_delta).rem_euclid(TAU);
@@ -588,9 +706,7 @@ pub fn physics_collisions(
         return;
     };
     let dt = time.delta_secs();
-    const CAR_RADIUS: f32 = 0.9;
-
-    // --- Ground height: hop up onto any curb the car is over. ---
+    // --- Ground height: hop up onto any raised curb it drives over. ---
     // Curbs (and obstacles/coins) are children of chunk roots, so their
     // `Transform` is LOCAL to the chunk — use `GlobalTransform` for world
     // positions or collision won't line up with the visuals.
@@ -669,6 +785,49 @@ mod tests {
         map_keyboard_input(
             keys[0], keys[1], keys[2], keys[3], keys[4], keys[5], keys[6], keys[7], keys[8],
         )
+    }
+
+    #[test]
+    fn chassis_spans_both_axles_and_reaches_the_wheels() {
+        let chassis_half_length = CHASSIS_LENGTH * 0.5;
+        let chassis_half_width = CHASSIS_WIDTH * 0.5;
+        let wheel_inner_x = WHEEL_X - WHEEL_WIDTH * 0.5;
+
+        assert!(chassis_half_length >= WHEEL_Z);
+        assert!(chassis_half_width >= wheel_inner_x);
+        assert!((CHASSIS_Y - WHEEL_Y).abs() <= CHASSIS_HEIGHT * 0.5);
+    }
+
+    #[test]
+    fn wheel_layout_is_symmetric_and_inside_bumper_footprint() {
+        for &(x, z) in &WHEEL_POSITIONS {
+            assert!(WHEEL_POSITIONS.contains(&(-x, z)));
+            assert!(WHEEL_POSITIONS.contains(&(x, -z)));
+            assert!(x.abs() <= BUMPER_WIDTH * 0.5 + f32::EPSILON);
+            assert!(z.abs() + WHEEL_RADIUS <= bumper_outer_z());
+        }
+
+        // Preserve the driving convention: exactly two front wheels are -Z.
+        assert_eq!(WHEEL_POSITIONS.iter().filter(|(_, z)| *z < 0.0).count(), 2);
+    }
+
+    #[test]
+    fn bumpers_are_seated_close_to_the_ellipsoid_tips() {
+        let bumper_inner_z = BUMPER_Z - BUMPER_DEPTH * 0.5;
+        assert!(bumper_inner_z < BODY_AXES.z);
+        assert!(bumper_outer_z() <= BODY_AXES.z);
+        assert!(BODY_AXES.z - bumper_outer_z() <= 0.1);
+        assert!(BUMPER_WIDTH <= BODY_AXES.x * 2.0);
+        assert!(BODY_AXES.x * 2.0 - BUMPER_WIDTH <= 0.1);
+    }
+
+    #[test]
+    fn composite_shadow_covers_footprint_without_excess_margin() {
+        let car = car_footprint_half_extents();
+        let shadow = shadow_footprint_half_extents();
+        assert!(shadow.0 >= car.0 && shadow.1 >= car.1);
+        assert!(shadow.0 - car.0 <= 0.1);
+        assert!(shadow.1 - car.1 <= 0.1);
     }
 
     #[test]

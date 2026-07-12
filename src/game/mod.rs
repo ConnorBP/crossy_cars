@@ -9,6 +9,7 @@ use crate::game::events::{ChickenHit, CoinCollected, ObstacleHit};
 use crate::game::resources::{GameConfig, GameOverReason, RoundActive, Score, TimeLeft};
 use crate::game::state::GameState;
 use crate::persist::{BestAtRoundStart, BestScore, ConditionBests, ConditionBestsAtRoundStart};
+use crate::settings::SettingsOpen;
 
 /// Set while a paused run is being routed through Menu for a safe restart.
 #[derive(Resource, Default)]
@@ -32,6 +33,16 @@ pub(crate) enum StateAction {
     Paused,
     Menu,
     Restart,
+}
+
+fn state_transitions_enabled(settings_open: bool) -> bool {
+    !settings_open
+}
+
+/// Run condition preventing gameplay state input from acting through the
+/// settings modal.
+pub(crate) fn settings_closed(settings_open: Res<SettingsOpen>) -> bool {
+    state_transitions_enabled(settings_open.0)
 }
 
 fn state_action_transition(action: StateAction) -> Option<(GameState, bool)> {
@@ -155,25 +166,29 @@ impl Plugin for GamePlugin {
                 Update,
                 menu_input
                     .in_set(KeyboardStateSet)
-                    .run_if(in_state(GameState::Menu)),
+                    .run_if(in_state(GameState::Menu))
+                    .run_if(settings_closed),
             )
             .add_systems(
                 Update,
                 pause_to_paused
                     .in_set(KeyboardStateSet)
-                    .run_if(in_state(GameState::Playing)),
+                    .run_if(in_state(GameState::Playing))
+                    .run_if(settings_closed),
             )
             .add_systems(
                 Update,
                 pause_to_playing
                     .in_set(KeyboardStateSet)
-                    .run_if(in_state(GameState::Paused)),
+                    .run_if(in_state(GameState::Paused))
+                    .run_if(settings_closed),
             )
             .add_systems(
                 Update,
                 gameover_input
                     .in_set(KeyboardStateSet)
-                    .run_if(in_state(GameState::GameOver)),
+                    .run_if(in_state(GameState::GameOver))
+                    .run_if(settings_closed),
             );
     }
 }
@@ -314,7 +329,14 @@ mod tests {
     use super::{
         GameState, PauseDecision, RoundEntryDecision, StateAction, pause_decision,
         resolve_ordered_actions, round_entry_decision, state_action_transition,
+        state_transitions_enabled,
     };
+
+    #[test]
+    fn settings_gate_allows_closed_and_blocks_open() {
+        assert!(state_transitions_enabled(false));
+        assert!(!state_transitions_enabled(true));
+    }
 
     #[test]
     fn round_entry_is_fresh_only_while_inactive() {

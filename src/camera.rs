@@ -11,6 +11,7 @@ use crate::car::Car;
 use crate::game::events::ObstacleHit;
 use crate::game::resources::GameConfig;
 use crate::game::state::GameState;
+use crate::settings::Settings;
 
 /// Exponential smoothing rate for camera follow / zoom (higher = snappier).
 const SMOOTH: f32 = 4.0;
@@ -95,6 +96,7 @@ fn follow_camera(
     mut camera: Query<(&mut Transform, &mut Projection), (With<Camera3d>, Without<Car>)>,
     cfg: Res<GameConfig>,
     time: Res<Time>,
+    settings: Res<Settings>,
     mut shake: ResMut<Shake>,
 ) {
     let Ok((car_t, car)) = car.single() else {
@@ -125,20 +127,23 @@ fn follow_camera(
     // translation is touched; `cam_t.rotation` is never modified (preserves
     // the T7 fixed-iso-rotation no-tilt fix).
     if shake.trauma > 0.001 {
-        // Cheap deterministic pseudo-randomness (no crate). Fract-of-sin gives
-        // a smooth but chaotic-looking signal; advancing `noise` per frame
-        // keeps the direction jittering so the shake feels alive.
-        shake.noise += dt * 53.0;
-        let n = shake.noise;
-        let rand_x = (n.sin() * 43758.5453).fract() * 2.0 - 1.0;
-        let rand_z = ((n * 1.7 + 3.0).sin() * 12543.987).fract() * 2.0 - 1.0;
-        // trauma^2 for a snappy quadratic decay feel. Offset is horizontal
-        // only (XZ) — y is left at the lerped value so the iso height stays
-        // stable (vertical bob would read as a tilt under ortho).
-        let amp = shake.trauma * shake.trauma * MAX_SHAKE_OFFSET;
-        cam_t.translation.x += rand_x * amp;
-        cam_t.translation.z += rand_z * amp;
-        // Exponential decay so the shake tails off smoothly, not linearly.
+        if !settings.reduced_motion {
+            // Cheap deterministic pseudo-randomness (no crate). Fract-of-sin gives
+            // a smooth but chaotic-looking signal; advancing `noise` per frame
+            // keeps the direction jittering so the shake feels alive.
+            shake.noise += dt * 53.0;
+            let n = shake.noise;
+            let rand_x = (n.sin() * 43758.5453).fract() * 2.0 - 1.0;
+            let rand_z = ((n * 1.7 + 3.0).sin() * 12543.987).fract() * 2.0 - 1.0;
+            // trauma^2 for a snappy quadratic decay feel. Offset is horizontal
+            // only (XZ) — y is left at the lerped value so the iso height stays
+            // stable (vertical bob would read as a tilt under ortho).
+            let amp = shake.trauma * shake.trauma * MAX_SHAKE_OFFSET;
+            cam_t.translation.x += rand_x * amp;
+            cam_t.translation.z += rand_z * amp;
+        }
+        // Trauma still decays while reduced motion is enabled, but without
+        // producing any visible offset.
         shake.trauma *= (-SHAKE_DECAY * dt).exp();
         if shake.trauma < 0.001 {
             shake.trauma = 0.0;
@@ -171,8 +176,37 @@ fn follow_camera(
 /// T13: feed `ObstacleHit` messages into the `Shake` trauma accumulator. Runs
 /// before `follow_camera` (chained) so the freshly-added trauma is applied
 /// this same frame. Reads only — never touches the camera or car transform.
-fn handle_obstacle_hits(mut hits: MessageReader<ObstacleHit>, mut shake: ResMut<Shake>) {
+fn handle_obstacle_hits(
+    mut hits: MessageReader<ObstacleHit>,
+    settings: Res<Settings>,
+    mut shake: ResMut<Shake>,
+) {
     for hit in hits.read() {
-        shake.trauma = (shake.trauma + hit.impact_speed * SHAKE_SCALE).clamp(0.0, 1.0);
+        shake.trauma = next_trauma(shake.trauma, hit.impact_speed, settings.reduced_motion);
+    }
+}
+
+/// Return the trauma after one impact, respecting the reduced-motion gate.
+fn next_trauma(current: f32, impact_speed: f32, reduced_motion: bool) -> f32 {
+    if reduced_motion {
+        current
+    } else {
+        (current + impact_speed * SHAKE_SCALE).clamp(0.0, 1.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::next_trauma;
+
+    #[test]
+    fn normal_motion_adds_and_clamps_trauma() {
+        assert_eq!(next_trauma(0.2, 4.0, false), 0.4);
+        assert_eq!(next_trauma(0.8, 12.0, false), 1.0);
+    }
+
+    #[test]
+    fn reduced_motion_does_not_add_trauma() {
+        assert_eq!(next_trauma(0.35, 12.0, true), 0.35);
     }
 }
