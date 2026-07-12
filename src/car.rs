@@ -345,8 +345,19 @@ pub fn physics_collisions(
 
     // --- Obstacle collision: circle-vs-AABB pushout + kill speed into wall. ---
     let forward = Vec3::new(-car.heading.sin(), 0.0, -car.heading.cos());
+    // Minimum speed for a hit to deal damage — low-speed wall taps (e.g.
+    // pressing into a wall from a standstill) shouldn't hurt, and this also
+    // ignores the tiny speed a freshly-spawned car has.
+    const MIN_IMPACT_SPEED: f32 = 3.0;
     for (collider, ot) in &obstacles {
         let opos = ot.translation();
+        // Skip colliders whose GlobalTransform hasn't propagated yet (still
+        // IDENTITY at the world origin). No real obstacle sits at the origin
+        // (all are at |x| >= 6), so this filters the 1-frame stale transform
+        // after chunk spawn that otherwise piles every collider onto the car.
+        if *ot == GlobalTransform::IDENTITY {
+            continue;
+        }
         let dx = tf.translation.x - opos.x;
         let dz = tf.translation.z - opos.z;
         let closest_x = dx.clamp(-collider.half_x, collider.half_x);
@@ -373,9 +384,11 @@ pub fn physics_collisions(
             tf.translation.x += nx * pen;
             tf.translation.z += nz * pen;
             let into = forward.x * nx + forward.z * nz;
-            if (into < 0.0 && car.speed > 0.0) || (into > 0.0 && car.speed < 0.0) {
-                // The car was driving into the wall: report the impact for
-                // damage, then kill the speed.
+            if car.speed.abs() > MIN_IMPACT_SPEED
+                && ((into < 0.0 && car.speed > 0.0) || (into > 0.0 && car.speed < 0.0))
+            {
+                // The car was driving into the wall fast enough to hurt:
+                // report the impact for damage, then kill the speed.
                 obstacle_hits.write(ObstacleHit {
                     impact_speed: car.speed.abs(),
                 });

@@ -355,6 +355,12 @@ pub fn populate_chunk(
 
         // --- Deterministic per-chunk LCG for placement variety ---
         let mut s = seed;
+        // Overlap-rejection footprint list (simple-room-placement): every
+        // building/tree/lamp/obstacle we place pushes its AABB here so later
+        // placements skip spots that overlap it (with a margin). Prevents the
+        // overlapping buildings/obstacles the user reported.
+        let mut placed: Vec<[f32; 4]> = Vec::new();
+
         // ~4 coins spread along the chunk, mostly on the road.
         for _ in 0..4 {
             let cx = (rand(&mut s) * 2.0 - 1.0) * 3.0; // within road ±3
@@ -367,15 +373,19 @@ pub fn populate_chunk(
             ));
         }
 
-        // --- ~3 buildings per side ---
+        // --- ~3 buildings per side (overlap-rejected) ---
         for side in [-1.0_f32, 1.0] {
             for _ in 0..3 {
-                let bx = side * (16.0 + rand(&mut s) * 6.0); // 16..22 from center
-                let bz = z_min + rand(&mut s) * (z_max - z_min);
                 let w = 3.5 + rand(&mut s) * 1.5; // 3.5..5.0
                 let h = 4.0 + rand(&mut s) * 5.0; // 4.0..9.0
                 let d = 3.5 + rand(&mut s) * 1.5;
                 let ci = (rand(&mut s) * 3.0) as usize % 3;
+                let (x_lo, x_hi) = if side > 0.0 { (16.0, 22.0) } else { (-22.0, -16.0) };
+                let Some((bx, bz)) =
+                    try_place(&mut placed, &mut s, w / 2.0, d / 2.0, x_lo, x_hi, z_min, z_max, 1.5, 8)
+                else {
+                    continue;
+                };
                 p.spawn((
                     Transform::from_xyz(bx, 0.0, bz),
                     Visibility::default(),
@@ -408,11 +418,15 @@ pub fn populate_chunk(
             }
         }
 
-        // --- ~3 trees per side ---
+        // --- ~3 trees per side (overlap-rejected) ---
         for side in [-1.0_f32, 1.0] {
             for _ in 0..3 {
-                let tx = side * (8.0 + rand(&mut s) * 5.0); // 8..13 from center
-                let tz = z_min + rand(&mut s) * (z_max - z_min);
+                let (x_lo, x_hi) = if side > 0.0 { (8.0, 13.0) } else { (-13.0, -8.0) };
+                let Some((tx, tz)) =
+                    try_place(&mut placed, &mut s, 0.3, 0.3, x_lo, x_hi, z_min, z_max, 1.0, 8)
+                else {
+                    continue;
+                };
                 p.spawn((
                     Transform::from_xyz(tx, 0.0, tz),
                     Visibility::default(),
@@ -442,11 +456,15 @@ pub fn populate_chunk(
             }
         }
 
-        // --- ~2 lamp posts per side ---
+        // --- ~2 lamp posts per side (overlap-rejected along z; fixed x) ---
         for side in [-1.0_f32, 1.0] {
             for _ in 0..2 {
                 let lx = side * 4.75;
-                let lz = z_min + rand(&mut s) * (z_max - z_min);
+                let Some((_, lz)) = try_place(
+                    &mut placed, &mut s, 0.15, 0.15, lx, lx, z_min, z_max, 2.0, 8,
+                ) else {
+                    continue;
+                };
                 let dir = -side; // arm extends toward the road
                 p.spawn((
                     Transform::from_xyz(lx, 0.0, lz),
@@ -528,13 +546,24 @@ pub fn populate_chunk(
         let hedge_shadow_mesh =
             meshes.add(Plane3d::default().mesh().size(1.4, 0.55));
 
-        // Scatter 2-4 obstacles per chunk (mix of the four types).
+        // Scatter 2-4 obstacles per chunk (mix of the four types, overlap-rejected).
         let n_obs = 2 + (rand(&mut s) * 3.0) as usize; // 2..4
         for _ in 0..n_obs {
             let kind = (rand(&mut s) * 4.0) as usize % 4; // 0=cone,1=hydrant,2=bench,3=hedge
             let side = if rand(&mut s) < 0.5 { -1.0 } else { 1.0 };
-            let ox = side * (6.0 + rand(&mut s) * 2.0); // |x| in 6..8
-            let oz = z_min + rand(&mut s) * (z_max - z_min);
+            // Footprint half-extents per kind (matches the Collider below).
+            let (half_x, half_z) = match kind {
+                0 => (0.2, 0.2),   // cone
+                1 => (0.25, 0.25), // hydrant
+                2 => (0.5, 0.18),  // bench
+                _ => (0.6, 0.25),  // hedge
+            };
+            let (x_lo, x_hi) = (side * 8.0, side * 6.0); // |x| in 6..8
+            let Some((ox, oz)) =
+                try_place(&mut placed, &mut s, half_x, half_z, x_lo, x_hi, z_min, z_max, 0.8, 8)
+            else {
+                continue;
+            };
             match kind {
                 0 => {
                     // Traffic cone: tapered cone body on a square base.
@@ -691,6 +720,43 @@ pub fn populate_chunk(
 fn rand(seed: &mut u32) -> f32 {
     *seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
     (*seed as f32) / (u32::MAX as f32)
+}
+
+/// Overlap-rejection placement (a la "simple room placement"): try up to
+/// `attempts` random positions within `[x_lo,x_hi] x [z_lo,z_hi]` for a box of
+/// half-extents `(half_x, half_z)` plus a `margin`, returning the first that
+/// doesn't overlap any footprint already in `placed`. On success the new
+/// footprint is pushed to `placed`. Footprints are stored as
+/// `[min_x, max_x, min_z, max_z]`.
+fn try_place(
+    placed: &mut Vec<[f32; 4]>,
+    s: &mut u32,
+    half_x: f32,
+    half_z: f32,
+    x_lo: f32,
+    x_hi: f32,
+    z_lo: f32,
+    z_hi: f32,
+    margin: f32,
+    attempts: usize,
+) -> Option<(f32, f32)> {
+    for _ in 0..attempts {
+        let x = x_lo + rand(s) * (x_hi - x_lo);
+        let z = z_lo + rand(s) * (z_hi - z_lo);
+        let minx = x - half_x - margin;
+        let maxx = x + half_x + margin;
+        let minz = z - half_z - margin;
+        let maxz = z + half_z + margin;
+        let overlaps = placed.iter().any(|r| {
+            // AABB-AABB overlap test (inclusive rejected).
+            !(maxx <= r[0] || minx >= r[1] || maxz <= r[2] || minz >= r[3])
+        });
+        if !overlaps {
+            placed.push([minx, maxx, minz, maxz]);
+            return Some((x, z));
+        }
+    }
+    None
 }
 
 /// Recycle trailing chunks to the front as the car advances. When the car is
