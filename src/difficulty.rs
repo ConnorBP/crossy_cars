@@ -363,10 +363,12 @@ fn manage_traffic(
 
     while needed > 0 {
         needed -= 1;
-        let pos = traffic_spawn_pos(car_pos, forward, right, &mut seed);
         let axis = rand(&mut seed) < 0.5; // true = X, false = Z
         let dir = if rand(&mut seed) < 0.5 { 1.0 } else { -1.0 };
         let speed = traffic_speed(difficulty.level, &mut seed);
+        // Choose axis BEFORE position so the spawn can snap the cross-axis
+        // coordinate onto a road grid line (traffic drives on roads, not grass).
+        let pos = traffic_spawn_pos_on_road(car_pos, forward, right, axis, &mut seed);
         spawn_one_traffic(&mut commands, &assets, pos, axis, dir, speed, &mut seed);
     }
 }
@@ -398,10 +400,26 @@ fn traffic_speed(level: u32, seed: &mut u32) -> f32 {
 
 /// A spawn position ahead of the car (along its forward direction) with a
 /// small lateral offset so traffic doesn't spawn on the car's exact path.
-fn traffic_spawn_pos(car_pos: Vec3, forward: Vec3, right: Vec3, seed: &mut u32) -> Vec3 {
+fn traffic_spawn_pos_on_road(
+    car_pos: Vec3,
+    forward: Vec3,
+    right: Vec3,
+    axis: bool,
+    seed: &mut u32,
+) -> Vec3 {
     let ahead = SPAWN_AHEAD_MIN + rand(seed) * SPAWN_AHEAD_RANGE;
     let lat = (rand(seed) * 2.0 - 1.0) * SPAWN_LATERAL;
-    car_pos + forward * ahead + right * lat
+    let mut pos = car_pos + forward * ahead + right * lat;
+    // Snap the CROSS-axis coordinate to the nearest road grid line (a multiple
+    // of the block size 40) so traffic drives ON a road instead of on the
+    // grass. axis=true => moves along X => snap Z; axis=false => snap X.
+    const BLOCK: f32 = 40.0;
+    if axis {
+        pos.z = (pos.z / BLOCK).round() * BLOCK;
+    } else {
+        pos.x = (pos.x / BLOCK).round() * BLOCK;
+    }
+    pos
 }
 
 /// Spawn one traffic car (top-level) with a body + cabin + windshield +

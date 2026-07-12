@@ -11,9 +11,15 @@
 //! ever fails to load, the dome is simply invisible and the flat `ClearColor`
 //! remains, so the scene degrades gracefully.
 
+use bevy::asset::RenderAssetUsages;
+use bevy::color::LinearRgba;
 use bevy::prelude::*;
-use bevy::render::render_resource::AsBindGroup;
+use bevy::render::render_resource::{
+    AsBindGroup, Extent3d, TextureDimension, TextureFormat, TextureViewDescriptor,
+    TextureViewDimension,
+};
 use bevy::shader::ShaderRef;
+use half::f16;
 
 pub struct ShaderPlugin;
 
@@ -160,16 +166,113 @@ fn setup_environment_light(
     let Ok(cam) = cameras.single() else {
         return;
     };
-    // Warm sky → pale horizon → warm ground gradient, matching the existing
-    // `SkyMaterial` dome and the warm directional sun in `world.rs`. Intensity
-    // is kept modest because `main.rs` already sets a bright `GlobalAmbientLight`
-    // (150) — we only want enough IBL for specular reflections on glossy/metal
-    // surfaces, not to double-light the scene.
-    let env = EnvironmentMapLight::hemispherical_gradient(
-        &mut images,
-        Color::srgb(0.55, 0.78, 0.95), // top — sky blue (matches skydome)
-        Color::srgb(0.85, 0.90, 0.95), // mid — pale horizon haze
-        Color::srgb(0.25, 0.22, 0.18), // bottom — warm earth
-    );
+    // A procedural HDR cubemap with a sky gradient + a bright sun disc. The
+    // disc gives low-roughness metallic surfaces (car paint) a sharp bright
+    // streak to reflect — the classic metallic cue. The smooth
+    // `hemispherical_gradient` env was too featureless, so the car read as a
+    // flat red surface instead of metal.
+    let cubemap = images.add(sun_disc_cubemap());
+    let env = EnvironmentMapLight {
+        diffuse_map: cubemap.clone(),
+        specular_map: cubemap,
+        // Bright so reflections are obvious (GlobalAmbientLight was lowered to
+        // 40 in Wave 3; the IBL carries the metallic look).
+        intensity: 6.0,
+        ..default()
+    };
     commands.entity(cam).insert(env);
+}
+
+/// Build a small HDR cubemap (`Rgba16Float`, `RES`×`RES`×6 faces) with a sky
+/// gradient and a bright sun disc on the +Y (up) face. Face order is the wgpu
+/// cubemap order: +X, -X, +Y, -Y, +Z, -Z. Each pixel is 4 f16 in linear space.
+/// The sun disc is HDR (>1.0) so it blooms + reflects strongly on metal.
+fn sun_disc_cubemap() -> Image {
+    const RES: u32 = 64;
+    const FACE: usize = 6;
+    let sky = LinearRgba::rgb(0.35, 0.55, 0.85); // sky blue
+    let horizon = LinearRgba::rgb(0.85, 0.88, 0.93); // pale haze (bright band)
+    let ground = LinearRgba::rgb(0.16, 0.14, 0.11); // warm earth
+    let sun = LinearRgba::rgb(20.0, 18.0, 15.0); // HDR sun (>>1.0 -> strong bloom)
+
+    // Cubemap face indices: 0=+X, 1=-X, 2=+Y, 3=-Y, 4=+Z, 5=-Z.
+    let face_dirs: [(f32, f32, f32); FACE] = [
+        (1.0, 0.0, 0.0),
+        (-1.0, 0.0, 0.0),
+        (0.0, 1.0, 0.0),
+        (0.0, -1.0, 0.0),
+        (0.0, 0.0, 1.0),
+        (0.0, 0.0, -1.0),
+    ];
+    // Sun direction (unit), roughly matching the world.rs directional sun at
+    // (30,25,15) -> normalized.
+    let sun_dir = Vec3::new(30.0, 25.0, 15.0).normalize();
+
+    let mut data: Vec<u8> = Vec::with_capacity(FACE * (RES * RES) as usize * 8);
+    for (_, dir) in face_dirs.iter().enumerate() {
+        let face_normal = Vec3::new(dir.0, dir.1, dir.2);
+        // Build an orthonormal basis (right, up) for this face. Use Z as the
+        // reference "up" for the +Y/-Y faces (whose normal is parallel to Y so
+        // the cross with Y is zero).
+        let world_up = if face_normal.abs().dot(Vec3::Y) > 0.9 {
+            Vec3::Z
+        } else {
+            Vec3::Y
+        };
+        let right = face_normal.cross(world_up).normalize_or_zero();
+        let up = right.cross(face_normal).normalize_or_zero();
+        for y in 0..RES {
+            for x in 0..RES {
+                // Map pixel to a direction within the face ([-1,1] in right/up).
+                let u = (x as f32 / (RES - 1) as f32) * 2.0 - 1.0;
+                let v = (y as f32 / (RES - 1) as f32) * 2.0 - 1.0;
+                let sample_dir = (face_normal + right * u + up * v).normalize();
+                // Gradient by vertical (world Y) component.
+                let sy = sample_dir.y;
+                let mut col = if sy > 0.0 {
+                    // Sky: horizon -> sky blue with height.
+                    let t = sy.clamp(0.0, 1.0);
+                    horizon.mix(&sky, t)
+                } else {
+                    // Ground: horizon -> earth with depth.
+                    let t = (-sy).clamp(0.0, 1.0);
+                    horizon.mix(&ground, t)
+                };
+                // Sun disc: bright where the sample direction is near the sun.
+                // Use a relatively LARGE disc (~18 deg) so the reflection on
+                // the car is an obvious bright streak, not a tiny dot.
+                let d = sample_dir.dot(sun_dir).max(0.0);
+                let disc = ((d - 0.95) / 0.05).clamp(0.0, 1.0); // ~18 deg disc
+                if disc > 0.0 {
+                    col = col.mix(&sun, disc);
+                    // Soft halo around the disc.
+                    let halo = ((d - 0.90) / 0.05).clamp(0.0, 1.0) * 0.5;
+                    col = col + sun * halo * 0.25;
+                }
+                let c = [col.red, col.green, col.blue, 1.0f32];
+                for chan in c {
+                    let h = f16::from_f32(chan);
+                    data.extend_from_slice(&h.to_le_bytes());
+                }
+            }
+        }
+    }
+
+    Image {
+        texture_view_descriptor: Some(TextureViewDescriptor {
+            dimension: Some(TextureViewDimension::Cube),
+            ..Default::default()
+        }),
+        ..Image::new(
+            Extent3d {
+                width: RES,
+                height: RES,
+                depth_or_array_layers: FACE as u32,
+            },
+            TextureDimension::D2,
+            data,
+            TextureFormat::Rgba16Float,
+            RenderAssetUsages::RENDER_WORLD,
+        )
+    }
 }
