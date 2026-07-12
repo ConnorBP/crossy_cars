@@ -153,7 +153,7 @@ jobs:
             echo "::error::One or more prerequisites are not configured. Deployment aborted."
             echo "::error::"
             echo "::error::Required repository VARIABLES (Settings → Secrets and variables → Actions → Variables):"
-            echo "::error::  • CLOUDFLARE_D1_DATABASE_ID  — from `npx wrangler@4 d1 create roady_leaderboard`"
+            echo '::error::  • CLOUDFLARE_D1_DATABASE_ID  — from: npx wrangler@4 d1 create roady_leaderboard'
             echo "::error::  • LEADERBOARD_BASE_URL       — deployed Worker URL for smoke tests"
             echo "::error::"
             echo "::error::Required repository SECRETS (Settings → Secrets and variables → Actions → Secrets):"
@@ -167,7 +167,7 @@ jobs:
             echo "::error::    (installed into the Worker as LB_CLIENT_HMAC_KEY; the two must be identical)"
             echo "::error::"
             echo "::error::One-time Cloudflare setup also required:"
-            echo "::error::  • D1 database `roady_leaderboard` (see CLOUDFLARE_D1_DATABASE_ID above)"
+            echo '::error::  • D1 database roady_leaderboard (see CLOUDFLARE_D1_DATABASE_ID above)'
             echo "::error::  • Turnstile widget (dashboard → Turnstile → add site) → copy the secret key into LB_TURNSTILE_SECRET"
             echo "::error::  • Workers subdomain or custom route so LEADERBOARD_BASE_URL resolves"
             echo "::error::"
@@ -308,7 +308,7 @@ jobs:
           if [ "$health_code" != "200" ]; then
             echo "::error::GET /healthz returned HTTP $health_code, expected 200."
             echo "::error::The Worker may not be deployed, LEADERBOARD_BASE_URL may be wrong,"
-            echo "::error::or the Worker threw on startup. Check `wrangler tail` and the deploy step."
+            echo '::error::or the Worker threw on startup. Check wrangler tail and the deploy step.'
             exit 1
           fi
           if ! echo "$health_body" | grep -q '"ok"[[:space:]]*:[[:space:]]*true'; then
@@ -328,10 +328,10 @@ jobs:
             echo "::error::GET /v1/leaderboard returned HTTP $board_code, expected 200."
             echo "::error::The D1 binding may be missing, migrations may not have applied,"
             echo "::error::or the DB binding name in wrangler.toml is wrong. Check:"
-            echo "::error::  • `wrangler d1 list` shows roady_leaderboard"
+            echo '::error::  • wrangler d1 list shows roady_leaderboard'
             echo "::error::  • leaderboard/wrangler.toml [[d1_databases]] binding = \"DB\""
             echo "::error::  • the migrations step above reported success"
-            echo "::error::  • `wrangler tail` for runtime errors"
+            echo '::error::  • wrangler tail for runtime errors'
             exit 1
           fi
           if ! echo "$board_body" | grep -q '"entries"'; then
