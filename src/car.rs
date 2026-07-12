@@ -178,10 +178,12 @@ fn spawn_car(
             // Blob shadow, flat on the ground under the car. Plane3d::default()
             // already lies in the XZ plane (normal +Y), so no extra rotation is
             // needed — only the parent's heading rotation orients the footprint.
+            // y is kept just above the ground; too low (e.g. 0.02) z-fights with
+            // the ground plane under the ortho camera's depth precision.
             car.spawn((
                 Mesh3d(shadow_mesh.clone()),
                 MeshMaterial3d(shadow_mat.clone()),
-                Transform::from_xyz(0.0, 0.02, 0.0),
+                Transform::from_xyz(0.0, 0.06, 0.0),
             ));
         });
 }

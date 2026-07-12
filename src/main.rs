@@ -1,7 +1,11 @@
 mod audio;
 mod camera;
 mod car;
+mod chickens;
+mod countdown;
+mod effects;
 mod game;
+mod health;
 mod palette;
 mod persist;
 mod shaders;
@@ -15,7 +19,11 @@ use bevy::prelude::*;
 use audio::AudioPlugin;
 use camera::CameraPlugin;
 use car::CarPlugin;
+use chickens::ChickensPlugin;
+use countdown::CountdownPlugin;
+use effects::EffectsPlugin;
 use game::GamePlugin;
+use health::HealthPlugin;
 use persist::PersistPlugin;
 use shaders::ShaderPlugin;
 use textures::TexturesPlugin;
@@ -50,6 +58,10 @@ fn main() {
             ShaderPlugin,
             TexturesPlugin,
             PersistPlugin,
+            ChickensPlugin,
+            HealthPlugin,
+            CountdownPlugin,
+            EffectsPlugin,
         ))
         .run();
 }

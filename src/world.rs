@@ -10,6 +10,7 @@
 //! the car out of any of them with one circle-vs-AABB loop. Curbs keep their
 //! own `Curb` component for the hop-up behaviour.
 
+use bevy::math::primitives::Circle;
 use bevy::prelude::*;
 use bevy::color::LinearRgba;
 
@@ -258,7 +259,7 @@ pub fn populate_chunk(
             perceptual_roughness: 0.85,
             ..default()
         });
-        let tree_shadow_mesh = meshes.add(Plane3d::default().mesh().size(1.8, 1.8));
+        let tree_shadow_mesh = meshes.add(Circle::new(0.9));
 
         let building_colors = [
             Color::srgb(0.92, 0.88, 0.78), // cream
@@ -378,7 +379,7 @@ pub fn populate_chunk(
                             d * 1.4,
                         ))),
                         MeshMaterial3d(shadow_mat.clone()),
-                        Transform::from_xyz(0.0, 0.012, 0.0),
+                        Transform::from_xyz(0.0, 0.05, 0.0),
                     ));
                 });
             }
@@ -412,7 +413,7 @@ pub fn populate_chunk(
                     tp.spawn((
                         Mesh3d(tree_shadow_mesh.clone()),
                         MeshMaterial3d(shadow_mat.clone()),
-                        Transform::from_xyz(0.0, 0.012, 0.0),
+                        Transform::from_xyz(0.0, 0.05, 0.0),
                     ));
                 });
             }

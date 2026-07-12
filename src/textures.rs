@@ -77,13 +77,17 @@ impl FromWorld for TextureAssets {
             ..default()
         });
 
-        // CAR_PAINT — metallic red with flake-style variation + sparkles; tile 2×.
+        // CAR_PAINT — smooth glossy red. A busy sparkle/noise texture reads as
+        // a crawling/shimmering pattern as the car moves (the texels are fixed
+        // to the body but the eye sees the high-frequency pattern shift), so we
+        // keep the texture very smooth and rely on PBR gloss + reflections for
+        // the paint look instead. Tile 1× (no visible repeat).
         let car_paint = materials.add(StandardMaterial {
             base_color: Color::WHITE,
             base_color_texture: Some(images.add(car_paint_texture())),
-            metallic: 0.6,
-            perceptual_roughness: 0.35,
-            uv_transform: Affine2::from_scale(Vec2::splat(2.0)),
+            metallic: 0.35,
+            perceptual_roughness: 0.25,
+            uv_transform: Affine2::from_scale(Vec2::splat(1.0)),
             ..default()
         });
 
@@ -216,17 +220,18 @@ fn sidewalk_texture() -> Image {
     })
 }
 
-/// Car paint: metallic red with flake-style brightness variation + sparkles.
+/// Car paint: smooth glossy red with only very subtle large-scale variation
+/// (no high-frequency sparkle — that reads as a crawling pattern as the car
+/// moves). The gloss comes from PBR roughness/metallic + reflections, not a
+/// noisy texture.
 fn car_paint_texture() -> Image {
     let b = srgb_base(CAR_BODY_SRGB);
     make_image(move |x, y| {
-        let n = noise(x, y);
-        let v = signed_noise(x, y) * 22 / 128;
-        // Bright sparkle for metallic flake highlights.
-        let sparkle = if (n & 0xF) == 0 { 35 } else { 0 };
-        let r = clamp_byte(b[0] + v + sparkle);
-        let g = clamp_byte(b[1] + v / 3 + sparkle / 4);
-        let bl = clamp_byte(b[2] + v / 3 + sparkle / 4);
+        // Gentle low-amplitude variation only — smooth paint, no sparkles.
+        let v = signed_noise(x, y) * 6 / 128;
+        let r = clamp_byte(b[0] + v);
+        let g = clamp_byte(b[1] + v / 3);
+        let bl = clamp_byte(b[2] + v / 3);
         [r, g, bl, 255]
     })
 }

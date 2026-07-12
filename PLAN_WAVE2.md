@@ -327,3 +327,51 @@ T7 (camera.rs), T8 (effects.rs).
 - T7 self-verifies via `cargo check` (camera.rs already wired).
 - T2/T3/T6/T8 are new modules — orchestrator wires all `mod`+`add_plugins` lines in main.rs
   in ONE edit, then `cargo check` + fix.
+
+---
+
+## Addendum 2 — user-requested rendering beef-up (Wave 3)
+
+### T9 — Rendering beef-up (PBR polish)
+User asked: "can we look into beefing up the rendering. Bevy has a PBR mode I think?"
+Answer: `StandardMaterial` IS PBR (metallic/roughness/reflectance/specular/normal/occlusion/
+emissive) — we already use it. The beef-up is about making the PBR look good, within
+WebGL2 limits (no compute -> no SSAO / OIT / runtime EnvironmentMapGeneration; no SSBOs).
+
+- **OWNS:** src/textures.rs, src/shaders.rs, src/camera.rs (camera.rs is free AFTER T7
+  integrates in Wave 2 — do NOT run until T7 is merged).
+- **MUST-NOT-TOUCH:** all other .rs files.
+- **DEPENDS-ON:** T7 integrated (camera.rs free).
+- **DO:**
+  1. camera.rs — add `Tonemapping::TonyMcMapfield` (or `BlenderFilmic`) on the Camera3d +
+     `Bloom { intensity, .. }` (via `Camera3d::bloom` / `Bloom` settings — check 0.19 API).
+     Keep T7's fixed-rotation + lerped-position follow + speed-zoom; ONLY add tonemapping/
+     bloom on top. Add `Msaa::Sample4` resource in CameraPlugin (or main) for edge AA.
+  2. textures.rs — full PBR material pass: smooth glossy car paint (build on the existing
+     smoothness fix: metallic ~0.35, roughness ~0.25), coins emissive (glow), brake lights
+     emissive red, lamp-post bulbs emissive warm, asphalt/road + grass + sidewalk with
+     **procedural normal maps** (generate a normal Image, set `normal_map_texture`) for
+     surface detail without extra geometry. Tune roughness per material.
+  3. shaders.rs — (optional, web-tricky) a **static procedural environment map** for IBL
+     reflections: generate an equirectangular or cubemap Image (sky-gradient + sun) and use
+     `LightProbe` + `EnvironmentMapLight` with pre-baked diffuse/specular. Since
+     `EnvironmentMapGenerationPlugin` is disabled on WebGL2 (no compute), supply a
+     pre-baked cubemap (NOT runtime generation). If this proves too hard / unsupported on
+     web, FALL BACK to: a `DirectionalLight` warm-tuned + `GlobalAmbientLight` sky-tinted +
+     a subtle `AmbientLight`/`EnvironmentMapLight` using the sky shader's gradient as a
+     static reflection. Keep it working on BOTH native and web (cfg-gate the hard parts).
+  4. WebGL2 constraints: no compute, no SSBOs, uniform bindings 16-byte aligned (Vec4 not
+     f32 for any custom shader uniforms — but prefer no new shaders). Keep
+     `const SHADOWS: cfg!(not(target_arch="wasm32"))`.
+- **Car-texture note:** the "car texture moves when the car does" was NOT a slide bug —
+  Cuboid has object-space UVs and uv_transform is static, so the texture is glued to the
+  body. The crawling look came from the busy sparkle/noise + metallic; the smoothness fix
+  is already in. T9 continues the PBR polish.
+
+### Updated Wave 3 (after Wave 2 integrates)
+PARALLEL (disjoint files): T4 (minimap.rs) + T9 (textures.rs + shaders.rs + camera.rs).
+- T9 self-verifies via `cargo check` (camera.rs/textures.rs/shaders.rs all already wired).
+- T4 is a new module — orchestrator wires `mod minimap; add_plugins(MinimapPlugin)` in main.rs.
+Then: cargo check, trunk build, browser-audit (startup + drive + check rendering didn't
+crash), commit Wave 3. Then scout proposes Wave 4+ ideas (day-night, skid marks/drift,
+combos, more obstacle variety, etc.) and the loop continues.

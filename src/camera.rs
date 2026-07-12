@@ -5,7 +5,7 @@ use crate::game::resources::GameConfig;
 use crate::game::state::GameState;
 
 /// Exponential smoothing rate for camera follow / zoom (higher = snappier).
-const SMOOTH: f32 = 6.0;
+const SMOOTH: f32 = 4.0;
 
 pub struct CameraPlugin;
 
@@ -45,17 +45,16 @@ fn follow_camera(
     let dt = time.delta_secs();
     let t = 1.0 - (-SMOOTH * dt).exp();
 
-    // Look-ahead: nudge the view in the car's forward direction (model -Z).
+    // Look-ahead: nudge the follow target in the car's forward direction (model -Z).
+    // Only the POSITION is lerped; rotation stays fixed from spawn so the iso
+    // angle never tilts (a fixed rotation can't wobble as the camera lags).
     let fwd = car_t.rotation * Vec3::new(0.0, 0.0, -1.0);
-    let look_target = car_t.translation + fwd * 1.5;
     let desired = car_t.translation + cfg.cam_offset + fwd * 1.5;
 
     // Smoothed follow: exponential lerp toward the desired iso position.
+    // Rotation is intentionally left untouched — recomputing it per frame from
+    // a live look target while the position lags is what caused the tilt.
     cam_t.translation = cam_t.translation.lerp(desired, t);
-
-    // Rotation tracks the car so the iso angle stays consistent while the
-    // focus point leads slightly into the car's travel direction.
-    cam_t.look_at(look_target, Vec3::Y);
 
     // Speed zoom: widen the orthographic viewport as speed rises. The current
     // viewport_height lives in the projection itself, so we read-modify it.
