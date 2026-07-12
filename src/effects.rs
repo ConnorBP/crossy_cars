@@ -3,7 +3,7 @@
 //!
 //! This module is self-contained and wired by the orchestrator with
 //! `mod effects; add_plugins(EffectsPlugin)`. It only *reads* the car
-//! (`crate::car::{Car, PlayerInput}` + `Transform`) and ground facts from `crate::world`
+//! (`crate::car::{Car, Handbrake, InputFrozen, PlayerInput}` + `Transform`) and ground facts from `crate::world`
 //! (ground plane at y = 0; tire marks sit just above at y ≈ 0.02 to avoid
 //! z-fighting). No other `.rs` file is edited.
 //!
@@ -24,7 +24,7 @@
 
 use bevy::prelude::*;
 
-use crate::car::{Car, PlayerInput};
+use crate::car::{Car, Handbrake, InputFrozen, PlayerInput};
 use crate::game::events::ObstacleHit;
 use crate::game::state::GameState;
 
@@ -34,10 +34,11 @@ use crate::game::state::GameState;
 
 /// Rear-wheel offsets in CAR-LOCAL space (x, z). The car drives toward -Z at
 /// heading 0, so the rear is +Z. The wheels in `car.rs` sit at
-/// `(±0.6, 0.7)`/`(±0.6, -0.7)`; the rear pair is the +0.7 (z) ones. Y is the
-/// ground-contact height for the mark; particles start a touch higher.
-const REAR_WHEEL_X: f32 = 0.6;
-const REAR_WHEEL_Z: f32 = 0.7;
+/// `(±WHEEL_X, ±WHEEL_Z)` = `(±0.47, ±0.66)`; the rear pair is the +0.66 (z)
+/// ones. Y is the ground-contact height for the mark; particles start a touch
+/// higher.
+const REAR_WHEEL_X: f32 = 0.47;
+const REAR_WHEEL_Z: f32 = 0.66;
 
 /// Y for tire-mark quads — just above the ground (y = 0) to avoid z-fighting
 /// with the road plane (world.rs renders the road at y = 0.02, so we sit a
@@ -64,6 +65,14 @@ const SPEED_THRESHOLD: f32 = 4.0;
 /// only to the dedicated brake control, so reverse throttle does not emit a
 /// braking skid.
 const BRAKE_SKID_SPEED: f32 = 4.0;
+
+/// Handbrake drift skid threshold. While the handbrake is held with steering
+/// and forward speed above this value the rear tires scrub continuously,
+/// laying marks and smoke through the same capped pools. It matches the
+/// drift breakaway speed in `car.rs` so skid and slip engage together, and is
+/// forward-only to preserve reverse semantics. Steering is required so a
+/// stationary handbrake (no drift) produces no skid.
+const HANDBRAKE_SKID_SPEED: f32 = 1.0;
 
 /// Tire-mark lifetime (seconds) before it fades out fully and is recycled.
 const MARK_LIFETIME: f32 = 3.5;
@@ -263,13 +272,16 @@ struct EmitState {
     initialized: bool,
 }
 
-/// Detect fast turns or hard service braking and spawn tire marks + smoke at
-/// the rear wheels. Also reads `ObstacleHit` for a small impact smoke puff
-/// (multiple readers of the
-/// same message are fine — T2 reads it too).
+/// Detect fast turns, hard service braking, or held-handbrake drift and spawn
+/// tire marks + smoke at the rear wheels. Also reads `ObstacleHit` for a small
+/// impact smoke puff (multiple readers of the
+/// same message are fine — T2 reads it too). Respects `InputFrozen`: while a
+/// countdown/freeze is active no new effects emit (the car is stationary).
 fn emit_tire_effects(
     car: Query<(&Car, &Transform), (With<Car>, Without<TireMark>, Without<Smoke>)>,
     input: Res<PlayerInput>,
+    handbrake: Res<Handbrake>,
+    input_frozen: Res<InputFrozen>,
     mut commands: Commands,
     assets: Res<EffectsAssets>,
     time: Res<Time>,
@@ -296,6 +308,14 @@ fn emit_tire_effects(
     >,
     mut obstacle_hits: MessageReader<ObstacleHit>,
 ) {
+    // Respect the countdown/freeze schedule: while input is frozen the car is
+    // stationary and no new drift/brake skid emits. (The car's heading/speed
+    // don't change while frozen either, so `ang_vel` is ~0 and input is
+    // cleared, but this early return makes the freeze contract explicit and
+    // avoids reading stale messages during the countdown.)
+    if input_frozen.0 {
+        return;
+    }
     let Ok((car, car_t)) = car.single() else {
         return;
     };
@@ -316,7 +336,7 @@ fn emit_tire_effects(
     let ang_vel = dh / dt.max(1e-4);
     state.prev_heading = car.heading;
 
-    let skidding = should_skid(ang_vel, car.speed, *input);
+    let skidding = should_skid(ang_vel, car.speed, *input, handbrake.0);
 
     // --- Rear-wheel world positions ---
     // Local offsets rotated by the car's heading (yaw about Y), then offset
@@ -324,8 +344,10 @@ fn emit_tire_effects(
     let (left_w, right_w) = rear_wheel_world(car_t, REAR_WHEEL_X, REAR_WHEEL_Z);
 
     // Forward direction along travel (for orienting marks + driving smoke
-    // drift). Matches `car.rs` forward = (-sin h, 0, -cos h).
-    let fwd = Vec3::new(-car.heading.sin(), 0.0, -car.heading.cos());
+    // drift). Includes any active drift slip so the trail follows the path
+    // the car is actually moving, not just where its nose points.
+    let travel_angle = car.heading + car.drift;
+    let fwd = Vec3::new(-travel_angle.sin(), 0.0, -travel_angle.cos());
 
     // Gather this frame's requests before touching either pool. Processing a
     // batch lets each existing entity be claimed at most once and lets pending
@@ -337,7 +359,7 @@ fn emit_tire_effects(
             mark_emissions.push(MarkEmission {
                 pos,
                 fwd,
-                heading: car.heading,
+                heading: travel_angle,
             });
         }
     }
@@ -715,15 +737,21 @@ fn pool_has_spawn_capacity(existing: usize, pending_spawns: usize, cap: usize) -
 /// Pure skid decision shared by the emitter and focused behavior tests.
 /// Cornering keeps the existing angular-velocity/speed proxy, while hard
 /// service braking can independently produce the same rear mark/smoke pools.
-fn should_skid(angular_velocity: f32, speed: f32, input: PlayerInput) -> bool {
+/// A held handbrake with steering and forward speed above
+/// `HANDBRAKE_SKID_SPEED` (the arcade drift condition) also scrubs the rear
+/// tires continuously, so drifting lays a steady trail of marks and smoke.
+fn should_skid(angular_velocity: f32, speed: f32, input: PlayerInput, handbrake: bool) -> bool {
     let turning_skid = angular_velocity.abs() > ANG_VEL_THRESHOLD && speed.abs() > SPEED_THRESHOLD;
     let braking_skid = input.brake && speed.abs() > BRAKE_SKID_SPEED;
-    turning_skid || braking_skid
+    let handbrake_skid = handbrake && input.steer.abs() > 0.0 && speed > HANDBRAKE_SKID_SPEED;
+    turning_skid || braking_skid || handbrake_skid
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{PoolSlot, pool_has_spawn_capacity, should_skid, take_pool_slot};
+    use super::{
+        HANDBRAKE_SKID_SPEED, PoolSlot, pool_has_spawn_capacity, should_skid, take_pool_slot,
+    };
     use crate::car::PlayerInput;
 
     #[test]
@@ -761,7 +789,7 @@ mod tests {
 
     #[test]
     fn fast_turn_without_braking_skids() {
-        assert!(should_skid(1.3, 6.0, PlayerInput::default()));
+        assert!(should_skid(1.3, 6.0, PlayerInput::default(), false));
     }
 
     #[test]
@@ -772,7 +800,8 @@ mod tests {
             PlayerInput {
                 brake: true,
                 ..PlayerInput::default()
-            }
+            },
+            false
         ));
     }
 
@@ -784,13 +813,14 @@ mod tests {
             PlayerInput {
                 brake: true,
                 ..PlayerInput::default()
-            }
+            },
+            false
         ));
     }
 
     #[test]
     fn no_input_does_not_skid() {
-        assert!(!should_skid(0.0, 8.0, PlayerInput::default()));
+        assert!(!should_skid(0.0, 8.0, PlayerInput::default(), false));
     }
 
     #[test]
@@ -801,8 +831,55 @@ mod tests {
             PlayerInput {
                 throttle: -1.0,
                 ..PlayerInput::default()
-            }
+            },
+            false
         ));
+    }
+
+    // --- Handbrake drift skid -------------------------------------------
+
+    #[test]
+    fn handbrake_drift_skids_above_threshold() {
+        let drift = PlayerInput {
+            steer: 1.0,
+            ..PlayerInput::default()
+        };
+        assert!(should_skid(0.0, HANDBRAKE_SKID_SPEED + 1.0, drift, true));
+    }
+
+    #[test]
+    fn handbrake_skid_threshold_blocks_low_speed() {
+        let drift = PlayerInput {
+            steer: 1.0,
+            ..PlayerInput::default()
+        };
+        // At/below the threshold no skid — matches the drift breakaway speed.
+        assert!(!should_skid(0.0, HANDBRAKE_SKID_SPEED, drift, true));
+        assert!(!should_skid(0.0, HANDBRAKE_SKID_SPEED - 0.01, drift, true));
+        assert!(!should_skid(0.0, 0.0, drift, true));
+    }
+
+    #[test]
+    fn handbrake_without_steering_does_not_skid() {
+        let no_steer = PlayerInput::default();
+        assert!(!should_skid(0.0, 8.0, no_steer, true));
+    }
+
+    #[test]
+    fn handbrake_in_reverse_does_not_skid() {
+        // Forward-only: preserving reverse semantics, a reverse handbrake is
+        // not a drift skid (reverse keeps its normal behavior).
+        let steer = PlayerInput {
+            steer: 1.0,
+            ..PlayerInput::default()
+        };
+        assert!(!should_skid(0.0, -8.0, steer, true));
+    }
+
+    #[test]
+    fn handbrake_flag_alone_is_not_a_skid_without_drift_conditions() {
+        // handbrake=true with neither speed nor steer must not skid on its own.
+        assert!(!should_skid(0.0, 0.0, PlayerInput::default(), true));
     }
 }
 

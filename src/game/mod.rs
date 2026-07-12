@@ -216,6 +216,7 @@ fn reset_car_and_resources(
     if let Ok((mut car, mut tf)) = car.single_mut() {
         car.speed = 0.0;
         car.heading = 0.0;
+        car.drift = 0.0;
         *tf = Transform::default();
     }
 }

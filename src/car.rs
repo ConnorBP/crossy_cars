@@ -18,6 +18,11 @@ use crate::world::{
 pub struct Car {
     pub speed: f32,
     pub heading: f32,
+    /// Arcade drift slip angle (radians). The car visually faces `heading`
+    /// but travels along `heading + drift`. Built only while the handbrake
+    /// is held with steering and forward speed; decays to zero otherwise.
+    /// Hard-clamped to `±DRIFT_MAX` so it can never grow unbounded.
+    pub drift: f32,
 }
 
 /// Freeze car input (and round-timer burn) while a countdown is active. Set
@@ -27,6 +32,11 @@ pub struct InputFrozen(pub bool);
 
 /// Centralized player driving intent. Keyboard input populates this resource;
 /// other input methods can write the same normalized controls later.
+///
+/// The handbrake (drift trigger) lives in a sibling [`Handbrake`] resource
+/// rather than a field here so existing `PlayerInput` struct literals in other
+/// modules stay source-compatible. It is populated and cleared alongside
+/// this resource by `read_keyboard_input`.
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Default)]
 pub struct PlayerInput {
     /// Reverse (-1.0) through forward (1.0).
@@ -37,6 +47,14 @@ pub struct PlayerInput {
     pub brake: bool,
 }
 
+/// Handbrake (drift) intent, mapped from both Shift keys by
+/// `read_keyboard_input`. Like `PlayerInput`, it is cleared while frozen or
+/// outside `Playing`. The handbrake **never** acts as a service brake —
+/// `next_speed` is unaware of it — so Shift alone never zeroes speed; it only
+/// enables arcade drift (tighter turning + bounded lateral slip) in `move_car`.
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Handbrake(pub bool);
+
 // Exponential speed-response rates (per second). Service braking is
 // deliberately stronger than acceleration/coasting without snapping the car
 // to a halt: from speed 12 it takes about 1.75 s to reach the stop threshold,
@@ -45,6 +63,27 @@ const ACCEL_RESPONSE_RATE: f32 = 3.0;
 const COAST_RESPONSE_RATE: f32 = 2.0;
 const BRAKE_RESPONSE_RATE: f32 = 4.0;
 const STOP_SPEED_THRESHOLD: f32 = 0.01;
+
+// Arcade handbrake drift tuning. Drift is a bounded slip angle between the
+// car's facing (`heading`) and its travel direction (`heading + drift`). It
+// only builds while the handbrake is held with steering and forward speed,
+// recovers smoothly on release, and is hard-clamped so it can never grow
+// unbounded. The handbrake never touches speed integration, so Shift alone
+// never service-brakes / zeroes speed — it only widens turning and adds slip.
+/// Peak slip angle (radians, ~28°). Hard clamp bound for `Car::drift`.
+const DRIFT_MAX: f32 = 0.5;
+/// Slip approach rate while drifting (1/s). Exponential, frame-rate
+/// independent. Speed-scaled by `speed/max_speed` in `next_drift` so a
+/// low-speed drift creeps in and a high-speed one snaps in.
+const DRIFT_BUILD_RATE: f32 = 6.0;
+/// Slip recovery rate on release (1/s). Exponential decay to zero.
+const DRIFT_DECAY_RATE: f32 = 5.0;
+/// Heading-change multiplier while drifting — a tighter turn radius.
+const DRIFT_TURN_BOOST: f32 = 1.8;
+/// Forward speed required to break rear traction and begin a drift.
+const DRIFT_MIN_SPEED: f32 = 1.0;
+/// Below this magnitude, recovering slip snaps to exactly zero.
+const DRIFT_SNAP: f32 = 1e-4;
 
 // Pure player-car geometry shared by spawning and footprint tests. Keeping the
 // wheel/chassis/fascia dimensions together makes it difficult for a cosmetic
@@ -110,6 +149,10 @@ const fn shadow_footprint_half_extents() -> (f32, f32) {
 /// Pure speed integration shared by gameplay and tests. Exponential response
 /// keeps the feel consistent across frame rates and makes braking progressively
 /// ease toward rest rather than applying an abrupt fixed-speed cut.
+///
+/// The handbrake is deliberately **not** a parameter here: drift never feeds
+/// back into speed, so Shift alone coasts/accelerates exactly as without it
+/// and never service-brakes or zeroes speed.
 fn next_speed(current: f32, max_speed: f32, input: PlayerInput, dt: f32) -> f32 {
     // Brake dominates, then forward acceleration, capped reverse, then coast.
     let (target, rate) = if input.brake {
@@ -136,6 +179,71 @@ fn next_speed(current: f32, max_speed: f32, input: PlayerInput, dt: f32) -> f32 
     speed
 }
 
+/// Whether the car is actively drifting this frame: handbrake held, steering
+/// non-zero, and forward speed above the breakaway threshold. Pure so the
+/// emitter, the turn boost, and tests all agree on the exact same predicate.
+/// Reverse is intentionally excluded so normal reverse semantics are preserved.
+fn is_drifting(speed: f32, input: PlayerInput, handbrake: bool) -> bool {
+    handbrake && input.steer.abs() > 0.0 && speed > DRIFT_MIN_SPEED
+}
+
+/// Pure, frame-rate-independent drift slip integration. While drifting, slip
+/// approaches a bounded target opposite the steer direction (the nose swings
+/// past the travel direction — the car steps out like a real handbrake drift).
+/// Otherwise it decays exponentially to zero and snaps once negligible. A
+/// final hard clamp guarantees slip can never grow unbounded regardless of the
+/// incoming value, so tuning or caller mistakes cannot overshoot the bound.
+///
+/// Two guards prevent an "entry curvature reversal" — where a too-fast slip
+/// build curves the travel direction (heading + drift) opposite the intended
+/// turn the moment the handbrake is grabbed:
+/// - The slip build rate is speed-scaled (`DRIFT_BUILD_RATE * speed/max_speed`),
+///   so at low speed slip creeps in and at high speed it snaps in.
+/// - The per-frame slip change is capped to half the per-frame heading delta.
+///   During a build Δdrift is opposite Δheading, so |Δdrift| ≤ ½|Δheading|
+///   keeps travel curvature co-directed with the turn (travel changes by at
+///   least half the heading change, same sign). The cap only binds at entry;
+///   once slip nears its target the exponential approach takes over, so
+///   bounded steady slip is preserved.
+fn next_drift(
+    current: f32,
+    speed: f32,
+    input: PlayerInput,
+    handbrake: bool,
+    dt: f32,
+    turn_rate: f32,
+    max_speed: f32,
+) -> f32 {
+    if is_drifting(speed, input, handbrake) {
+        // Target slip sign is opposite the steer sign: steering left (steer > 0)
+        // drives drift negative, so travel = heading + drift lags the nose —
+        // the rear steps out to the right of the corner.
+        let steer = input.steer.clamp(-1.0, 1.0);
+        let target = -steer * DRIFT_MAX;
+        // Speed-scale the build: the rear tires scrub harder the faster the
+        // car goes, so slip approaches its target quicker at speed and creeps
+        // in near the breakaway threshold.
+        let speed_frac = (speed / max_speed).clamp(0.0, 1.0);
+        let rate = DRIFT_BUILD_RATE * speed_frac;
+        let alpha = 1.0 - (-rate * dt.max(0.0)).exp();
+        let proposed = current + (target - current) * alpha;
+
+        // Reversal cap: limit |Δdrift| this frame to half the heading delta.
+        // Travel = heading + drift; during a build Δdrift is opposite Δheading,
+        // so this bound keeps travel from curving back through the corner.
+        let heading_delta = steer * turn_rate * DRIFT_TURN_BOOST * dt * speed_frac;
+        let max_change = 0.5 * heading_delta.abs();
+        let change = (proposed - current).clamp(-max_change, max_change);
+        (current + change).clamp(-DRIFT_MAX, DRIFT_MAX)
+    } else {
+        // Smooth recovery: exponential decay toward zero, then an exact snap
+        // so residual slip cannot linger indefinitely on release.
+        let decay = (-DRIFT_DECAY_RATE * dt.max(0.0)).exp();
+        let d = current * decay;
+        if d.abs() < DRIFT_SNAP { 0.0 } else { d }
+    }
+}
+
 /// Convert the keyboard's individual bindings into normalized driving intent.
 /// Opposite directions cancel, while duplicate bindings for one direction are
 /// combined and clamped to a single unit of input.
@@ -160,6 +268,13 @@ fn map_keyboard_input(
         steer: ((steer_left as i8 - steer_right as i8) as f32).clamp(-1.0, 1.0),
         brake: space,
     }
+}
+
+/// Map both Shift keys to a single handbrake flag. Either key triggers drift,
+/// so a player using whichever Shift is convenient gets identical behavior.
+/// Pure and tested independently of the keyboard resource.
+fn map_handbrake(shift_left: bool, shift_right: bool) -> bool {
+    shift_left || shift_right
 }
 
 /// Tag for the car's painted body shell. Tilted by `roll_body` for a subtle
@@ -211,6 +326,7 @@ impl Plugin for CarPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<InputFrozen>()
             .init_resource::<PlayerInput>()
+            .init_resource::<Handbrake>()
             .configure_sets(
                 Update,
                 (KeyboardInputSet, TouchInputSet, DrivingSet).chain(),
@@ -389,6 +505,7 @@ fn spawn_car(
             Car {
                 speed: 0.0,
                 heading: 0.0,
+                drift: 0.0,
             },
         ))
         .with_children(|car| {
@@ -545,11 +662,13 @@ fn spawn_car(
 fn read_keyboard_input(
     keys: Res<ButtonInput<KeyCode>>,
     mut input: ResMut<PlayerInput>,
+    mut handbrake: ResMut<Handbrake>,
     state: Res<State<GameState>>,
     input_frozen: Res<InputFrozen>,
 ) {
     if *state.get() != GameState::Playing || input_frozen.0 {
         *input = PlayerInput::default();
+        handbrake.0 = false;
         return;
     }
 
@@ -564,11 +683,16 @@ fn read_keyboard_input(
         keys.pressed(KeyCode::ArrowRight),
         keys.pressed(KeyCode::Space),
     );
+    handbrake.0 = map_handbrake(
+        keys.pressed(KeyCode::ShiftLeft),
+        keys.pressed(KeyCode::ShiftRight),
+    );
 }
 
 fn move_car(
     mut car: Query<(&mut Car, &mut Transform)>,
     input: Res<PlayerInput>,
+    handbrake: Res<Handbrake>,
     cfg: Res<GameConfig>,
     time: Res<Time>,
     input_frozen: Res<InputFrozen>,
@@ -585,10 +709,34 @@ fn move_car(
 
     car.speed = next_speed(car.speed, cfg.max_speed, *input, dt);
 
-    // Steering scales with speed so the car can't spin in place.
-    car.heading += input.steer.clamp(-1.0, 1.0) * cfg.turn_rate * dt * (car.speed / cfg.max_speed);
+    // Arcade handbrake drift: build/recover bounded slip and flag active drift
+    // for the tighter turn radius below. The handbrake never affects speed.
+    let drifting = is_drifting(car.speed, *input, handbrake.0);
+    car.drift = next_drift(
+        car.drift,
+        car.speed,
+        *input,
+        handbrake.0,
+        dt,
+        cfg.turn_rate,
+        cfg.max_speed,
+    );
 
-    let forward = Vec3::new(-car.heading.sin(), 0.0, -car.heading.cos());
+    // Steering scales with speed so the car can't spin in place. While
+    // drifting the handbrake breaks rear traction and lets the nose rotate
+    // faster — a tighter turn radius — without changing speed integration.
+    let turn_scale = if drifting { DRIFT_TURN_BOOST } else { 1.0 };
+    car.heading += input.steer.clamp(-1.0, 1.0)
+        * cfg.turn_rate
+        * turn_scale
+        * dt
+        * (car.speed / cfg.max_speed);
+
+    // Travel direction is the heading plus the drift slip angle; the body
+    // still visually faces `heading` (set below), so the car slides through
+    // corners while its nose points into the slide.
+    let travel = car.heading + car.drift;
+    let forward = Vec3::new(-travel.sin(), 0.0, -travel.cos());
     tf.translation += forward * car.speed * dt;
     // 2D city grid (T14): the car can drive freely in X and Z — the grid
     // recycles in all 4 directions, so no clamp is needed.
@@ -765,7 +913,7 @@ pub fn physics_collisions(
             tf.translation.x += nx * pen;
             tf.translation.z += nz * pen;
 
-            let player_vel = player_velocity(car.heading, car.speed);
+            let player_vel = player_velocity(car.heading + car.drift, car.speed);
             let traffic_vel =
                 traffic.map(|traffic| traffic_velocity(traffic.axis, traffic.dir, traffic.speed));
             let relative_velocity = player_vel - traffic_vel.unwrap_or(Vec2::ZERO);
@@ -801,8 +949,10 @@ fn cone_collisions(
     // uses the same pre-bleed speed — launch results are then independent of
     // query iteration order (fully deterministic). The speed bleed is a
     // multiplicative scalar accumulated in `bled_speed` and written back once,
-    // which is also order-independent.
-    let player_vel = player_velocity(car.heading, car.speed);
+    // which is also order-independent. Travel direction includes any active
+    // drift slip so cones launch the way the car is actually moving.
+    let travel_angle = car.heading + car.drift;
+    let player_vel = player_velocity(travel_angle, car.speed);
     let mut bled_speed = car.speed;
     for (collider, ct, mut motion) in &mut cones {
         if motion.state != ConeState::Idle {
@@ -830,8 +980,8 @@ fn cone_collisions(
                 let dist = dist2.sqrt();
                 Vec2::new(-px / dist, -pz / dist)
             } else {
-                // Centers coincide: launch along the car's heading.
-                player_velocity(car.heading, 1.0).normalize_or_zero()
+                // Centers coincide: launch along the car's travel direction.
+                player_velocity(travel_angle, 1.0).normalize_or_zero()
             };
             // Launch the cone (bounded, deterministic) on its existing entity.
             motion.vel = cone_launch_velocity(player_vel, normal);
@@ -1154,5 +1304,348 @@ mod tests {
         let player = player_velocity(0.0, 8.0);
         let traffic = traffic_velocity(true, 1.0, 6.0);
         assert!((obstacle_impact_speed(player, Some(traffic)) - 10.0).abs() < 1e-5);
+    }
+
+    // --- Handbrake drift -------------------------------------------------
+    // The drift model is pure and frame-rate independent, so these tests drive
+    // `map_handbrake`, `is_drifting`, and `next_drift` directly plus a small
+    // heading simulator that mirrors `move_car`'s turn logic.
+
+    fn simulate_drift(
+        initial: f32,
+        speed: f32,
+        input: PlayerInput,
+        handbrake: bool,
+        dt: f32,
+        duration: f32,
+        turn_rate: f32,
+        max_speed: f32,
+    ) -> f32 {
+        let steps = (duration / dt).round() as usize;
+        (0..steps).fold(initial, |d, _| {
+            next_drift(d, speed, input, handbrake, dt, turn_rate, max_speed)
+        })
+    }
+
+    /// Mirror `move_car`'s heading integration at a fixed speed so the tighter
+    /// turn radius while drifting is testable without Bevy resources.
+    fn simulate_heading(
+        initial_heading: f32,
+        speed: f32,
+        input: PlayerInput,
+        handbrake: bool,
+        turn_rate: f32,
+        max_speed: f32,
+        dt: f32,
+        steps: usize,
+    ) -> f32 {
+        let mut heading = initial_heading;
+        let mut drift = 0.0;
+        for _ in 0..steps {
+            let drifting = is_drifting(speed, input, handbrake);
+            drift = next_drift(drift, speed, input, handbrake, dt, turn_rate, max_speed);
+            let scale = if drifting { DRIFT_TURN_BOOST } else { 1.0 };
+            heading += input.steer.clamp(-1.0, 1.0) * turn_rate * scale * dt * (speed / max_speed);
+        }
+        heading
+    }
+
+    #[test]
+    fn both_shift_keys_map_to_handbrake() {
+        assert!(!map_handbrake(false, false));
+        assert!(map_handbrake(true, false));
+        assert!(map_handbrake(false, true));
+        assert!(map_handbrake(true, true));
+    }
+
+    #[test]
+    fn handbrake_alone_does_not_brake_or_zero_speed() {
+        // The handbrake is invisible to `next_speed`: holding Shift with no
+        // throttle/brake coasts exactly like releasing all input. It never
+        // enters the service-brake branch, never zeroes speed, and builds no
+        // slip without steering.
+        let dt = 1.0 / 60.0;
+        let max_speed = 12.0;
+        let coast = PlayerInput::default();
+        let mut speed_no_hb = 12.0;
+        let mut speed_hb = 12.0;
+        let mut drift = 0.0;
+        for _ in 0..60 {
+            speed_no_hb = next_speed(speed_no_hb, max_speed, coast, dt);
+            speed_hb = next_speed(speed_hb, max_speed, coast, dt);
+            drift = next_drift(drift, speed_hb, coast, true, dt, 2.5, max_speed);
+        }
+        assert!(
+            (speed_no_hb - speed_hb).abs() < 1e-9,
+            "handbrake must not change speed"
+        );
+        assert!(speed_hb > 0.0, "handbrake must not zero speed");
+        assert_eq!(drift, 0.0, "handbrake without steering builds no slip");
+        let braked = simulate_speed(
+            12.0,
+            max_speed,
+            PlayerInput {
+                brake: true,
+                ..default()
+            },
+            dt,
+            1.0,
+        );
+        assert!(
+            speed_hb > braked,
+            "handbrake must not brake like the service brake"
+        );
+    }
+
+    #[test]
+    fn handbrake_drift_turns_tighter_than_normal() {
+        let max_speed = 12.0;
+        let turn_rate = 2.5;
+        let speed = 10.0;
+        let dt = 1.0 / 60.0;
+        let steps = 60; // 1 second
+        let steer = PlayerInput {
+            steer: 1.0,
+            ..default()
+        };
+        let normal = simulate_heading(0.0, speed, steer, false, turn_rate, max_speed, dt, steps);
+        let drift = simulate_heading(0.0, speed, steer, true, turn_rate, max_speed, dt, steps);
+        assert!(normal.abs() > 0.0);
+        // Constant speed + handbrake boosts every step, so the accumulated
+        // heading is exactly DRIFT_TURN_BOOST times the normal turn.
+        assert!((drift - normal * DRIFT_TURN_BOOST).abs() < 1e-4);
+        assert!(drift.abs() > normal.abs());
+    }
+
+    #[test]
+    fn drift_slip_is_bounded_and_cannot_grow_unbounded() {
+        let steer = PlayerInput {
+            steer: 1.0,
+            ..default()
+        };
+        // Sustained drift: slip asymptotes to the target and never exceeds it.
+        let mut drift = 0.0;
+        for _ in 0..5_000 {
+            drift = next_drift(drift, 10.0, steer, true, 1.0 / 60.0, 2.5, 12.0);
+        }
+        assert!(drift <= DRIFT_MAX);
+        assert!(drift >= -DRIFT_MAX);
+        assert!(
+            drift < 0.0,
+            "left steer swings the nose past travel (negative slip)"
+        );
+        assert!(drift.abs() > DRIFT_MAX * 0.95);
+        // Hard-clamp safety net: an out-of-range incoming value is clamped, so
+        // no tuning or caller mistake can grow slip unbounded.
+        assert!(next_drift(100.0, 10.0, steer, true, 1.0 / 60.0, 2.5, 12.0) <= DRIFT_MAX);
+        assert!(next_drift(-100.0, 10.0, steer, true, 1.0 / 60.0, 2.5, 12.0) >= -DRIFT_MAX);
+    }
+
+    #[test]
+    fn drift_slip_sign_follows_steer_direction() {
+        let left = PlayerInput {
+            steer: 1.0,
+            ..default()
+        };
+        let right = PlayerInput {
+            steer: -1.0,
+            ..default()
+        };
+        let mut d_left = 0.0;
+        let mut d_right = 0.0;
+        for _ in 0..300 {
+            d_left = next_drift(d_left, 10.0, left, true, 1.0 / 60.0, 2.5, 12.0);
+            d_right = next_drift(d_right, 10.0, right, true, 1.0 / 60.0, 2.5, 12.0);
+        }
+        assert!(d_left < 0.0, "left steer -> negative slip");
+        assert!(d_right > 0.0, "right steer -> positive slip");
+        assert!((d_left + d_right).abs() < 1e-4, "slip should be symmetric");
+    }
+
+    #[test]
+    fn drift_slip_recovers_smoothly_on_release() {
+        let released = PlayerInput::default();
+        let mut drift = -DRIFT_MAX;
+        let mut prev = drift.abs();
+        let mut snapped = false;
+        for _ in 0..300 {
+            // 5 s at 60 fps is plenty for the exponential decay to snap.
+            drift = next_drift(drift, 10.0, released, false, 1.0 / 60.0, 2.5, 12.0);
+            assert!(
+                drift.abs() <= prev + 1e-9,
+                "slip must decay monotonically on release"
+            );
+            prev = drift.abs();
+            if drift.abs() < 1e-6 {
+                snapped = true;
+            }
+        }
+        assert!(snapped, "slip should snap to zero after release");
+        assert_eq!(drift, 0.0);
+    }
+
+    #[test]
+    fn drift_dynamics_are_frame_rate_independent() {
+        let steer = PlayerInput {
+            steer: 1.0,
+            ..default()
+        };
+        let at_30 = simulate_drift(0.0, 10.0, steer, true, 1.0 / 30.0, 0.5, 2.5, 12.0);
+        let at_60 = simulate_drift(0.0, 10.0, steer, true, 1.0 / 60.0, 0.5, 2.5, 12.0);
+        let at_120 = simulate_drift(0.0, 10.0, steer, true, 1.0 / 120.0, 0.5, 2.5, 12.0);
+        assert!((at_30 - at_60).abs() < 1e-4);
+        assert!((at_60 - at_120).abs() < 1e-4);
+    }
+
+    #[test]
+    fn handbrake_without_steering_builds_no_slip() {
+        let no_steer = PlayerInput {
+            steer: 0.0,
+            ..default()
+        };
+        assert!(!is_drifting(10.0, no_steer, true));
+        let mut drift = 0.0;
+        for _ in 0..300 {
+            drift = next_drift(drift, 10.0, no_steer, true, 1.0 / 60.0, 2.5, 12.0);
+        }
+        assert_eq!(drift, 0.0, "handbrake without steering never builds slip");
+    }
+
+    #[test]
+    fn handbrake_without_speed_builds_no_slip() {
+        let steer = PlayerInput {
+            steer: 1.0,
+            ..default()
+        };
+        assert!(!is_drifting(0.0, steer, true));
+        // Breakaway is strictly greater than DRIFT_MIN_SPEED, not >=.
+        assert!(!is_drifting(DRIFT_MIN_SPEED, steer, true));
+        assert!(!is_drifting(DRIFT_MIN_SPEED * 0.5, steer, true));
+        // With no speed, pre-existing slip recovers instead of building.
+        let before = -0.4;
+        let after = next_drift(before, 0.0, steer, true, 1.0 / 60.0, 2.5, 12.0);
+        assert!(after.abs() < before.abs());
+        assert!((after - before * (-DRIFT_DECAY_RATE * (1.0 / 60.0)).exp()).abs() < 1e-9);
+    }
+
+    #[test]
+    fn per_frame_slip_change_capped_to_half_heading_delta() {
+        // The reversal guard limits |Δdrift| to ½|Δheading| every frame during
+        // a build, so travel (= heading + drift) can never curve opposite the
+        // turn at entry. Verified directly against the heading-step formula.
+        let max_speed = 12.0;
+        let turn_rate = 2.5;
+        let dt = 1.0 / 60.0;
+        let speed = 10.0;
+        let input = PlayerInput {
+            steer: 1.0,
+            ..default()
+        };
+        let mut drift = 0.0;
+        for _ in 0..60 {
+            let heading_delta =
+                input.steer * turn_rate * DRIFT_TURN_BOOST * dt * (speed / max_speed);
+            let prev = drift;
+            drift = next_drift(drift, speed, input, true, dt, turn_rate, max_speed);
+            let slip_delta = (drift - prev).abs();
+            assert!(
+                slip_delta <= 0.5 * heading_delta.abs() + 1e-9,
+                "slip change {slip_delta} exceeded half heading delta {}",
+                0.5 * heading_delta.abs()
+            );
+        }
+    }
+
+    #[test]
+    fn slip_build_is_speed_scaled() {
+        // The build rate is multiplied by speed/max_speed, and the reversal
+        // cap tracks the (speed-scaled) heading delta, so a low-speed drift
+        // builds slip gentler than a high-speed drift from the very first
+        // frame.
+        let max_speed = 12.0;
+        let turn_rate = 2.5;
+        let dt = 1.0 / 60.0;
+        let input = PlayerInput {
+            steer: 1.0,
+            ..default()
+        };
+        let low = next_drift(
+            0.0,
+            DRIFT_MIN_SPEED + 0.5,
+            input,
+            true,
+            dt,
+            turn_rate,
+            max_speed,
+        )
+        .abs();
+        let high = next_drift(0.0, max_speed, input, true, dt, turn_rate, max_speed).abs();
+        assert!(low > 0.0 && high > 0.0);
+        assert!(
+            low < high,
+            "low-speed slip should build slower: low={low} high={high}"
+        );
+    }
+
+    #[test]
+    fn travel_curvature_never_reverses_during_entry_across_speeds() {
+        // Travel = heading + drift. During a drift entry Δdrift is opposite
+        // Δheading, so without the per-frame cap travel could curve back
+        // through the corner. The cap keeps travel co-directed with the steer
+        // at every driving speed, from just above breakaway to top speed.
+        let max_speed = 12.0;
+        let turn_rate = 2.5;
+        let dt = 1.0 / 60.0;
+        let speeds = [DRIFT_MIN_SPEED + 0.5, 3.0, 6.0, 9.0, max_speed];
+        for &speed in &speeds {
+            for steer_sign in [1.0, -1.0] {
+                let input = PlayerInput {
+                    steer: steer_sign,
+                    ..default()
+                };
+                let mut heading = 0.0;
+                let mut drift = 0.0;
+                let mut prev_travel = heading + drift;
+                for step in 0..120 {
+                    let drifting = is_drifting(speed, input, true);
+                    drift = next_drift(drift, speed, input, true, dt, turn_rate, max_speed);
+                    let scale = if drifting { DRIFT_TURN_BOOST } else { 1.0 };
+                    heading += input.steer * turn_rate * scale * dt * (speed / max_speed);
+                    let travel = heading + drift;
+                    let travel_delta = travel - prev_travel;
+                    assert!(
+                        travel_delta * steer_sign > 0.0,
+                        "travel reversed at speed {speed}, steer {steer_sign}, step {step}"
+                    );
+                    prev_travel = travel;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn steady_slip_remains_bounded_and_approaches_target_across_speeds() {
+        // The reversal cap only binds at entry; once slip nears its target the
+        // exponential approach takes over. So bounded steady slip is preserved
+        // at every speed — slip asymptotes to the (capped) target and never
+        // grows unbounded.
+        let max_speed = 12.0;
+        let turn_rate = 2.5;
+        let input = PlayerInput {
+            steer: 1.0,
+            ..default()
+        };
+        for &speed in &[DRIFT_MIN_SPEED + 0.5, 6.0, max_speed] {
+            let mut drift = 0.0;
+            for _ in 0..10_000 {
+                drift = next_drift(drift, speed, input, true, 1.0 / 60.0, turn_rate, max_speed);
+            }
+            assert!(drift.abs() <= DRIFT_MAX, "slip unbounded at speed {speed}");
+            assert!(drift < 0.0, "left steer -> negative slip at speed {speed}");
+            assert!(
+                drift.abs() > DRIFT_MAX * 0.9,
+                "slip should approach the target at speed {speed}, got {drift}"
+            );
+        }
     }
 }
