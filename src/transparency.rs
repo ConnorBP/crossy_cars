@@ -43,13 +43,17 @@ impl FromWorld for BuildingGhostMaterial {
         let handle = world
             .resource_mut::<Assets<StandardMaterial>>()
             .add(StandardMaterial {
-                base_color: Color::srgba(0.55, 0.68, 0.78, 0.24),
+                // A slightly opaque, neutral-cool tint preserves enough
+                // diffuse shading to read the building's shape while still
+                // revealing the car through it.
+                base_color: Color::srgba(0.68, 0.76, 0.82, 0.3),
                 // Ordinary alpha blending works on both WebGL2 and the
                 // camera's multisampled render target.  In particular, this
                 // deliberately does not rely on alpha-to-coverage.
                 alpha_mode: AlphaMode::Blend,
-                perceptual_roughness: 0.9,
-                unlit: true,
+                // Keep the shared ghost material lit and moderately rough so
+                // faces and roof planes retain their PBR lighting cues.
+                perceptual_roughness: 0.72,
                 ..default()
             });
         Self(handle)

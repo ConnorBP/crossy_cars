@@ -184,6 +184,58 @@ pub fn sockets(kind: TileKind) -> [Edge; 4] {
     }
 }
 
+// Each road surface is drawn by both blocks beside its world line. Markings
+// use a directional ownership rule so they are not also double-spawned: this
+// block owns its W (vertical) and S (horizontal) road surfaces. The four
+// flags are W-road at S endpoint, W-road at N endpoint, S-road at W endpoint,
+// and S-road at E endpoint. An approach is marked only when the endpoint has
+// a perpendicular road socket, i.e. it is a real intersection rather than a
+// through-road endpoint or dead-end.
+const MARK_W_AT_S: usize = 0;
+const MARK_W_AT_N: usize = 1;
+const MARK_S_AT_W: usize = 2;
+const MARK_S_AT_E: usize = 3;
+
+fn marking_approaches(sock: [Edge; 4]) -> [bool; 4] {
+    let road = |side| sock[side] == Edge::Road;
+    [
+        road(W) && road(S),
+        road(W) && road(N),
+        road(S) && road(W),
+        road(S) && road(E),
+    ]
+}
+
+const WINDOW_ROW_BOTTOM: f32 = 0.9;
+const WINDOW_ROW_TOP_MARGIN: f32 = 0.9;
+const WINDOW_ROW_SPACING: f32 = 2.0;
+const MAX_WINDOW_ROWS: usize = 3;
+
+/// A bounded, low-detail set of window-strip center heights. Buildings in
+/// this module are 4–9u tall, yielding two or three rows; malformed or tiny
+/// heights yield no rows. Keeping this pure makes the entity-count and facade
+/// bounds independently testable.
+fn window_row_heights(height: f32) -> Vec<f32> {
+    if !height.is_finite() {
+        return Vec::new();
+    }
+    let upper = height - WINDOW_ROW_TOP_MARGIN;
+    if upper < WINDOW_ROW_BOTTOM {
+        return Vec::new();
+    }
+    let count = (((upper - WINDOW_ROW_BOTTOM) / WINDOW_ROW_SPACING).floor() as usize)
+        .saturating_add(1)
+        .min(MAX_WINDOW_ROWS);
+    if count == 1 {
+        return vec![(WINDOW_ROW_BOTTOM + upper) * 0.5];
+    }
+    (0..count)
+        .map(|row| {
+            WINDOW_ROW_BOTTOM + (upper - WINDOW_ROW_BOTTOM) * row as f32 / (count - 1) as f32
+        })
+        .collect()
+}
+
 /// All tiles in the set (used by `pick_tile` to find matches). Includes the
 /// four single-edge `Stub*` tiles so the set is COMPLETE: every fixed-edge
 /// combination (including a single fixed-Road edge with the rest free) has at
@@ -405,6 +457,10 @@ struct WorldMeshAssets {
     dash_x: Handle<Mesh>,
     edge_line_z: [Handle<Mesh>; 3],
     edge_line_x: [Handle<Mesh>; 3],
+    crosswalk_x: Handle<Mesh>,
+    crosswalk_z: Handle<Mesh>,
+    stop_line_x: Handle<Mesh>,
+    stop_line_z: Handle<Mesh>,
     trunk: Handle<Mesh>,
     foliage: Handle<Mesh>,
     tree_shadow: Handle<Mesh>,
@@ -435,6 +491,8 @@ struct WorldMaterialAssets {
     foliage: Handle<StandardMaterial>,
     building_body: [Handle<StandardMaterial>; 3],
     building_roof: [Handle<StandardMaterial>; 3],
+    building_window: Handle<StandardMaterial>,
+    road_marking: Handle<StandardMaterial>,
     metal: Handle<StandardMaterial>,
     lamp: Handle<StandardMaterial>,
     coin: Handle<StandardMaterial>,
@@ -474,6 +532,14 @@ impl FromWorld for WorldAssets {
                 a.add(Cuboid::new(36.0, 0.02, 0.12)),
                 a.add(Cuboid::new(32.0, 0.02, 0.12)),
             ],
+            // Compact approach markings: short, narrow zebra bars and a thin
+            // stop line. Keeping them inside the road edges avoids the dense
+            // white lattice produced by full-width, broad bars at a four-way
+            // junction under the isometric camera.
+            crosswalk_x: a.add(Cuboid::new(5.4, 0.025, 0.20)),
+            crosswalk_z: a.add(Cuboid::new(0.20, 0.025, 5.4)),
+            stop_line_x: a.add(Cuboid::new(5.4, 0.025, 0.12)),
+            stop_line_z: a.add(Cuboid::new(0.12, 0.025, 5.4)),
             trunk: a.add(Cylinder::new(0.18, 0.9)),
             foliage: a.add(Sphere::new(0.75).mesh().uv(12, 8)),
             tree_shadow: a.add(Circle::new(0.9)),
@@ -556,6 +622,17 @@ impl FromWorld for WorldAssets {
                             ..default()
                         }),
                     ],
+                    building_window: a.add(StandardMaterial {
+                        base_color: Color::srgb(0.045, 0.09, 0.13),
+                        metallic: 0.35,
+                        perceptual_roughness: 0.2,
+                        ..default()
+                    }),
+                    road_marking: a.add(StandardMaterial {
+                        base_color: palette::LANE_WHITE,
+                        perceptual_roughness: 0.75,
+                        ..default()
+                    }),
                     metal: a.add(StandardMaterial {
                         base_color: Color::srgb(0.15, 0.15, 0.16),
                         metallic: 0.8,
@@ -1013,6 +1090,77 @@ pub fn populate_block(
             }
         }
 
+        // --- Crosswalks and stop lines at genuine perpendicular approaches ---
+        // Road geometry is duplicated by the blocks on either side of a road
+        // line. W/S ownership keeps these raised markings single-instanced.
+        // Three compact zebra bars suggest a crosswalk without filling the
+        // whole junction; the thin stop line sits just behind the crossing.
+        let approaches = marking_approaches(sock);
+        let marking_mat = world_assets.materials.road_marking.clone();
+        const MARK_Y: f32 = 0.06;
+        // The intersecting road occupies 4u either side of its centerline, so
+        // begin the crossing at that boundary and put the stop bar behind it.
+        const CROSSWALK_INSET: f32 = 4.55;
+        const STOP_INSET: f32 = 5.75;
+        const STRIPE_STEP: f32 = 0.38;
+
+        if approaches[MARK_W_AT_S] {
+            for offset in [-STRIPE_STEP, 0.0, STRIPE_STEP] {
+                p.spawn((
+                    Mesh3d(world_assets.meshes.crosswalk_x.clone()),
+                    MeshMaterial3d(marking_mat.clone()),
+                    Transform::from_xyz(-half, MARK_Y, -half + CROSSWALK_INSET + offset),
+                ));
+            }
+            p.spawn((
+                Mesh3d(world_assets.meshes.stop_line_x.clone()),
+                MeshMaterial3d(marking_mat.clone()),
+                Transform::from_xyz(-half, MARK_Y, -half + STOP_INSET),
+            ));
+        }
+        if approaches[MARK_W_AT_N] {
+            for offset in [-STRIPE_STEP, 0.0, STRIPE_STEP] {
+                p.spawn((
+                    Mesh3d(world_assets.meshes.crosswalk_x.clone()),
+                    MeshMaterial3d(marking_mat.clone()),
+                    Transform::from_xyz(-half, MARK_Y, half - CROSSWALK_INSET + offset),
+                ));
+            }
+            p.spawn((
+                Mesh3d(world_assets.meshes.stop_line_x.clone()),
+                MeshMaterial3d(marking_mat.clone()),
+                Transform::from_xyz(-half, MARK_Y, half - STOP_INSET),
+            ));
+        }
+        if approaches[MARK_S_AT_W] {
+            for offset in [-STRIPE_STEP, 0.0, STRIPE_STEP] {
+                p.spawn((
+                    Mesh3d(world_assets.meshes.crosswalk_z.clone()),
+                    MeshMaterial3d(marking_mat.clone()),
+                    Transform::from_xyz(-half + CROSSWALK_INSET + offset, MARK_Y, -half),
+                ));
+            }
+            p.spawn((
+                Mesh3d(world_assets.meshes.stop_line_z.clone()),
+                MeshMaterial3d(marking_mat.clone()),
+                Transform::from_xyz(-half + STOP_INSET, MARK_Y, -half),
+            ));
+        }
+        if approaches[MARK_S_AT_E] {
+            for offset in [-STRIPE_STEP, 0.0, STRIPE_STEP] {
+                p.spawn((
+                    Mesh3d(world_assets.meshes.crosswalk_z.clone()),
+                    MeshMaterial3d(marking_mat.clone()),
+                    Transform::from_xyz(half - CROSSWALK_INSET + offset, MARK_Y, -half),
+                ));
+            }
+            p.spawn((
+                Mesh3d(world_assets.meshes.stop_line_z.clone()),
+                MeshMaterial3d(marking_mat.clone()),
+                Transform::from_xyz(half - STOP_INSET, MARK_Y, -half),
+            ));
+        }
+
         // --- Shared obstacle assets ---
         let a = world_assets;
         let trunk_mesh = a.meshes.trunk.clone();
@@ -1022,6 +1170,7 @@ pub fn populate_block(
         let tree_shadow_mesh = a.meshes.tree_shadow.clone();
         let body_mats = &a.materials.building_body;
         let roof_mats = &a.materials.building_roof;
+        let window_mat = a.materials.building_window.clone();
         let pole_mesh = a.meshes.pole.clone();
         let arm_mesh = a.meshes.arm.clone();
         let metal_mat = a.materials.metal.clone();
@@ -1218,6 +1367,12 @@ pub fn populate_block(
                 ) else {
                     continue;
                 };
+                // Facade dimensions vary with the building, so these two
+                // meshes stay per-building like its body/roof/shadow. All
+                // rows and buildings share the one cached glass material.
+                let window_rows = window_row_heights(h);
+                let window_x_mesh = meshes.add(Cuboid::new(w * 0.72, 0.55, 0.08));
+                let window_z_mesh = meshes.add(Cuboid::new(0.08, 0.55, d * 0.72));
                 p.spawn((
                     Transform::from_xyz(bx, 0.0, bz),
                     Visibility::default(),
@@ -1243,6 +1398,22 @@ pub fn populate_block(
                         MeshMaterial3d(shadow_mat.clone()),
                         Transform::from_xyz(0.0, 0.05, 0.0),
                     ));
+                    for &row_y in &window_rows {
+                        for z in [-d / 2.0 - 0.045, d / 2.0 + 0.045] {
+                            bp.spawn((
+                                Mesh3d(window_x_mesh.clone()),
+                                MeshMaterial3d(window_mat.clone()),
+                                Transform::from_xyz(0.0, row_y, z),
+                            ));
+                        }
+                        for x in [-w / 2.0 - 0.045, w / 2.0 + 0.045] {
+                            bp.spawn((
+                                Mesh3d(window_z_mesh.clone()),
+                                MeshMaterial3d(window_mat.clone()),
+                                Transform::from_xyz(x, row_y, 0.0),
+                            ));
+                        }
+                    }
                 });
             }
 
@@ -2076,6 +2247,64 @@ mod tests {
                     "N != is_road_line at ({gx},{gz})"
                 );
             }
+        }
+    }
+
+    /// Markings are emitted only for owned road approaches whose endpoint
+    /// has a perpendicular road. Straight roads, empty/park blocks and stubs
+    /// therefore never receive a crosswalk or stop line.
+    #[test]
+    fn marking_approaches_require_perpendicular_road_sockets() {
+        use TileKind::*;
+
+        let cases = [
+            (Empty, [false; 4]),
+            (Park, [false; 4]),
+            (RoadNS, [false; 4]),
+            (RoadEW, [false; 4]),
+            (Cross, [true; 4]),
+            (TN, [true, false, true, true]),
+            (TE, [true, true, true, false]),
+            (TS, [false, true, false, false]),
+            (TW, [false, false, false, true]),
+            (CornerWN, [false, true, false, false]),
+            (CornerNE, [false; 4]),
+            (CornerES, [false, false, false, true]),
+            (CornerSW, [true, false, true, false]),
+            (StubW, [false; 4]),
+            (StubE, [false; 4]),
+            (StubS, [false; 4]),
+            (StubN, [false; 4]),
+        ];
+        for (kind, expected) in cases {
+            assert_eq!(
+                marking_approaches(sockets(kind)),
+                expected,
+                "unexpected marking approaches for {kind:?}"
+            );
+        }
+    }
+
+    /// Facade strips stay bounded within the usable wall height and are
+    /// capped at three rows, including at the full generated 4–9u range.
+    #[test]
+    fn window_rows_have_sensible_count_and_vertical_bounds() {
+        assert!(window_row_heights(f32::NAN).is_empty());
+        assert!(window_row_heights(1.7).is_empty());
+        assert_eq!(window_row_heights(4.0), vec![0.9, 3.1]);
+        assert_eq!(window_row_heights(9.0), vec![0.9, 4.5, 8.1]);
+
+        for step in 0..=100 {
+            let height = 4.0 + step as f32 * 0.05;
+            let rows = window_row_heights(height);
+            assert!((2..=MAX_WINDOW_ROWS).contains(&rows.len()));
+            assert!(rows.windows(2).all(|pair| pair[0] < pair[1]));
+            assert!(
+                rows.iter().all(|&row| {
+                    row >= WINDOW_ROW_BOTTOM && row <= height - WINDOW_ROW_TOP_MARGIN
+                })
+            );
+            assert_eq!(rows, window_row_heights(height));
         }
     }
 

@@ -16,6 +16,9 @@ use bevy::prelude::*;
 use bevy::render::render_resource::AsBindGroup;
 use bevy::shader::ShaderRef;
 
+use crate::game::state::GameState;
+use crate::modifiers::{ActiveModifier, ModifierKind};
+
 pub struct ShaderPlugin;
 
 impl Plugin for ShaderPlugin {
@@ -26,6 +29,10 @@ impl Plugin for ShaderPlugin {
             .add_systems(
                 Update,
                 (update_water, update_skydome, setup_environment_light),
+            )
+            .add_systems(
+                Update,
+                update_modifier_atmosphere.run_if(in_state(GameState::Playing)),
             );
     }
 }
@@ -54,6 +61,92 @@ impl Material for SkyMaterial {
 #[derive(Component)]
 pub struct Skydome;
 
+/// Target rendering atmosphere associated with one round modifier.
+///
+/// This is deliberately only data: [`atmosphere_descriptor`] is pure, while
+/// the update system below owns all Bevy asset/component mutation.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct AtmosphereDescriptor {
+    sky_top: LinearRgba,
+    sky_bottom: LinearRgba,
+    environment_intensity: f32,
+}
+
+/// Pure mapping from gameplay modifier to its visual atmosphere.
+fn atmosphere_descriptor(kind: ModifierKind) -> AtmosphereDescriptor {
+    match kind {
+        ModifierKind::Standard => AtmosphereDescriptor {
+            // Preserve the original clear daytime presentation.
+            sky_top: LinearRgba::new(0.55, 0.78, 0.95, 1.0),
+            sky_bottom: LinearRgba::new(0.85, 0.90, 0.95, 1.0),
+            environment_intensity: 900.0,
+        },
+        ModifierKind::RushHour => AtmosphereDescriptor {
+            // Warm, muted haze evokes a traffic-heavy late afternoon.
+            sky_top: LinearRgba::new(0.78, 0.55, 0.42, 1.0),
+            sky_bottom: LinearRgba::new(0.95, 0.78, 0.60, 1.0),
+            environment_intensity: 1_000.0,
+        },
+        ModifierKind::ChickenFrenzy => AtmosphereDescriptor {
+            // A saturated golden sky and stronger IBL make the round lively.
+            sky_top: LinearRgba::new(0.82, 0.66, 0.28, 1.0),
+            sky_bottom: LinearRgba::new(1.00, 0.88, 0.52, 1.0),
+            environment_intensity: 1_250.0,
+        },
+        ModifierKind::Stampede => AtmosphereDescriptor {
+            // Dusty earth tones sell a churned-up, critter-filled road.
+            sky_top: LinearRgba::new(0.50, 0.38, 0.27, 1.0),
+            sky_bottom: LinearRgba::new(0.72, 0.58, 0.40, 1.0),
+            environment_intensity: 750.0,
+        },
+        ModifierKind::GlassCannon => AtmosphereDescriptor {
+            // Cool twilight and reduced fill light sharpen the dangerous mood.
+            sky_top: LinearRgba::new(0.22, 0.38, 0.58, 1.0),
+            sky_bottom: LinearRgba::new(0.46, 0.58, 0.70, 1.0),
+            environment_intensity: 500.0,
+        },
+    }
+}
+
+/// Exponential response rate used for both gradient and IBL transitions.
+const ATMOSPHERE_LERP_RATE: f32 = 2.5;
+
+/// Move the existing sky asset and camera light toward the active modifier's
+/// descriptor. Missing components/assets are expected briefly during startup;
+/// each half updates independently as soon as it exists. No handles or assets
+/// are created here.
+fn update_modifier_atmosphere(
+    time: Res<Time>,
+    active: Res<ActiveModifier>,
+    skydomes: Query<&MeshMaterial3d<SkyMaterial>, With<Skydome>>,
+    mut sky_materials: ResMut<Assets<SkyMaterial>>,
+    mut cameras: Query<&mut EnvironmentMapLight, With<Camera3d>>,
+) {
+    let target = atmosphere_descriptor(active.0);
+    let amount = (1.0 - (-ATMOSPHERE_LERP_RATE * time.delta_secs()).exp()).clamp(0.0, 1.0);
+
+    for handle in &skydomes {
+        let Some(mut material) = sky_materials.get_mut(&handle.0) else {
+            continue;
+        };
+        material.top_color = lerp_linear_rgba(material.top_color, target.sky_top, amount);
+        material.bottom_color = lerp_linear_rgba(material.bottom_color, target.sky_bottom, amount);
+    }
+
+    for mut environment in &mut cameras {
+        environment.intensity += (target.environment_intensity - environment.intensity) * amount;
+    }
+}
+
+fn lerp_linear_rgba(from: LinearRgba, to: LinearRgba, amount: f32) -> LinearRgba {
+    LinearRgba::new(
+        from.red + (to.red - from.red) * amount,
+        from.green + (to.green - from.green) * amount,
+        from.blue + (to.blue - from.blue) * amount,
+        from.alpha + (to.alpha - from.alpha) * amount,
+    )
+}
+
 /// Spawn a giant sphere around the origin and render its inner surface as a
 /// vertical color gradient. Negative-Z scale flips winding so the dome's
 /// interior is visible from the camera (which lives inside it).
@@ -67,8 +160,8 @@ fn spawn_sky(
     commands.spawn((
         Mesh3d(meshes.add(Sphere::new(100.0).mesh().uv(32, 18))),
         MeshMaterial3d(materials.add(SkyMaterial {
-            top_color: LinearRgba::new(0.55, 0.78, 0.95, 1.0),
-            bottom_color: LinearRgba::new(0.85, 0.90, 0.95, 1.0),
+            top_color: atmosphere_descriptor(ModifierKind::Standard).sky_top,
+            bottom_color: atmosphere_descriptor(ModifierKind::Standard).sky_bottom,
         })),
         Transform::from_scale(Vec3::new(1.0, 1.0, -1.0)),
         Skydome,
@@ -157,7 +250,50 @@ fn setup_environment_light(
     commands.entity(camera).insert(EnvironmentMapLight {
         diffuse_map: asset_server.load("environment_maps/pisa_diffuse_rgb9e5_zstd.ktx2"),
         specular_map: asset_server.load("environment_maps/pisa_specular_rgb9e5_zstd.ktx2"),
-        intensity: 900.0,
+        intensity: atmosphere_descriptor(ModifierKind::Standard).environment_intensity,
         ..default()
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ALL_MODIFIERS: [ModifierKind; 5] = [
+        ModifierKind::Standard,
+        ModifierKind::RushHour,
+        ModifierKind::ChickenFrenzy,
+        ModifierKind::Stampede,
+        ModifierKind::GlassCannon,
+    ];
+
+    #[test]
+    fn modifier_atmospheres_are_distinct() {
+        for (index, left) in ALL_MODIFIERS.into_iter().enumerate() {
+            for right in ALL_MODIFIERS.into_iter().skip(index + 1) {
+                assert_ne!(atmosphere_descriptor(left), atmosphere_descriptor(right));
+            }
+        }
+    }
+
+    #[test]
+    fn modifier_atmospheres_stay_in_sane_ranges() {
+        for kind in ALL_MODIFIERS {
+            let descriptor = atmosphere_descriptor(kind);
+            assert!(
+                (200.0..=1_500.0).contains(&descriptor.environment_intensity),
+                "{kind:?} environment intensity was {}",
+                descriptor.environment_intensity
+            );
+
+            for color in [descriptor.sky_top, descriptor.sky_bottom] {
+                for channel in [color.red, color.green, color.blue, color.alpha] {
+                    assert!(
+                        channel.is_finite() && (0.0..=1.0).contains(&channel),
+                        "{kind:?} sky channel was {channel}"
+                    );
+                }
+            }
+        }
+    }
 }

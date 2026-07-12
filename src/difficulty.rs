@@ -34,7 +34,7 @@
 use bevy::color::LinearRgba;
 use bevy::prelude::*;
 use bevy::text::FontSize;
-use std::f32::consts::FRAC_PI_2;
+use std::f32::consts::{FRAC_PI_2, TAU};
 
 use crate::car::{Car, InputFrozen};
 use crate::game::SpawnSet;
@@ -95,6 +95,7 @@ const TRAFFIC_MAX_SPEED: f32 = 11.5;
 const BODY_W: f32 = 1.0;
 const BODY_D: f32 = 2.0;
 const WINDSHIELD_D: f32 = 0.03;
+const TRAFFIC_WHEEL_RADIUS: f32 = 0.15;
 
 /// Shared visual silhouettes. Selection reads the module's deterministic
 /// LCG state without advancing it, so visuals do not perturb movement rolls.
@@ -180,7 +181,7 @@ impl FromWorld for TrafficAssets {
                 meshes.add(Cuboid::new(0.76, 0.38, WINDSHIELD_D)),
             ];
             let light_mesh = meshes.add(Cuboid::new(0.18, 0.12, 0.04));
-            let wheel_mesh = meshes.add(Cylinder::new(0.15, 0.18));
+            let wheel_mesh = meshes.add(Cylinder::new(TRAFFIC_WHEEL_RADIUS, 0.18));
             let hub_mesh = meshes.add(Cylinder::new(0.066, 0.19));
             let shadow_mesh = meshes.add(Plane3d::default().mesh().size(1.55, 2.35));
 
@@ -195,7 +196,10 @@ impl FromWorld for TrafficAssets {
                 materials.add(StandardMaterial {
                     base_color,
                     metallic: 0.6,
-                    perceptual_roughness: 0.35,
+                    // Shared glossy metallic paint responds consistently to
+                    // the scene's image-based lighting without clearcoat or
+                    // per-car material allocation.
+                    perceptual_roughness: 0.25,
                     ..default()
                 })
             });
@@ -283,6 +287,14 @@ pub struct Traffic {
     pub dir: f32,
 }
 
+/// A wheel directly parented to a [`Traffic`] root. Keeping spin as a scalar
+/// lets the animation rebuild the axle-aligned rotation each frame instead of
+/// repeatedly multiplying quaternions (which would eventually drift/tumble).
+#[derive(Component, Default)]
+struct TrafficWheel {
+    spin_radians: f32,
+}
+
 /// Root node of the "Lv {level}" UI. Despawned on exit from `Playing`
 /// (mirrors `minimap.rs` / `health.rs` UI lifecycle).
 #[derive(Component)]
@@ -317,10 +329,16 @@ impl Plugin for DifficultyPlugin {
                 OnExit(GameState::Playing),
                 despawn_marker::<DifficultyUiRoot>,
             )
-            // Per-frame: ramp the level + manage the traffic population.
+            // Per-frame: ramp the level, manage traffic, then animate the
+            // wheel children from each owning traffic root's speed.
             .add_systems(
                 Update,
-                (tick_difficulty, manage_traffic).run_if(in_state(GameState::Playing)),
+                (
+                    tick_difficulty,
+                    manage_traffic,
+                    spin_traffic_wheels.after(manage_traffic),
+                )
+                    .run_if(in_state(GameState::Playing)),
             )
             // UI refresh runs in every state so the label recovers even while
             // paused; the query is trivial when the UI root is absent.
@@ -380,7 +398,7 @@ fn manage_traffic(
     difficulty: Res<Difficulty>,
     modifier: Res<ActiveModifier>,
     car: Query<&Transform, (With<Car>, Without<Traffic>)>,
-    mut traffic: Query<(Entity, &Traffic, &mut Transform)>,
+    mut traffic: Query<(Entity, &Traffic, &mut Transform), (With<Traffic>, Without<TrafficWheel>)>,
     time: Res<Time>,
     mut seed: Local<u32>,
 ) {
@@ -450,6 +468,45 @@ fn manage_traffic(
 fn cleanup_traffic(mut commands: Commands, traffic: Query<Entity, With<Traffic>>) {
     for e in &traffic {
         commands.entity(e).despawn();
+    }
+}
+
+/// Distance-derived wheel rotation for one frame. Traffic speed is expressed
+/// in world units per second and the traffic root always faces local -Z, so a
+/// positive local-X rotation gives forward rolling regardless of road axis or
+/// direction.
+fn traffic_wheel_spin_delta(speed: f32, delta_seconds: f32) -> f32 {
+    speed * delta_seconds / TRAFFIC_WHEEL_RADIUS
+}
+
+/// Reconstruct an axle-aligned wheel rotation from its scalar spin state.
+/// Applying spin around the cylinder's local Y before the fixed axle rotation
+/// keeps the resulting world-space axle on local X without accumulated error.
+fn traffic_wheel_rotation(spin_radians: f32) -> Quat {
+    Quat::from_rotation_z(FRAC_PI_2) * Quat::from_rotation_y(spin_radians)
+}
+
+/// Animate direct wheel children from their owning traffic root. The explicit
+/// opposing filters keep mutable wheel transforms disjoint from traffic-root
+/// transforms in `manage_traffic` and guard against B0001 if either query is
+/// expanded later.
+fn spin_traffic_wheels(
+    time: Res<Time>,
+    mut wheels: Query<
+        (&ChildOf, &mut TrafficWheel, &mut Transform),
+        (With<TrafficWheel>, Without<Traffic>),
+    >,
+    owners: Query<&Traffic, (With<Traffic>, Without<TrafficWheel>)>,
+) {
+    let delta_seconds = time.delta_secs();
+    for (child_of, mut wheel, mut transform) in &mut wheels {
+        let Ok(traffic) = owners.get(child_of.parent()) else {
+            continue;
+        };
+        wheel.spin_radians = (wheel.spin_radians
+            + traffic_wheel_spin_delta(traffic.speed, delta_seconds))
+        .rem_euclid(TAU);
+        transform.rotation = traffic_wheel_rotation(wheel.spin_radians);
     }
 }
 
@@ -651,7 +708,8 @@ fn spawn_one_traffic(
                 root.spawn((
                     Mesh3d(assets.wheel_mesh.clone()),
                     MeshMaterial3d(assets.wheel_mat.clone()),
-                    Transform::from_xyz(x, 0.15, z).with_rotation(Quat::from_rotation_z(FRAC_PI_2)),
+                    Transform::from_xyz(x, 0.15, z).with_rotation(traffic_wheel_rotation(0.0)),
+                    TrafficWheel::default(),
                 ))
                 .with_child((
                     Mesh3d(assets.hub_mesh.clone()),
@@ -792,6 +850,18 @@ mod tests {
             traffic_speed_for_roll(MAX_LEVEL, 1.0, rush),
             TRAFFIC_MAX_SPEED
         );
+    }
+
+    #[test]
+    fn wheel_spin_delta_tracks_distance_without_frame_rate_dependence() {
+        let speed = 6.0;
+        let one_frame = traffic_wheel_spin_delta(speed, 0.5);
+        let two_frames =
+            traffic_wheel_spin_delta(speed, 0.2) + traffic_wheel_spin_delta(speed, 0.3);
+        let expected = speed * 0.5 / TRAFFIC_WHEEL_RADIUS;
+        assert!((one_frame - expected).abs() < 1e-5);
+        assert!((two_frames - expected).abs() < 1e-5);
+        assert_eq!(traffic_wheel_spin_delta(0.0, 1.0), 0.0);
     }
 
     #[test]
