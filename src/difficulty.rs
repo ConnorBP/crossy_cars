@@ -14,8 +14,8 @@
 //!   emits `ObstacleHit` → damage. The baseline count scales with `level`
 //!   (`1 + level/2`); active modifier and event multipliers are then composed,
 //!   with the final population capped at 8. They drive straight along a world
-//!   axis and are recycled (despawned + respawned near/ahead) once they drift
-//!   ~60u from the car.
+//!   axis and are recycled (despawned + respawned safely offscreen ahead) once
+//!   they drift ~90u from the car.
 //! - A small "Lv {level}" UI node top-right, just below the minimap.
 //!
 //! Contracts honoured:
@@ -61,12 +61,22 @@ const MAX_TRAFFIC: usize = 8;
 
 /// Distance from the car (XZ) beyond which a traffic car is recycled
 /// (despawned + replaced). Keeps the traffic near the endless driver.
-const TRAFFIC_KEEP_RADIUS: f32 = 60.0;
+const TRAFFIC_KEEP_RADIUS: f32 = 90.0;
 
-/// Traffic spawn forward bias range (ahead of the car, in its forward
-/// direction): `SPAWN_AHEAD_MIN .. + SPAWN_AHEAD_RANGE`.
-const SPAWN_AHEAD_MIN: f32 = 18.0;
-const SPAWN_AHEAD_RANGE: f32 = 32.0;
+/// Traffic spawn envelope ahead of the car's camera-facing heading. Candidate
+/// points start 34..58u ahead; road snapping is accepted only when the final
+/// lane-centred position remains at least `SPAWN_AHEAD_MIN` ahead.
+const SPAWN_AHEAD_MIN: f32 = 34.0;
+const SPAWN_AHEAD_RANGE: f32 = 24.0;
+/// No traffic root may be created inside this XZ circle around the car, even
+/// after snapping the candidate to a real road line and directional lane.
+const SPAWN_SAFE_RADIUS: f32 = 26.0;
+/// Small tolerance used only at floating-point comparisons/test boundaries.
+const SPAWN_SAFETY_TOLERANCE: f32 = 1e-3;
+/// Bounded candidate count keeps spawning deterministic and constant-time.
+const SPAWN_RETRY_CANDIDATES: usize = 8;
+/// The deterministic fallback aims comfortably inside the normal envelope.
+const SPAWN_FALLBACK_AHEAD: f32 = 46.0;
 /// Lateral jitter around the ahead-biased candidate point. The final
 /// cross-road coordinate is replaced by a deterministic road line + lane.
 const SPAWN_LATERAL: f32 = 3.0;
@@ -472,12 +482,10 @@ fn manage_traffic(
     // --- Top up to the level-derived, modifier- and event-adjusted target. ---
     let mut needed = target.saturating_sub(alive);
 
-    // Car forward (heading 0 => -Z); bias spawns ahead of the driver so
-    // traffic appears in front (fair — visible + avoidable).
+    // Car forward (heading 0 => -Z) defines the camera-facing offscreen
+    // envelope. Final snapped positions are validated against this heading.
     let forward = car_t.rotation * Vec3::NEG_Z;
     let forward = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
-    // Perpendicular (right) in the XZ plane.
-    let right = Vec3::new(forward.z, 0.0, -forward.x);
 
     while needed > 0 {
         needed -= 1;
@@ -491,7 +499,7 @@ fn manage_traffic(
         // Choose axis + direction before position: the cross-axis coordinate
         // is placed on a real deterministic road line, then offset into the
         // direction's lane so opposing traffic does not overlap.
-        let pos = traffic_spawn_pos_on_road(car_pos, forward, right, axis, dir, &mut seed);
+        let pos = traffic_spawn_pos_on_road(car_pos, forward, axis, dir, &mut seed);
         spawn_one_traffic(
             &mut commands,
             &assets,
@@ -642,20 +650,23 @@ fn lane_offset(dir: f32) -> f32 {
     dir.signum() * LANE_OFFSET
 }
 
-/// A spawn position ahead of the player, constrained to a road that actually
-/// exists in the deterministic world network. The final lane centre is inside
-/// `ROAD_HALF` even including the traffic collider half-width.
-fn traffic_spawn_pos_on_road(
-    car_pos: Vec3,
-    forward: Vec3,
-    right: Vec3,
-    axis: bool,
-    dir: f32,
-    seed: &mut u32,
-) -> Vec3 {
-    let ahead = SPAWN_AHEAD_MIN + rand(seed) * SPAWN_AHEAD_RANGE;
-    let lat = (rand(seed) * 2.0 - 1.0) * SPAWN_LATERAL;
-    let mut pos = car_pos + forward * ahead + right * lat;
+/// Pure post-snap safety policy. Only XZ distance and the car heading's
+/// forward projection matter; no arbitrary screen-space projection is used.
+fn traffic_spawn_is_safe(car_pos: Vec3, forward: Vec3, pos: Vec3) -> bool {
+    let heading = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
+    if heading == Vec3::ZERO {
+        return false;
+    }
+    let delta = Vec3::new(pos.x - car_pos.x, 0.0, pos.z - car_pos.z);
+    let forward_projection = delta.dot(heading);
+    forward_projection.is_finite()
+        && delta.length_squared().is_finite()
+        && forward_projection >= SPAWN_AHEAD_MIN - SPAWN_SAFETY_TOLERANCE
+        && delta.length_squared() >= SPAWN_SAFE_RADIUS.powi(2)
+}
+
+/// Snap a candidate to an existing road's direction-aware lane centre.
+fn snap_traffic_candidate_to_road(mut pos: Vec3, axis: bool, dir: f32) -> Vec3 {
     let cross = if axis { pos.z } else { pos.x };
     let line = nearest_road_line(axis, cross);
     let lane = line as f32 * ROAD_GRID + lane_offset(dir);
@@ -665,6 +676,110 @@ fn traffic_spawn_pos_on_road(
         pos.x = lane;
     }
     pos
+}
+
+/// First real road line at or beyond `start` in the requested direction.
+/// The deterministic line network has an unbounded density of road lines;
+/// this is used only by the guaranteed fallback after bounded spawn retries.
+fn first_road_line_in_direction(axis: bool, start: i32, step: i32) -> i32 {
+    debug_assert!(step == -1 || step == 1);
+    let mut line = start;
+    loop {
+        if road_exists_for_movement(axis, line) {
+            return line;
+        }
+        line = line.saturating_add(step);
+        // World-space f32 coordinates cannot meaningfully reach this edge in
+        // play. Line zero remains a real deterministic road for robustness.
+        if line == i32::MIN || line == i32::MAX {
+            return 0;
+        }
+    }
+}
+
+/// Guaranteed road-aligned fallback. It uses the road's free coordinate when
+/// the heading mostly follows that road; otherwise it selects the first real
+/// road line far enough ahead in the heading's cross-road direction.
+fn fallback_traffic_spawn_pos(car_pos: Vec3, forward: Vec3, axis: bool, dir: f32) -> Vec3 {
+    let heading = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
+    // A car rotation always supplies a valid heading. Retaining a stable
+    // default makes this pure helper safe for malformed standalone callers.
+    let heading = if heading == Vec3::ZERO {
+        Vec3::NEG_Z
+    } else {
+        heading
+    };
+    let movement_forward = if axis { heading.x } else { heading.z };
+    let cross_forward = if axis { heading.z } else { heading.x };
+    let fallback_projection = SPAWN_FALLBACK_AHEAD + SPAWN_SAFETY_TOLERANCE;
+
+    if movement_forward.abs() >= cross_forward.abs() {
+        let mut pos =
+            snap_traffic_candidate_to_road(car_pos + heading * SPAWN_FALLBACK_AHEAD, axis, dir);
+        let delta = Vec3::new(pos.x - car_pos.x, 0.0, pos.z - car_pos.z);
+        let correction = (fallback_projection - delta.dot(heading)) / movement_forward;
+        if axis {
+            pos.x += correction;
+        } else {
+            pos.z += correction;
+        }
+        return pos;
+    }
+
+    // Here `cross_forward` cannot be zero because the planar heading is a
+    // unit vector and its cross component is the larger component.
+    let car_cross = if axis { car_pos.z } else { car_pos.x };
+    let required_cross = car_cross + fallback_projection / cross_forward;
+    let line_coordinate = (required_cross - lane_offset(dir)) / ROAD_GRID;
+    let (start, step) = if cross_forward > 0.0 {
+        (line_coordinate.ceil() as i32, 1)
+    } else {
+        (line_coordinate.floor() as i32, -1)
+    };
+    let line = first_road_line_in_direction(axis, start, step);
+    let lane = line as f32 * ROAD_GRID + lane_offset(dir);
+    let mut pos = car_pos;
+    if axis {
+        pos.z = lane;
+    } else {
+        pos.x = lane;
+    }
+    pos
+}
+
+/// A spawn position ahead of the player, constrained to a road that actually
+/// exists in the deterministic world network. Up to eight deterministic LCG
+/// candidates are snapped to their correct lanes, then checked *after* that
+/// snap. The first safe candidate wins; otherwise a safe road-line fallback
+/// is used rather than returning a position near or on top of the player.
+fn traffic_spawn_pos_on_road(
+    car_pos: Vec3,
+    forward: Vec3,
+    axis: bool,
+    dir: f32,
+    seed: &mut u32,
+) -> Vec3 {
+    let heading = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
+    let heading = if heading == Vec3::ZERO {
+        Vec3::NEG_Z
+    } else {
+        heading
+    };
+    let right = Vec3::new(heading.z, 0.0, -heading.x);
+
+    for _ in 0..SPAWN_RETRY_CANDIDATES {
+        let ahead = SPAWN_AHEAD_MIN + rand(seed) * SPAWN_AHEAD_RANGE;
+        let lateral = (rand(seed) * 2.0 - 1.0) * SPAWN_LATERAL;
+        let candidate =
+            snap_traffic_candidate_to_road(car_pos + heading * ahead + right * lateral, axis, dir);
+        if traffic_spawn_is_safe(car_pos, heading, candidate) {
+            return candidate;
+        }
+    }
+
+    let fallback = fallback_traffic_spawn_pos(car_pos, heading, axis, dir);
+    debug_assert!(traffic_spawn_is_safe(car_pos, heading, fallback));
+    fallback
 }
 
 /// Deterministic silhouette selection from the shared traffic LCG state.
@@ -1099,31 +1214,145 @@ mod tests {
         assert_eq!(traffic_wheel_spin_delta(0.0, 1.0), 0.0);
     }
 
+    fn assert_safe_road_spawn(car: Vec3, forward: Vec3, axis: bool, dir: f32, pos: Vec3) {
+        let heading = Vec3::new(forward.x, 0.0, forward.z).normalize();
+        let delta = Vec3::new(pos.x - car.x, 0.0, pos.z - car.z);
+        let cross = if axis { pos.z } else { pos.x };
+        let line = ((cross - lane_offset(dir)) / ROAD_GRID).round() as i32;
+        let offset = cross - line as f32 * ROAD_GRID;
+
+        assert!(road_exists_for_movement(axis, line));
+        assert!((offset - lane_offset(dir)).abs() < 1e-4);
+        assert!(offset.abs() + TRAFFIC_HALF_WIDTH < ROAD_HALF);
+        assert!(delta.length() >= SPAWN_SAFE_RADIUS);
+        assert!(
+            delta.dot(heading) >= SPAWN_AHEAD_MIN - SPAWN_SAFETY_TOLERANCE,
+            "spawn {pos:?} was not offscreen-ahead of {car:?} along {heading:?}"
+        );
+        assert!(traffic_spawn_is_safe(car, heading, pos));
+    }
+
     #[test]
-    fn spawn_uses_existing_road_line_and_directional_lane() {
-        let car = Vec3::new(137.0, 0.0, -93.0);
-        let forward = Vec3::new(0.8, 0.0, -0.6);
-        let right = Vec3::new(-0.6, 0.0, -0.8);
-        for axis in [false, true] {
-            for dir in [-1.0, 1.0] {
-                let mut seed = 0x1234_5678;
-                let pos = traffic_spawn_pos_on_road(car, forward, right, axis, dir, &mut seed);
-                let cross = if axis { pos.z } else { pos.x };
-                let line = ((cross - lane_offset(dir)) / ROAD_GRID).round() as i32;
-                assert!(road_exists_for_movement(axis, line));
-                let offset = cross - line as f32 * ROAD_GRID;
-                assert!((offset - lane_offset(dir)).abs() < 1e-4);
-                assert!(offset.abs() + TRAFFIC_HALF_WIDTH < ROAD_HALF);
+    fn many_seeds_and_headings_spawn_safely_on_directional_road_lanes() {
+        let cars = [
+            Vec3::ZERO,
+            Vec3::new(137.0, 0.0, -93.0),
+            Vec3::new(-321.25, 0.0, 278.75),
+        ];
+        let headings = [
+            Vec3::NEG_Z,
+            Vec3::X,
+            Vec3::Z,
+            Vec3::NEG_X,
+            Vec3::new(1.0, 0.0, 1.0),
+            Vec3::new(0.8, 0.0, -0.6),
+            Vec3::new(-0.31, 0.0, -0.95),
+        ];
+
+        for (car_index, car) in cars.into_iter().enumerate() {
+            for (heading_index, forward) in headings.into_iter().enumerate() {
+                for axis in [false, true] {
+                    for dir in [-1.0, 1.0] {
+                        for seed_index in 0_u32..96 {
+                            let mut seed = 0x1234_5678_u32
+                                .wrapping_add(seed_index.wrapping_mul(0x9E37_79B9))
+                                .wrapping_add((car_index as u32) << 12)
+                                .wrapping_add((heading_index as u32) << 20);
+                            let pos = traffic_spawn_pos_on_road(car, forward, axis, dir, &mut seed);
+                            assert_safe_road_spawn(car, forward, axis, dir, pos);
+                        }
+                    }
+                }
             }
         }
     }
 
     #[test]
-    fn opposing_directions_select_separate_lanes() {
+    fn fallback_is_safe_and_road_aligned_for_all_cardinal_relationships() {
+        let car = Vec3::new(83.25, 0.0, -117.75);
+        let headings = [
+            Vec3::NEG_Z,
+            Vec3::X,
+            Vec3::Z,
+            Vec3::NEG_X,
+            Vec3::new(1.0, 0.0, 1.0),
+            Vec3::new(-1.0, 0.0, 1.0),
+        ];
+        for forward in headings {
+            for axis in [false, true] {
+                for dir in [-1.0, 1.0] {
+                    let pos = fallback_traffic_spawn_pos(car, forward, axis, dir);
+                    assert_safe_road_spawn(car, forward, axis, dir, pos);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn spawn_is_deterministic_for_identical_inputs_and_lcg_state() {
+        let car = Vec3::new(17.25, 0.0, -81.5);
+        let forward = Vec3::new(-0.73, 0.0, 0.41);
+        for axis in [false, true] {
+            for dir in [-1.0, 1.0] {
+                for initial_seed in [1, 2, 0x1234_5678, 0xCAFE_BABE, u32::MAX] {
+                    let mut seed_a = initial_seed;
+                    let mut seed_b = initial_seed;
+                    let a = traffic_spawn_pos_on_road(car, forward, axis, dir, &mut seed_a);
+                    let b = traffic_spawn_pos_on_road(car, forward, axis, dir, &mut seed_b);
+                    assert_eq!(a, b);
+                    assert_eq!(seed_a, seed_b);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn opposing_directions_select_separate_safe_lanes() {
         assert_eq!(lane_offset(1.0), LANE_OFFSET);
         assert_eq!(lane_offset(-1.0), -LANE_OFFSET);
         assert!(2.0 * LANE_OFFSET > 2.0 * TRAFFIC_HALF_WIDTH);
         assert!(LANE_OFFSET + TRAFFIC_HALF_WIDTH < ROAD_HALF);
+
+        // Snapping the same road-centre candidate puts opposing directions on
+        // opposite lane centres of one real road, never overlapping roots.
+        for axis in [false, true] {
+            let line = nearest_road_line(axis, 0.0);
+            let center = line as f32 * ROAD_GRID;
+            let candidate = if axis {
+                Vec3::new(12.0, 0.0, center)
+            } else {
+                Vec3::new(center, 0.0, 12.0)
+            };
+            let negative = snap_traffic_candidate_to_road(candidate, axis, -1.0);
+            let positive = snap_traffic_candidate_to_road(candidate, axis, 1.0);
+            let separation = if axis {
+                positive.z - negative.z
+            } else {
+                positive.x - negative.x
+            };
+            assert!((separation - 2.0 * LANE_OFFSET).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn safety_predicate_rejects_player_circle_and_not_ahead() {
+        let car = Vec3::new(4.0, 0.0, -7.0);
+        let forward = Vec3::NEG_Z;
+        assert!(!traffic_spawn_is_safe(
+            car,
+            forward,
+            car + forward * (SPAWN_SAFE_RADIUS - 0.1),
+        ));
+        assert!(!traffic_spawn_is_safe(
+            car,
+            forward,
+            car - forward * (SPAWN_AHEAD_MIN + 10.0),
+        ));
+        assert!(traffic_spawn_is_safe(
+            car,
+            forward,
+            car + forward * SPAWN_AHEAD_MIN,
+        ));
     }
 
     #[test]

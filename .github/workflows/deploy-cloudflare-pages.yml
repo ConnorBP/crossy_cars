@@ -1,0 +1,60 @@
+name: Deploy to Cloudflare Pages
+
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cloudflare-pages-production
+  cancel-in-progress: false
+
+env:
+  PROJECT_NAME: ${{ vars.CLOUDFLARE_PAGES_PROJECT || 'roady-car' }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Rust build data
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Trunk
+        run: cargo install --locked trunk --version 0.21.14
+
+      - name: Build production site
+        run: trunk build --release --cargo-profile wasm-release
+
+      - name: Check release output
+        run: python tools/check_release.py
+
+      - name: Upload site artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloudflare-pages-dist-${{ github.sha }}
+          path: dist/
+          if-no-files-found: error
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Deploy to Cloudflare Pages
+        run: npx wrangler@4 pages deploy dist --project-name "$PROJECT_NAME" --branch main
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

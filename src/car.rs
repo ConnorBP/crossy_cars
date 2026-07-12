@@ -34,6 +34,44 @@ pub struct PlayerInput {
     pub brake: bool,
 }
 
+// Exponential speed-response rates (per second). Service braking is
+// deliberately stronger than acceleration/coasting without snapping the car
+// to a halt: from speed 12 it takes about 1.75 s to reach the stop threshold,
+// leaving enough braking distance for the rear skid marks to read clearly.
+const ACCEL_RESPONSE_RATE: f32 = 3.0;
+const COAST_RESPONSE_RATE: f32 = 2.0;
+const BRAKE_RESPONSE_RATE: f32 = 4.0;
+const STOP_SPEED_THRESHOLD: f32 = 0.01;
+
+/// Pure speed integration shared by gameplay and tests. Exponential response
+/// keeps the feel consistent across frame rates and makes braking progressively
+/// ease toward rest rather than applying an abrupt fixed-speed cut.
+fn next_speed(current: f32, max_speed: f32, input: PlayerInput, dt: f32) -> f32 {
+    // Brake dominates, then forward acceleration, capped reverse, then coast.
+    let (target, rate) = if input.brake {
+        (0.0, BRAKE_RESPONSE_RATE)
+    } else if input.throttle > 0.0 {
+        (
+            max_speed * input.throttle.clamp(0.0, 1.0),
+            ACCEL_RESPONSE_RATE,
+        )
+    } else if input.throttle < 0.0 {
+        (
+            max_speed * 0.5 * input.throttle.clamp(-1.0, 0.0),
+            ACCEL_RESPONSE_RATE,
+        )
+    } else {
+        (0.0, COAST_RESPONSE_RATE)
+    };
+
+    let alpha = 1.0 - (-rate * dt.max(0.0)).exp();
+    let mut speed = (current + (target - current) * alpha).clamp(-max_speed, max_speed);
+    if speed.abs() < STOP_SPEED_THRESHOLD && target == 0.0 {
+        speed = 0.0;
+    }
+    speed
+}
+
 /// Convert the keyboard's individual bindings into normalized driving intent.
 /// Opposite directions cancel, while duplicate bindings for one direction are
 /// combined and clamped to a single unit of input.
@@ -422,24 +460,7 @@ fn move_car(
     };
     let dt = time.delta_secs();
 
-    // Eased approach to a target speed. Brake dominates, then accel, then
-    // capped reverse, then coast. `rate` controls how quickly `speed`
-    // converges to `target`.
-    let (target, rate) = if input.brake {
-        (0.0, 14.0)
-    } else if input.throttle > 0.0 {
-        (cfg.max_speed * input.throttle.clamp(0.0, 1.0), 3.0)
-    } else if input.throttle < 0.0 {
-        (cfg.max_speed * 0.5 * input.throttle.clamp(-1.0, 0.0), 3.0)
-    } else {
-        (0.0, 2.0)
-    };
-
-    car.speed += (target - car.speed) * rate * dt;
-    car.speed = car.speed.clamp(-cfg.max_speed, cfg.max_speed);
-    if car.speed.abs() < 0.01 && target == 0.0 {
-        car.speed = 0.0;
-    }
+    car.speed = next_speed(car.speed, cfg.max_speed, *input, dt);
 
     // Steering scales with speed so the car can't spin in place.
     car.heading += input.steer.clamp(-1.0, 1.0) * cfg.turn_rate * dt * (car.speed / cfg.max_speed);
@@ -745,6 +766,129 @@ mod tests {
         assert_eq!(input.throttle, 1.0);
         assert_eq!(input.steer, 1.0);
         assert!(input.brake);
+    }
+
+    fn simulate_speed(
+        initial: f32,
+        max_speed: f32,
+        input: PlayerInput,
+        dt: f32,
+        duration: f32,
+    ) -> f32 {
+        let steps = (duration / dt).round() as usize;
+        (0..steps).fold(initial, |speed, _| next_speed(speed, max_speed, input, dt))
+    }
+
+    #[test]
+    fn acceleration_coasting_and_braking_have_distinct_responses() {
+        let initial = 12.0;
+        let accelerating = simulate_speed(
+            initial,
+            20.0,
+            PlayerInput {
+                throttle: 1.0,
+                ..default()
+            },
+            1.0 / 60.0,
+            0.5,
+        );
+        let coasting = simulate_speed(initial, 20.0, PlayerInput::default(), 1.0 / 60.0, 0.5);
+        let braking = simulate_speed(
+            initial,
+            20.0,
+            PlayerInput {
+                brake: true,
+                ..default()
+            },
+            1.0 / 60.0,
+            0.5,
+        );
+
+        assert!(accelerating > initial);
+        assert!(braking < coasting && coasting < initial);
+    }
+
+    #[test]
+    fn service_braking_decelerates_monotonically() {
+        let input = PlayerInput {
+            brake: true,
+            ..default()
+        };
+        let mut speed = 12.0;
+        for _ in 0..120 {
+            let previous = speed;
+            speed = next_speed(speed, 20.0, input, 1.0 / 120.0);
+            assert!(speed <= previous);
+            assert!(speed >= 0.0);
+        }
+    }
+
+    #[test]
+    fn braking_is_progressive_but_stops_in_a_reasonable_time() {
+        let input = PlayerInput {
+            brake: true,
+            ..default()
+        };
+        let after_tenth = simulate_speed(12.0, 20.0, input, 1.0 / 120.0, 0.1);
+        assert!(after_tenth > 5.0, "braking was effectively instantaneous");
+
+        let dt = 1.0 / 120.0;
+        let mut speed = 12.0;
+        let mut elapsed = 0.0;
+        while speed != 0.0 && elapsed < 2.0 {
+            speed = next_speed(speed, 20.0, input, dt);
+            elapsed += dt;
+        }
+        assert!((1.5..=2.0).contains(&elapsed), "stop took {elapsed}s");
+    }
+
+    #[test]
+    fn braking_has_sane_frame_rate_independence() {
+        let input = PlayerInput {
+            brake: true,
+            ..default()
+        };
+        let at_30 = simulate_speed(12.0, 20.0, input, 1.0 / 30.0, 0.5);
+        let at_60 = simulate_speed(12.0, 20.0, input, 1.0 / 60.0, 0.5);
+        let at_120 = simulate_speed(12.0, 20.0, input, 1.0 / 120.0, 0.5);
+        assert!((at_30 - at_60).abs() < 1e-4);
+        assert!((at_60 - at_120).abs() < 1e-4);
+    }
+
+    #[test]
+    fn brake_dominates_throttle_and_reverse_remains_capped() {
+        let brake_and_throttle = next_speed(
+            12.0,
+            20.0,
+            PlayerInput {
+                throttle: 1.0,
+                brake: true,
+                ..default()
+            },
+            0.1,
+        );
+        let brake_only = next_speed(
+            12.0,
+            20.0,
+            PlayerInput {
+                brake: true,
+                ..default()
+            },
+            0.1,
+        );
+        assert!((brake_and_throttle - brake_only).abs() < f32::EPSILON);
+
+        let reverse = simulate_speed(
+            0.0,
+            20.0,
+            PlayerInput {
+                throttle: -1.0,
+                ..default()
+            },
+            1.0 / 60.0,
+            10.0,
+        );
+        assert!(reverse >= -10.0 && reverse < -9.9);
     }
 
     #[test]

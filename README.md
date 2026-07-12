@@ -101,6 +101,10 @@ trunk build --release --cargo-profile wasm-release
 
 The deployable files are written to `dist/`; serve that directory from an HTTP server rather than opening `index.html` directly.
 
+## Deployment
+
+Production deployment to Cloudflare Pages is configured through GitHub Actions. See [DEPLOYMENT.md](DEPLOYMENT.md) for project creation, credentials, local production builds, deployment, and custom-domain setup.
+
 ## Architecture
 
 `src/main.rs` composes the game from focused Bevy plugins:

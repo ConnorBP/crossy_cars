@@ -53,7 +53,7 @@ const HIT_RADIUS: f32 = 1.2;
 
 /// Critters farther than this from the car are recycled (despawned + respawned
 /// ahead) so the menagerie stays near the endless driver.
-const KEEP_RADIUS: f32 = 50.0;
+const KEEP_RADIUS: f32 = 65.0;
 
 /// Critters this far behind the car along its current heading are recycled
 /// even if they remain within `KEEP_RADIUS`.
@@ -61,8 +61,12 @@ const BEHIND_THRESHOLD: f32 = 15.0;
 
 /// Recycled critters respawn this many units along the car's current forward
 /// axis, at a random offset within `[RESPAWN_AHEAD_MIN, ... + RANGE]`.
-const RESPAWN_AHEAD_MIN: f32 = 30.0;
-const RESPAWN_AHEAD_RANGE: f32 = 20.0;
+const RESPAWN_AHEAD_MIN: f32 = 34.0;
+const RESPAWN_AHEAD_RANGE: f32 = 22.0;
+
+/// Approximate far edge of the camera footprint. Recycled spawns must clear
+/// this in both radial distance and forward projection before appearing.
+const VISIBLE_VIEW_RADIUS: f32 = 12.0;
 
 /// Initial scatter radius around the car (fresh round). Inner radius keeps the
 /// first critter from spawning on top of the car (which would be an instant
@@ -1125,12 +1129,24 @@ fn should_recycle(pos: Vec3, car_pos: Vec3, car_forward: Vec3) -> bool {
     pos.distance(car_pos) > KEEP_RADIUS || is_behind_car(pos, car_pos, car_forward)
 }
 
-/// A position ahead of the car at a random forward distance and a random
-/// car-relative lateral offset centered on the car.
+/// A position in the explicit offscreen envelope ahead of the car. The
+/// minimum forward projection clears the camera and hit safety radii, while
+/// bounded lateral spread keeps the far corner within `KEEP_RADIUS`.
 fn respawn_ahead_pos(car_pos: Vec3, car_forward: Vec3, seed: &mut u32) -> Vec3 {
     let ahead = RESPAWN_AHEAD_MIN + rand(seed) * RESPAWN_AHEAD_RANGE;
     let lateral = (rand(seed) * 2.0 - 1.0) * LATERAL_SPREAD;
-    car_relative_ground_pos(car_pos, car_forward, ahead, lateral)
+    let pos = car_relative_ground_pos(car_pos, car_forward, ahead, lateral);
+    debug_assert!(is_safely_offscreen(pos, car_pos, car_forward));
+    pos
+}
+
+/// Pure ground-plane camera-envelope check used by runtime assertions and
+/// deterministic seed/heading tests.
+fn is_safely_offscreen(pos: Vec3, car_pos: Vec3, car_forward: Vec3) -> bool {
+    let delta = Vec3::new(pos.x - car_pos.x, 0.0, pos.z - car_pos.z);
+    delta.dot(normalized_horizontal(car_forward)) > VISIBLE_VIEW_RADIUS
+        && delta.length() > VISIBLE_VIEW_RADIUS
+        && delta.length() > HIT_RADIUS
 }
 
 /// Pure contact-window decision used by the hit system and unit tests.
@@ -1346,5 +1362,35 @@ mod tests {
 
         assert!(is_behind_car(car_pos + Vec3::Z * 16.0, car_pos, south));
         assert!(!is_behind_car(car_pos - Vec3::Z * 16.0, car_pos, south));
+    }
+
+    #[test]
+    fn critter_respawn_envelope_is_offscreen_for_headings_and_seeds() {
+        let car_pos = Vec3::new(-13.0, 3.0, 29.0);
+        let headings = [
+            Vec3::NEG_Z,
+            Vec3::X,
+            Vec3::new(-0.8, 0.0, -0.6),
+            Vec3::new(0.2, 9.0, 0.9),
+        ];
+        for heading in headings {
+            let forward = normalized_horizontal(heading);
+            let right = Vec3::new(-forward.z, 0.0, forward.x);
+            for initial_seed in [1, 13, 0xACE0_2468, u32::MAX] {
+                let mut seed = initial_seed;
+                for _ in 0..16 {
+                    let pos = respawn_ahead_pos(car_pos, heading, &mut seed);
+                    let delta = Vec3::new(pos.x - car_pos.x, 0.0, pos.z - car_pos.z);
+                    let ahead = delta.dot(forward);
+                    let lateral = delta.dot(right);
+                    assert!(is_safely_offscreen(pos, car_pos, heading));
+                    assert!(ahead >= RESPAWN_AHEAD_MIN - 0.0001);
+                    assert!(ahead <= RESPAWN_AHEAD_MIN + RESPAWN_AHEAD_RANGE + 0.0001);
+                    assert!(lateral.abs() <= LATERAL_SPREAD + 0.0001);
+                    assert!(delta.length() < KEEP_RADIUS);
+                    assert!(!should_recycle(pos, car_pos, heading));
+                }
+            }
+        }
     }
 }

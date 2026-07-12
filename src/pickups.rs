@@ -3,8 +3,9 @@
 //!
 //! Five kinds:
 //! - **SpeedBoost** (blue): nudges `car.speed` upward for ~4s (cap ~1.6× max).
-//! - **CoinMagnet** (gold): pulls every coin toward the car for ~6s so the
-//!   existing `world.rs::collect_coins` (distance < 1.2) scoops them up.
+//! - **CoinMagnet** (gold): pulls a capped set of nearby coins toward the car
+//!   for ~4s so the existing `world.rs::collect_coins` (distance < 1.2)
+//!   scoops them up.
 //! - **Health** (green): instant — restores `Health` by +35 (cap 100).
 //! - **Time** (cyan clock): instant — adds +5s to `TimeLeft` (cap 99).
 //! - **MegaCoin** (big gold): instant — +5 coins to `Score` + writes a
@@ -75,10 +76,15 @@ const SPEED_BOOST_ACCEL: f32 = 20.0;
 const SPEED_BOOST_CAP_MULT: f32 = 1.6;
 
 /// CoinMagnet duration (seconds).
-const MAGNET_DURATION: f32 = 6.0;
+const MAGNET_DURATION: f32 = 4.0;
+/// Only coins within this world-space XZ radius are eligible for attraction.
+const MAGNET_RADIUS: f32 = 10.0;
 /// Fraction of the distance to the car a coin closes per second (0..1; higher
 /// = snappier pull). Applied as `pos += (car - pos) * STRENGTH * dt`.
-const MAGNET_STRENGTH: f32 = 4.5;
+const MAGNET_STRENGTH: f32 = 3.0;
+/// Hard per-frame cap on coins moved by the magnet. Selection keeps only the
+/// nearest candidates and uses entity order to break equal-distance ties.
+const MAX_MAGNET_COINS_PER_FRAME: usize = 24;
 
 /// Health pickup: amount restored (clamped to `HEALTH_MAX`).
 const HEALTH_RESTORE: f32 = 35.0;
@@ -259,7 +265,7 @@ impl FromWorld for PickupAudio {
 // ===========================================================================
 
 /// Which power-up an orb grants when collected.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PowerKind {
     SpeedBoost,
     CoinMagnet,
@@ -412,8 +418,8 @@ fn spawn_pickup(
     let dist = SPAWN_RADIUS * (0.55 + rand(&mut state.seed) * 0.45); // 55..100% of radius
     let pos = pickup_spawn_pos(car_pos, forward, angle, dist);
 
-    // Weighted kind pick: Health ~10%, Time ~20%, MegaCoin ~15%,
-    // SpeedBoost ~25%, CoinMagnet ~30%.
+    // Weighted kind pick: Health 15%, Time 25%, MegaCoin 15%,
+    // SpeedBoost 30%, CoinMagnet 15%.
     let kind = pick_kind(rand(&mut state.seed));
 
     // Resolve the orb mesh + emissive material for this kind. MegaCoin uses
@@ -551,20 +557,24 @@ fn apply_speed_boost(
     timer.0 = (timer.0 - dt).max(0.0);
 }
 
-/// While `MagnetTimer > 0`, lerp every coin's translation toward the car (in
-/// world space) so `world.rs::collect_coins` (distance < 1.2) scoops them up.
+/// While `MagnetTimer > 0`, pull at most the nearest
+/// [`MAX_MAGNET_COINS_PER_FRAME`] coins inside [`MAGNET_RADIUS`] toward the
+/// car, in world space. `world.rs::collect_coins` remains responsible for
+/// collection once a coin is within its normal collection radius.
 ///
-/// Coins are chunk-root children → their `Transform` is LOCAL. We read the
+/// Coins are chunk-root children → their `Transform` is LOCAL. We read each
 /// coin's world position via `GlobalTransform`, compute the world-space pull
 /// delta, and apply that same delta to the coin's local `Transform`. This is
 /// valid because chunk roots carry only translation (no rotation/scale), so a
 /// world-space translation delta equals the local-space translation delta.
-/// Decrement the timer.
+/// Freshly spawned coins whose transform propagation still reads as
+/// `GlobalTransform::IDENTITY` are ignored for this frame.
 fn apply_coin_magnet(
     car: Query<&Transform, (With<Car>, Without<Coin>)>,
-    mut coins: Query<(&GlobalTransform, &mut Transform), (With<Coin>, Without<Car>)>,
+    mut coins: Query<(Entity, &GlobalTransform, &mut Transform), (With<Coin>, Without<Car>)>,
     mut timer: ResMut<MagnetTimer>,
     time: Res<Time>,
+    mut nearest: Local<Vec<RankedMagnetCandidate<Entity, (Entity, Vec3)>>>,
 ) {
     if timer.0 <= 0.0 {
         return;
@@ -574,19 +584,37 @@ fn apply_coin_magnet(
         timer.0 = (timer.0 - dt).max(0.0);
         return;
     };
-    let car_xz = Vec3::new(car_t.translation.x, 0.5, car_t.translation.z);
+    let car_xz = car_t.translation;
 
-    for (gt, mut tf) in &mut coins {
-        let world = gt.translation();
-        let target = Vec3::new(car_xz.x, world.y, car_xz.z);
-        // Pull a fraction of the remaining distance this frame. Clamped so a
-        // huge dt (e.g. a hitch) doesn't overshoot past the car.
-        let t = (MAGNET_STRENGTH * dt).clamp(0.0, 1.0);
-        let new_world = world + (target - world) * t;
-        // Apply the world delta to the local Transform (valid: chunk roots
-        // have translation-only transforms, so local Δ == world Δ).
-        let delta = new_world - world;
-        tf.translation += delta;
+    // Retain this small allocation between frames. Its length can never grow
+    // beyond the fixed cap, and the insertion helper keeps it nearest-first,
+    // independent of ECS query iteration order.
+    nearest.clear();
+    if nearest.capacity() < MAX_MAGNET_COINS_PER_FRAME {
+        nearest.reserve_exact(MAX_MAGNET_COINS_PER_FRAME);
+    }
+    for (entity, gt, _) in &mut coins {
+        let propagated = has_propagated_global_transform(gt);
+        if let Some(step) = magnet_attraction_step(gt.translation(), car_xz, dt, propagated) {
+            insert_capped_nearest(
+                &mut *nearest,
+                RankedMagnetCandidate {
+                    distance_squared: step.distance_squared,
+                    stable_key: entity,
+                    value: (entity, step.delta),
+                },
+                MAX_MAGNET_COINS_PER_FRAME,
+            );
+        }
+    }
+
+    for candidate in nearest.drain(..) {
+        let (entity, delta) = candidate.value;
+        if let Ok((_, _, mut tf)) = coins.get_mut(entity) {
+            // Chunk roots are translation-only, so this world-space delta is
+            // also the correct delta for the child coin's local Transform.
+            tf.translation += delta;
+        }
     }
 
     timer.0 = (timer.0 - dt).max(0.0);
@@ -909,24 +937,121 @@ fn megacoin_flash_rgb() -> (f32, f32, f32) {
 // Helpers
 // ===========================================================================
 
-/// Weighted power-up kind picker. `r` is a uniform random in [0, 1). The
-/// cumulative thresholds encode the spawn probabilities:
-/// - Health    ~10%  (r < 0.10)
-/// - Time      ~20%  (0.10 ≤ r < 0.30)
-/// - MegaCoin  ~15%  (0.30 ≤ r < 0.45)
-/// - SpeedBoost ~25% (0.45 ≤ r < 0.70)
-/// - CoinMagnet ~30% (0.70 ≤ r < 1.0)
+/// Integer weights make the selection boundaries exact and easy to audit.
+/// The 15 points removed from CoinMagnet are split between Health, Time, and
+/// SpeedBoost; MegaCoin remains unchanged.
+const POWER_KIND_WEIGHTS: [(PowerKind, u32); 5] = [
+    (PowerKind::Health, 15),
+    (PowerKind::Time, 25),
+    (PowerKind::MegaCoin, 15),
+    (PowerKind::SpeedBoost, 30),
+    (PowerKind::CoinMagnet, 15),
+];
+const POWER_KIND_WEIGHT_TOTAL: u32 = 100;
+
+/// Pure weighted-selection boundary. `bucket` values outside the weighted
+/// range clamp to its final bucket, keeping CoinMagnet at exactly 15/100.
+fn kind_for_weight_bucket(bucket: u32) -> PowerKind {
+    let bucket = bucket.min(POWER_KIND_WEIGHT_TOTAL - 1);
+    let mut boundary = 0;
+    for (kind, weight) in POWER_KIND_WEIGHTS {
+        boundary += weight;
+        if bucket < boundary {
+            return kind;
+        }
+    }
+    unreachable!("power-up weights must cover the full bucket range")
+}
+
+/// Weighted power-up kind picker. `r` is expected to be uniform in [0, 1].
 fn pick_kind(r: f32) -> PowerKind {
-    if r < 0.10 {
-        PowerKind::Health
-    } else if r < 0.30 {
-        PowerKind::Time
-    } else if r < 0.45 {
-        PowerKind::MegaCoin
-    } else if r < 0.70 {
-        PowerKind::SpeedBoost
+    let normalized = if r.is_finite() {
+        r.clamp(0.0, 1.0)
     } else {
-        PowerKind::CoinMagnet
+        0.0
+    };
+    kind_for_weight_bucket((normalized * POWER_KIND_WEIGHT_TOTAL as f32) as u32)
+}
+
+#[derive(Clone, Copy, Debug)]
+struct MagnetAttractionStep {
+    distance_squared: f32,
+    delta: Vec3,
+}
+
+/// Pure attraction calculation. Returning `None` leaves unresolved or distant
+/// coins untouched. The interpolation factor is clamped to prevent overshoot.
+fn magnet_attraction_step(
+    world: Vec3,
+    car: Vec3,
+    dt: f32,
+    global_transform_propagated: bool,
+) -> Option<MagnetAttractionStep> {
+    if !global_transform_propagated {
+        return None;
+    }
+
+    let target = Vec3::new(car.x, world.y, car.z);
+    let to_car = target - world;
+    let distance_squared = to_car.length_squared();
+    if distance_squared > MAGNET_RADIUS * MAGNET_RADIUS {
+        return None;
+    }
+
+    let fraction = (MAGNET_STRENGTH * dt.max(0.0)).clamp(0.0, 1.0);
+    Some(MagnetAttractionStep {
+        distance_squared,
+        delta: to_car * fraction,
+    })
+}
+
+/// An identity global transform usually means transform propagation has not
+/// reached a freshly spawned child coin yet. Using it as world-space data
+/// would pull from the world origin and corrupt the local/world conversion.
+fn has_propagated_global_transform(global: &GlobalTransform) -> bool {
+    *global != GlobalTransform::IDENTITY
+}
+
+#[derive(Clone, Copy, Debug)]
+struct RankedMagnetCandidate<K, V> {
+    distance_squared: f32,
+    stable_key: K,
+    value: V,
+}
+
+fn magnet_candidate_precedes<K: Ord, V>(
+    left: &RankedMagnetCandidate<K, V>,
+    right: &RankedMagnetCandidate<K, V>,
+) -> bool {
+    left.distance_squared
+        .total_cmp(&right.distance_squared)
+        .then_with(|| left.stable_key.cmp(&right.stable_key))
+        .is_lt()
+}
+
+/// Insert into a nearest-first fixed-cap set without ever temporarily growing
+/// beyond `cap`. Stable-key tie-breaking makes the result query-order neutral.
+fn insert_capped_nearest<K: Ord, V>(
+    candidates: &mut Vec<RankedMagnetCandidate<K, V>>,
+    candidate: RankedMagnetCandidate<K, V>,
+    cap: usize,
+) {
+    if cap == 0 {
+        return;
+    }
+
+    if candidates.len() < cap {
+        candidates.push(candidate);
+    } else if magnet_candidate_precedes(&candidate, candidates.last().unwrap()) {
+        *candidates.last_mut().unwrap() = candidate;
+    } else {
+        return;
+    }
+
+    let mut index = candidates.len() - 1;
+    while index > 0 && magnet_candidate_precedes(&candidates[index], &candidates[index - 1]) {
+        candidates.swap(index, index - 1);
+        index -= 1;
     }
 }
 
@@ -1002,5 +1127,93 @@ mod tests {
         assert!((relative.dot(right) - SPAWN_LATERAL_RANGE).abs() < 0.0001);
         assert!(relative.dot(forward) > 0.0);
         assert!(pos.x.abs() > 22.0);
+    }
+
+    #[test]
+    fn kind_weights_and_boundaries_are_exact() {
+        assert_eq!(
+            POWER_KIND_WEIGHTS,
+            [
+                (PowerKind::Health, 15),
+                (PowerKind::Time, 25),
+                (PowerKind::MegaCoin, 15),
+                (PowerKind::SpeedBoost, 30),
+                (PowerKind::CoinMagnet, 15),
+            ]
+        );
+        assert_eq!(
+            POWER_KIND_WEIGHTS
+                .iter()
+                .map(|(_, weight)| weight)
+                .sum::<u32>(),
+            POWER_KIND_WEIGHT_TOTAL
+        );
+
+        let mut magnet_count = 0;
+        for bucket in 0..POWER_KIND_WEIGHT_TOTAL {
+            if kind_for_weight_bucket(bucket) == PowerKind::CoinMagnet {
+                magnet_count += 1;
+            }
+        }
+        assert_eq!(kind_for_weight_bucket(14), PowerKind::Health);
+        assert_eq!(kind_for_weight_bucket(15), PowerKind::Time);
+        assert_eq!(kind_for_weight_bucket(39), PowerKind::Time);
+        assert_eq!(kind_for_weight_bucket(40), PowerKind::MegaCoin);
+        assert_eq!(kind_for_weight_bucket(54), PowerKind::MegaCoin);
+        assert_eq!(kind_for_weight_bucket(55), PowerKind::SpeedBoost);
+        assert_eq!(kind_for_weight_bucket(84), PowerKind::SpeedBoost);
+        assert_eq!(kind_for_weight_bucket(85), PowerKind::CoinMagnet);
+        assert!(magnet_count * 100 <= POWER_KIND_WEIGHT_TOTAL * 15);
+    }
+
+    #[test]
+    fn nearest_candidate_set_has_a_hard_deterministic_cap() {
+        let mut candidates = Vec::with_capacity(MAX_MAGNET_COINS_PER_FRAME);
+        for key in (0_u32..80).rev() {
+            insert_capped_nearest(
+                &mut candidates,
+                RankedMagnetCandidate {
+                    distance_squared: (key % 30) as f32,
+                    stable_key: key,
+                    value: key,
+                },
+                MAX_MAGNET_COINS_PER_FRAME,
+            );
+            assert!(candidates.len() <= MAX_MAGNET_COINS_PER_FRAME);
+        }
+
+        assert_eq!(candidates.len(), MAX_MAGNET_COINS_PER_FRAME);
+        assert!(
+            candidates
+                .windows(2)
+                .all(|pair| { !magnet_candidate_precedes(&pair[1], &pair[0]) })
+        );
+        assert_eq!(candidates[0].stable_key, 0);
+    }
+
+    #[test]
+    fn magnet_step_cannot_overshoot_the_car() {
+        let world = Vec3::new(-8.0, 2.0, 0.0);
+        let car = Vec3::new(0.0, 99.0, 0.0);
+        let step = magnet_attraction_step(world, car, 10.0, true).unwrap();
+        let moved = world + step.delta;
+
+        assert_eq!(moved, Vec3::new(0.0, 2.0, 0.0));
+        assert!(step.delta.length() <= (Vec3::new(car.x, world.y, car.z) - world).length());
+    }
+
+    #[test]
+    fn magnet_leaves_far_coins_untouched() {
+        let world = Vec3::new(MAGNET_RADIUS + 0.01, 1.0, 0.0);
+        assert!(magnet_attraction_step(world, Vec3::ZERO, 1.0 / 60.0, true).is_none());
+    }
+
+    #[test]
+    fn identity_global_transform_is_treated_as_unpropagated() {
+        assert!(!has_propagated_global_transform(&GlobalTransform::IDENTITY));
+        assert!(
+            magnet_attraction_step(Vec3::ZERO, Vec3::new(1.0, 0.0, 0.0), 1.0 / 60.0, false)
+                .is_none()
+        );
     }
 }

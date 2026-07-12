@@ -3,7 +3,7 @@
 //!
 //! This module is self-contained and wired by the orchestrator with
 //! `mod effects; add_plugins(EffectsPlugin)`. It only *reads* the car
-//! (`crate::car::Car` + `Transform`) and ground facts from `crate::world`
+//! (`crate::car::{Car, PlayerInput}` + `Transform`) and ground facts from `crate::world`
 //! (ground plane at y = 0; tire marks sit just above at y ≈ 0.02 to avoid
 //! z-fighting). No other `.rs` file is edited.
 //!
@@ -24,7 +24,7 @@
 
 use bevy::prelude::*;
 
-use crate::car::Car;
+use crate::car::{Car, PlayerInput};
 use crate::game::events::ObstacleHit;
 use crate::game::state::GameState;
 
@@ -60,6 +60,10 @@ const SMOKE_RADIUS: f32 = 0.18;
 /// `ANG_VEL_THRESHOLD` is radians/sec; `SPEED_THRESHOLD` is world u/sec.
 const ANG_VEL_THRESHOLD: f32 = 1.2;
 const SPEED_THRESHOLD: f32 = 4.0;
+/// Service braking above this speed also scrubs the rear tires. This is tied
+/// only to the dedicated brake control, so reverse throttle does not emit a
+/// braking skid.
+const BRAKE_SKID_SPEED: f32 = 4.0;
 
 /// Tire-mark lifetime (seconds) before it fades out fully and is recycled.
 const MARK_LIFETIME: f32 = 3.5;
@@ -259,11 +263,13 @@ struct EmitState {
     initialized: bool,
 }
 
-/// Detect fast turns and spawn tire marks + smoke at the rear wheels. Also
-/// reads `ObstacleHit` for a small impact smoke puff (multiple readers of the
+/// Detect fast turns or hard service braking and spawn tire marks + smoke at
+/// the rear wheels. Also reads `ObstacleHit` for a small impact smoke puff
+/// (multiple readers of the
 /// same message are fine — T2 reads it too).
 fn emit_tire_effects(
     car: Query<(&Car, &Transform), (With<Car>, Without<TireMark>, Without<Smoke>)>,
+    input: Res<PlayerInput>,
     mut commands: Commands,
     assets: Res<EffectsAssets>,
     time: Res<Time>,
@@ -310,7 +316,7 @@ fn emit_tire_effects(
     let ang_vel = dh / dt.max(1e-4);
     state.prev_heading = car.heading;
 
-    let skidding = ang_vel.abs() > ANG_VEL_THRESHOLD && car.speed.abs() > SPEED_THRESHOLD;
+    let skidding = should_skid(ang_vel, car.speed, *input);
 
     // --- Rear-wheel world positions ---
     // Local offsets rotated by the car's heading (yaw about Y), then offset
@@ -706,9 +712,19 @@ fn pool_has_spawn_capacity(existing: usize, pending_spawns: usize, cap: usize) -
     existing.saturating_add(pending_spawns) < cap
 }
 
+/// Pure skid decision shared by the emitter and focused behavior tests.
+/// Cornering keeps the existing angular-velocity/speed proxy, while hard
+/// service braking can independently produce the same rear mark/smoke pools.
+fn should_skid(angular_velocity: f32, speed: f32, input: PlayerInput) -> bool {
+    let turning_skid = angular_velocity.abs() > ANG_VEL_THRESHOLD && speed.abs() > SPEED_THRESHOLD;
+    let braking_skid = input.brake && speed.abs() > BRAKE_SKID_SPEED;
+    turning_skid || braking_skid
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{PoolSlot, pool_has_spawn_capacity, take_pool_slot};
+    use super::{PoolSlot, pool_has_spawn_capacity, should_skid, take_pool_slot};
+    use crate::car::PlayerInput;
 
     #[test]
     fn reuse_prefers_expired_then_oldest_with_stable_ties() {
@@ -741,6 +757,52 @@ mod tests {
         assert!(!pool_has_spawn_capacity(78, 2, 80));
         assert!(!pool_has_spawn_capacity(80, 0, 80));
         assert!(!pool_has_spawn_capacity(usize::MAX, 1, 80));
+    }
+
+    #[test]
+    fn fast_turn_without_braking_skids() {
+        assert!(should_skid(1.3, 6.0, PlayerInput::default()));
+    }
+
+    #[test]
+    fn service_brake_without_turning_skids() {
+        assert!(should_skid(
+            0.0,
+            8.0,
+            PlayerInput {
+                brake: true,
+                ..PlayerInput::default()
+            }
+        ));
+    }
+
+    #[test]
+    fn low_speed_braking_does_not_skid() {
+        assert!(!should_skid(
+            0.0,
+            3.0,
+            PlayerInput {
+                brake: true,
+                ..PlayerInput::default()
+            }
+        ));
+    }
+
+    #[test]
+    fn no_input_does_not_skid() {
+        assert!(!should_skid(0.0, 8.0, PlayerInput::default()));
+    }
+
+    #[test]
+    fn reverse_throttle_alone_does_not_count_as_braking_skid() {
+        assert!(!should_skid(
+            0.0,
+            -8.0,
+            PlayerInput {
+                throttle: -1.0,
+                ..PlayerInput::default()
+            }
+        ));
     }
 }
 

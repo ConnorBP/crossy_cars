@@ -32,6 +32,7 @@ use crate::game::resources::{GameConfig, Score};
 use crate::game::state::GameState;
 use crate::modifiers::ActiveModifier;
 use crate::run_events::{ActiveEvent, EventKind, RoundEventStarted};
+use crate::world::is_road_line;
 
 // ---------------------------------------------------------------------------
 // Tuning constants
@@ -59,7 +60,7 @@ const HIT_RADIUS: f32 = 1.0;
 
 /// Chickens farther than this from the car are recycled (despawned + respawned
 /// ahead) so the flock stays near the endless driver.
-const KEEP_RADIUS: f32 = 50.0;
+const KEEP_RADIUS: f32 = 65.0;
 
 /// Chickens this far behind the car along its current heading are recycled
 /// even if they remain within `KEEP_RADIUS`.
@@ -67,8 +68,19 @@ const BEHIND_THRESHOLD: f32 = 15.0;
 
 /// Recycled chickens respawn this many units along the car's current forward
 /// axis, at a random offset within `[RESPAWN_AHEAD_MIN, ... + RANGE]`.
-const RESPAWN_AHEAD_MIN: f32 = 30.0;
-const RESPAWN_AHEAD_RANGE: f32 = 20.0;
+const RESPAWN_AHEAD_MIN: f32 = 34.0;
+const RESPAWN_AHEAD_RANGE: f32 = 22.0;
+
+/// Approximate far edge of the camera footprint. Recycled spawns must clear
+/// this in both radial distance and forward projection before appearing.
+const VISIBLE_VIEW_RADIUS: f32 = 12.0;
+
+/// Chicken road-crossing behaviour uses the same fixed line spacing as the
+/// city grid. A chosen crossing ends this far beyond the road's centre line.
+const ROAD_GRID: f32 = 40.0;
+const CROSS_ROAD_PROBABILITY: f32 = 0.65;
+const CROSS_TARGET_MIN: f32 = 6.0;
+const CROSS_TARGET_RANGE: f32 = 4.0;
 
 /// Initial scatter radius around the car (fresh round). Inner radius keeps the
 /// first chicken from spawning on top of the car.
@@ -350,11 +362,12 @@ fn spawn_chickens(
         let lateral = (angle.cos() * radius).clamp(-LATERAL_SPREAD, LATERAL_SPREAD);
         let longitudinal = angle.sin() * radius;
         let pos = car_relative_ground_pos(car_pos, forward, longitudinal, lateral);
+        let dir = choose_wander_direction(pos, car_pos, &mut seed);
         spawn_one_rich_chicken(
             &mut commands,
             &assets,
             pos,
-            rand_dir_xz(&mut seed),
+            dir,
             1.5 + rand(&mut seed) * 2.0,
             rand(&mut seed) * TAU,
         );
@@ -394,11 +407,12 @@ fn spawn_chicken_burst(
 
     for _ in 0..spawn_count {
         let pos = respawn_ahead_pos(car_pos, forward, &mut seed);
+        let dir = choose_wander_direction(pos, car_pos, &mut seed);
         let entity = spawn_one_rich_chicken(
             &mut commands,
             &assets,
             pos,
-            rand_dir_xz(&mut seed),
+            dir,
             1.5 + rand(&mut seed) * 2.0,
             rand(&mut seed) * TAU,
         );
@@ -509,9 +523,9 @@ fn spawn_one_rich_chicken(
 // Wander system
 // ---------------------------------------------------------------------------
 
-/// Move chickens by `dir`, periodically pick a new random heading, face it,
-/// recycle chickens that fall behind / drift beyond `KEEP_RADIUS`, and animate
-/// the waddle bob on the body child.
+/// Move chickens by `dir`, periodically pick a road-biased or random heading,
+/// face it, recycle chickens that fall behind / drift beyond `KEEP_RADIUS`,
+/// and animate the waddle bob on the body child.
 fn wander_chickens(
     mut commands: Commands,
     assets: Res<ChickenAssets>,
@@ -538,10 +552,10 @@ fn wander_chickens(
     let speed = cfg.max_speed * CHICKEN_SPEED_RATIO;
 
     for (e, mut chicken, mut tf, children, burst_extra) in &mut chickens {
-        // --- Periodically pick a new random heading ---
+        // --- Periodically pick a new heading (usually across a road) ---
         chicken.timer -= dt;
         if chicken.timer <= 0.0 {
-            chicken.dir = rand_dir_xz(&mut seed);
+            chicken.dir = choose_wander_direction(tf.translation, car_pos, &mut seed);
             chicken.timer = 1.5 + rand(&mut seed) * 2.0;
         }
 
@@ -559,11 +573,12 @@ fn wander_chickens(
             // chickens still recycle to preserve the road-condition target.
             if burst_extra.is_none() {
                 let new_pos = respawn_ahead_pos(car_pos, car_forward, &mut seed);
+                let new_dir = choose_wander_direction(new_pos, car_pos, &mut seed);
                 spawn_one_rich_chicken(
                     &mut commands,
                     &assets,
                     new_pos,
-                    rand_dir_xz(&mut seed),
+                    new_dir,
                     1.5 + rand(&mut seed) * 2.0,
                     rand(&mut seed) * TAU,
                 );
@@ -628,11 +643,12 @@ fn hit_chickens(
             // burst population through hits. Wander recycling alone retires
             // burst extras as they naturally leave the active area.
             let new_pos = respawn_ahead_pos(car_pos, car_forward, &mut seed);
+            let new_dir = choose_wander_direction(new_pos, car_pos, &mut seed);
             let replacement = spawn_one_rich_chicken(
                 &mut commands,
                 &assets,
                 new_pos,
-                rand_dir_xz(&mut seed),
+                new_dir,
                 1.5 + rand(&mut seed) * 2.0,
                 rand(&mut seed) * TAU,
             );
@@ -859,12 +875,136 @@ fn should_recycle(pos: Vec3, car_pos: Vec3, car_forward: Vec3) -> bool {
     pos.distance(car_pos) > KEEP_RADIUS || is_behind_car(pos, car_pos, car_forward)
 }
 
-/// A position ahead of the car at a random forward distance and a random
-/// car-relative lateral offset centered on the car.
+/// A position in the explicit offscreen envelope ahead of the car. The
+/// minimum forward projection alone clears the camera and car safety radii;
+/// lateral spread remains bounded so the maximum candidate stays inside the
+/// raised keep radius.
 fn respawn_ahead_pos(car_pos: Vec3, car_forward: Vec3, seed: &mut u32) -> Vec3 {
     let ahead = RESPAWN_AHEAD_MIN + rand(seed) * RESPAWN_AHEAD_RANGE;
     let lateral = (rand(seed) * 2.0 - 1.0) * LATERAL_SPREAD;
-    car_relative_ground_pos(car_pos, car_forward, ahead, lateral)
+    let pos = car_relative_ground_pos(car_pos, car_forward, ahead, lateral);
+    debug_assert!(is_safely_offscreen(pos, car_pos, car_forward));
+    pos
+}
+
+/// Pure camera-envelope check shared by runtime assertions and seed/heading
+/// tests. XZ distance is used because creature collision and visibility are
+/// governed by the ground plane.
+fn is_safely_offscreen(pos: Vec3, car_pos: Vec3, car_forward: Vec3) -> bool {
+    let delta = Vec3::new(pos.x - car_pos.x, 0.0, pos.z - car_pos.z);
+    delta.dot(normalized_horizontal(car_forward)) > VISIBLE_VIEW_RADIUS
+        && delta.length() > VISIBLE_VIEW_RADIUS
+        && delta.length() > HIT_RADIUS
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RoadAxis {
+    Vertical,
+    Horizontal,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct RoadLine {
+    axis: RoadAxis,
+    coordinate: f32,
+}
+
+/// Find the road line nearest the chicken. Equal chicken distances are
+/// resolved by proximity to the car, then vertical before horizontal. The
+/// injected predicate keeps geometry tests independent from world generation.
+fn nearest_road_line_by(
+    chicken_pos: Vec3,
+    car_pos: Vec3,
+    mut line_is_road: impl FnMut(bool, i32) -> bool,
+) -> Option<RoadLine> {
+    const SEARCH_LINES: i32 = 32;
+    const TIE_EPSILON: f32 = 0.0001;
+    let center_x = (chicken_pos.x / ROAD_GRID).round() as i32;
+    let center_z = (chicken_pos.z / ROAD_GRID).round() as i32;
+    let mut best: Option<(RoadLine, f32, f32)> = None;
+
+    for (axis, center) in [
+        (RoadAxis::Vertical, center_x),
+        (RoadAxis::Horizontal, center_z),
+    ] {
+        for index in (center - SEARCH_LINES)..=(center + SEARCH_LINES) {
+            let vertical = axis == RoadAxis::Vertical;
+            if !line_is_road(vertical, index) {
+                continue;
+            }
+            let coordinate = index as f32 * ROAD_GRID;
+            let chicken_distance = match axis {
+                RoadAxis::Vertical => (chicken_pos.x - coordinate).abs(),
+                RoadAxis::Horizontal => (chicken_pos.z - coordinate).abs(),
+            };
+            let car_distance = match axis {
+                RoadAxis::Vertical => (car_pos.x - coordinate).abs(),
+                RoadAxis::Horizontal => (car_pos.z - coordinate).abs(),
+            };
+            let candidate = RoadLine { axis, coordinate };
+            let replace = match best {
+                None => true,
+                Some((current, current_chicken, current_car)) => {
+                    chicken_distance < current_chicken - TIE_EPSILON
+                        || ((chicken_distance - current_chicken).abs() <= TIE_EPSILON
+                            && (car_distance < current_car - TIE_EPSILON
+                                || ((car_distance - current_car).abs() <= TIE_EPSILON
+                                    && axis == RoadAxis::Vertical
+                                    && current.axis == RoadAxis::Horizontal)))
+                }
+            };
+            if replace {
+                best = Some((candidate, chicken_distance, car_distance));
+            }
+        }
+    }
+    best.map(|(line, _, _)| line)
+}
+
+fn nearest_road_line(chicken_pos: Vec3, car_pos: Vec3) -> Option<RoadLine> {
+    nearest_road_line_by(chicken_pos, car_pos, is_road_line)
+}
+
+/// Put a target `offset` units beyond the selected road, on the side opposite
+/// the chicken. A chicken exactly on the line crosses away from the car; the
+/// positive side is the deterministic fallback if both share the line.
+fn cross_road_target(chicken_pos: Vec3, car_pos: Vec3, line: RoadLine, offset: f32) -> Vec3 {
+    let offset = offset.clamp(CROSS_TARGET_MIN, CROSS_TARGET_MIN + CROSS_TARGET_RANGE);
+    let (chicken_axis, car_axis) = match line.axis {
+        RoadAxis::Vertical => (chicken_pos.x, car_pos.x),
+        RoadAxis::Horizontal => (chicken_pos.z, car_pos.z),
+    };
+    let chicken_side = chicken_axis - line.coordinate;
+    let reference_side = if chicken_side.abs() > f32::EPSILON {
+        chicken_side
+    } else {
+        car_axis - line.coordinate
+    };
+    let side = if reference_side < 0.0 { -1.0 } else { 1.0 };
+    let opposite = line.coordinate - side * offset;
+    match line.axis {
+        RoadAxis::Vertical => Vec3::new(opposite, 0.0, chicken_pos.z),
+        RoadAxis::Horizontal => Vec3::new(chicken_pos.x, 0.0, opposite),
+    }
+}
+
+fn direction_toward(from: Vec3, target: Vec3) -> Vec3 {
+    normalized_horizontal(target - from)
+}
+
+/// Deterministically choose a road-crossing heading most of the time, with
+/// ordinary random wander retained for the remaining picks.
+fn choose_wander_direction(chicken_pos: Vec3, car_pos: Vec3, seed: &mut u32) -> Vec3 {
+    if rand(seed) < CROSS_ROAD_PROBABILITY {
+        if let Some(line) = nearest_road_line(chicken_pos, car_pos) {
+            let offset = CROSS_TARGET_MIN + rand(seed) * CROSS_TARGET_RANGE;
+            return direction_toward(
+                chicken_pos,
+                cross_road_target(chicken_pos, car_pos, line, offset),
+            );
+        }
+    }
+    rand_dir_xz(seed)
 }
 
 /// Seed a `Local<u32>` RNG on first use with a per-system constant so the
@@ -961,5 +1101,113 @@ mod tests {
         assert!(is_behind_car(car_pos - east * 16.0, car_pos, east));
         assert!(!is_behind_car(car_pos + east * 16.0, car_pos, east));
         assert!(!is_behind_car(car_pos + Vec3::Z * 40.0, car_pos, east));
+    }
+
+    #[test]
+    fn respawn_envelope_is_offscreen_and_retained_for_headings_and_seeds() {
+        let car_pos = Vec3::new(17.0, 2.0, -31.0);
+        let headings = [
+            Vec3::NEG_Z,
+            Vec3::X,
+            Vec3::new(-0.6, 0.0, 0.8),
+            Vec3::new(0.3, 4.0, 0.7),
+        ];
+        for heading in headings {
+            let forward = normalized_horizontal(heading);
+            let right = Vec3::new(-forward.z, 0.0, forward.x);
+            for initial_seed in [1, 7, 0x1234_5678, u32::MAX] {
+                let mut seed = initial_seed;
+                for _ in 0..16 {
+                    let pos = respawn_ahead_pos(car_pos, heading, &mut seed);
+                    let delta = Vec3::new(pos.x - car_pos.x, 0.0, pos.z - car_pos.z);
+                    let ahead = delta.dot(forward);
+                    let lateral = delta.dot(right);
+                    assert!(is_safely_offscreen(pos, car_pos, heading));
+                    assert!(ahead >= RESPAWN_AHEAD_MIN - 0.0001);
+                    assert!(ahead <= RESPAWN_AHEAD_MIN + RESPAWN_AHEAD_RANGE + 0.0001);
+                    assert!(lateral.abs() <= LATERAL_SPREAD + 0.0001);
+                    assert!(delta.length() < KEEP_RADIUS);
+                    assert!(!should_recycle(pos, car_pos, heading));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn nearest_road_selects_vertical_and_horizontal_lines() {
+        let vertical =
+            nearest_road_line_by(Vec3::new(37.0, 0.0, 90.0), Vec3::ZERO, |axis, index| {
+                axis && index == 1
+            });
+        assert_eq!(
+            vertical,
+            Some(RoadLine {
+                axis: RoadAxis::Vertical,
+                coordinate: ROAD_GRID,
+            })
+        );
+
+        let horizontal =
+            nearest_road_line_by(Vec3::new(90.0, 0.0, -43.0), Vec3::ZERO, |axis, index| {
+                !axis && index == -1
+            });
+        assert_eq!(
+            horizontal,
+            Some(RoadLine {
+                axis: RoadAxis::Horizontal,
+                coordinate: -ROAD_GRID,
+            })
+        );
+    }
+
+    #[test]
+    fn nearest_road_tie_uses_car_then_stable_axis_order() {
+        let chicken = Vec3::new(5.0, 0.0, 5.0);
+        let nearer_car_horizontal =
+            nearest_road_line_by(chicken, Vec3::new(20.0, 0.0, 1.0), |_, index| index == 0)
+                .unwrap();
+        assert_eq!(nearer_car_horizontal.axis, RoadAxis::Horizontal);
+
+        let exact_tie =
+            nearest_road_line_by(chicken, Vec3::splat(5.0), |_, index| index == 0).unwrap();
+        assert_eq!(exact_tie.axis, RoadAxis::Vertical);
+    }
+
+    #[test]
+    fn crossing_target_and_direction_reach_opposite_side_of_shared_line() {
+        for (line, chicken) in [
+            (
+                RoadLine {
+                    axis: RoadAxis::Vertical,
+                    coordinate: 40.0,
+                },
+                Vec3::new(35.0, 0.0, 12.0),
+            ),
+            (
+                RoadLine {
+                    axis: RoadAxis::Horizontal,
+                    coordinate: -40.0,
+                },
+                Vec3::new(12.0, 0.0, -34.0),
+            ),
+        ] {
+            let target = cross_road_target(chicken, Vec3::ZERO, line, 8.0);
+            let dir = direction_toward(chicken, target);
+            let (start_side, target_side, axis_dir) = match line.axis {
+                RoadAxis::Vertical => (
+                    chicken.x - line.coordinate,
+                    target.x - line.coordinate,
+                    dir.x,
+                ),
+                RoadAxis::Horizontal => (
+                    chicken.z - line.coordinate,
+                    target.z - line.coordinate,
+                    dir.z,
+                ),
+            };
+            assert!(start_side * target_side < 0.0);
+            assert!(start_side * axis_dir < 0.0);
+            assert!((dir.length() - 1.0).abs() < 0.0001);
+        }
     }
 }
