@@ -11,9 +11,10 @@
 //!   Traffic entities are top-level (world `Transform`) and carry an
 //!   axis-correct `world::Collider` matching the 1×2 visual footprint, so
 //!   `car.rs::physics_collisions` treats them as solid obstacles — crashing into one
-//!   emits `ObstacleHit` → damage. The count scales with `level`
-//!   (`1 + level/2`, capped at 8); they drive straight along a world axis
-//!   and are recycled (despawned + respawned near/ahead) once they drift
+//!   emits `ObstacleHit` → damage. The baseline count scales with `level`
+//!   (`1 + level/2`); the active road-condition multiplier is then applied,
+//!   with the final population capped at 8. They drive straight along a world
+//!   axis and are recycled (despawned + respawned near/ahead) once they drift
 //!   ~60u from the car.
 //! - A small "Lv {level}" UI node top-right, just below the minimap.
 //!
@@ -39,6 +40,7 @@ use crate::car::{Car, InputFrozen};
 use crate::game::SpawnSet;
 use crate::game::resources::RoundActive;
 use crate::game::state::GameState;
+use crate::modifiers::ActiveModifier;
 use crate::world::{Collider, is_road_line};
 
 // ===========================================================================
@@ -50,7 +52,9 @@ const LEVEL_SECONDS: f32 = 10.0;
 /// Maximum difficulty level (caps the ramp over the 60s round: 0..=6).
 const MAX_LEVEL: u32 = 6;
 
-/// Target traffic population = `(1 + level / 2).min(MAX_TRAFFIC)`.
+/// Hard population cap after applying the active road-condition multiplier.
+/// Rush Hour can reach this existing cap sooner, but cannot create an
+/// unbounded number of traffic entities.
 const MAX_TRAFFIC: usize = 8;
 
 /// Distance from the car (XZ) beyond which a traffic car is recycled
@@ -82,6 +86,9 @@ const TRAFFIC_SPEED_PER_LEVEL: f32 = 0.7;
 /// Per-car speed jitter band: `speed *= 0.85 + rand * 0.3` (0.85..1.15).
 const TRAFFIC_SPEED_JITTER: f32 = 0.3;
 const TRAFFIC_SPEED_JITTER_BASE: f32 = 0.85;
+/// Fairness cap after applying the road-condition speed multiplier. This
+/// retains a 0.5u/s margin below the player's documented 12.0u/s maximum.
+const TRAFFIC_MAX_SPEED: f32 = 11.5;
 
 // --- Traffic car mesh proportions ---
 const BODY_W: f32 = 1.0;
@@ -361,7 +368,7 @@ fn reset_difficulty(mut difficulty: ResMut<Difficulty>, round_active: Res<RoundA
 /// Per-frame traffic management while `Playing`:
 /// 1. advance each traffic car along its axis/direction;
 /// 2. despawn any that drifted beyond `TRAFFIC_KEEP_RADIUS` from the car;
-/// 3. top up the population up to the level-derived target count.
+/// 3. top up to the level- and road-condition-derived target count.
 ///
 /// The car query excludes `Traffic` (and the traffic query fetches `&Traffic`,
 /// implying `With<Traffic>`), so the two `Transform` accesses are disjoint →
@@ -370,6 +377,7 @@ fn manage_traffic(
     mut commands: Commands,
     assets: Res<TrafficAssets>,
     difficulty: Res<Difficulty>,
+    modifier: Res<ActiveModifier>,
     car: Query<&Transform, (With<Car>, Without<Traffic>)>,
     mut traffic: Query<(Entity, &Traffic, &mut Transform)>,
     time: Res<Time>,
@@ -408,8 +416,8 @@ fn manage_traffic(
         commands.entity(*e).despawn();
     }
 
-    // --- Top up the population to the level-derived target ---
-    let target = target_traffic_count(difficulty.level);
+    // --- Top up to the level-derived, road-condition-adjusted target ---
+    let target = target_traffic_count(difficulty.level, modifier.traffic_count_multiplier());
     let mut needed = target.saturating_sub(alive);
 
     // Car forward (heading 0 => -Z); bias spawns ahead of the driver so
@@ -423,7 +431,11 @@ fn manage_traffic(
         needed -= 1;
         let axis = rand(&mut seed) < 0.5; // true = X, false = Z
         let dir = if rand(&mut seed) < 0.5 { 1.0 } else { -1.0 };
-        let speed = traffic_speed(difficulty.level, &mut seed);
+        let speed = traffic_speed(
+            difficulty.level,
+            modifier.traffic_speed_multiplier(),
+            &mut seed,
+        );
         // Choose axis + direction before position: the cross-axis coordinate
         // is placed on a real deterministic road line, then offset into the
         // direction's lane so opposing traffic does not overlap.
@@ -444,17 +456,26 @@ fn cleanup_traffic(mut commands: Commands, traffic: Query<Entity, With<Traffic>>
 // Traffic spawn helpers
 // ===========================================================================
 
-/// Target traffic population for a given difficulty level:
-/// `(1 + level / 2).min(MAX_TRAFFIC)`.
-fn target_traffic_count(level: u32) -> usize {
-    (1 + level / 2).min(MAX_TRAFFIC as u32) as usize
+/// Target traffic population for a given difficulty level and active
+/// road-condition multiplier. Applying the multiplier after deriving the
+/// baseline preserves Standard exactly, while the final cap bounds Rush Hour.
+fn target_traffic_count(level: u32, count_multiplier: usize) -> usize {
+    let baseline = (1 + level / 2).min(MAX_TRAFFIC as u32) as usize;
+    baseline.saturating_mul(count_multiplier).min(MAX_TRAFFIC)
 }
 
-/// Traffic speed for a given level with per-car jitter:
-/// `(BASE + level * PER_LEVEL) * (JITTER_BASE + rand * JITTER)`.
-fn traffic_speed(level: u32, seed: &mut u32) -> f32 {
+/// Pure speed calculation for a supplied jitter roll and road-condition
+/// multiplier. Standard's level 0..=6 values remain unchanged; modified
+/// speeds retain a margin below the player's maximum for fairness.
+fn traffic_speed_for_roll(level: u32, jitter_roll: f32, speed_multiplier: f32) -> f32 {
     let base = TRAFFIC_BASE_SPEED + level as f32 * TRAFFIC_SPEED_PER_LEVEL;
-    base * (TRAFFIC_SPEED_JITTER_BASE + rand(seed) * TRAFFIC_SPEED_JITTER)
+    let jittered = base * (TRAFFIC_SPEED_JITTER_BASE + jitter_roll * TRAFFIC_SPEED_JITTER);
+    (jittered * speed_multiplier).min(TRAFFIC_MAX_SPEED)
+}
+
+/// Traffic speed using one deterministic roll from the shared spawn LCG.
+fn traffic_speed(level: u32, speed_multiplier: f32, seed: &mut u32) -> f32 {
+    traffic_speed_for_roll(level, rand(seed), speed_multiplier)
 }
 
 /// Translate `Traffic::axis` into `world::is_road_line`'s axis convention.
@@ -724,15 +745,52 @@ fn ensure_seeded(seed: &mut u32, initial: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::modifiers::ModifierKind;
 
     #[test]
-    fn target_traffic_count_boundaries() {
-        assert_eq!(target_traffic_count(0), 1);
-        assert_eq!(target_traffic_count(1), 1);
-        assert_eq!(target_traffic_count(2), 2);
-        assert_eq!(target_traffic_count(6), 4);
-        assert_eq!(target_traffic_count(14), MAX_TRAFFIC);
-        assert_eq!(target_traffic_count(u32::MAX), MAX_TRAFFIC);
+    fn standard_traffic_count_preserves_existing_boundaries() {
+        let standard = ModifierKind::Standard.traffic_count_multiplier();
+        assert_eq!(target_traffic_count(0, standard), 1);
+        assert_eq!(target_traffic_count(1, standard), 1);
+        assert_eq!(target_traffic_count(2, standard), 2);
+        assert_eq!(target_traffic_count(6, standard), 4);
+        assert_eq!(target_traffic_count(14, standard), MAX_TRAFFIC);
+        assert_eq!(target_traffic_count(u32::MAX, standard), MAX_TRAFFIC);
+    }
+
+    #[test]
+    fn rush_hour_increases_traffic_count_up_to_the_hard_cap() {
+        let rush = ModifierKind::RushHour.traffic_count_multiplier();
+        assert_eq!(target_traffic_count(0, rush), 2);
+        assert_eq!(target_traffic_count(2, rush), 4);
+        assert_eq!(target_traffic_count(6, rush), MAX_TRAFFIC);
+        assert_eq!(target_traffic_count(14, rush), MAX_TRAFFIC);
+    }
+
+    #[test]
+    fn standard_speed_boundaries_are_unchanged_and_rush_hour_is_faster_but_fair() {
+        let standard = ModifierKind::Standard.traffic_speed_multiplier();
+        let rush = ModifierKind::RushHour.traffic_speed_multiplier();
+
+        // Existing Standard formula at the runtime level/jitter boundaries.
+        let standard_slowest = traffic_speed_for_roll(0, 0.0, standard);
+        let standard_fastest = traffic_speed_for_roll(MAX_LEVEL, 1.0, standard);
+        assert!((standard_slowest - 4.25).abs() < 1e-5);
+        assert!((standard_fastest - 10.58).abs() < 1e-5);
+
+        // Representative early/late rolls show Rush Hour's increase.
+        let standard_early = traffic_speed_for_roll(0, 0.5, standard);
+        let standard_late = traffic_speed_for_roll(MAX_LEVEL, 0.5, standard);
+        let rush_early = traffic_speed_for_roll(0, 0.5, rush);
+        let rush_late = traffic_speed_for_roll(MAX_LEVEL, 0.5, rush);
+        assert!(rush_early > standard_early);
+        assert!(rush_late > standard_late);
+        assert!(rush_early <= TRAFFIC_MAX_SPEED);
+        assert!(rush_late <= TRAFFIC_MAX_SPEED);
+        assert_eq!(
+            traffic_speed_for_roll(MAX_LEVEL, 1.0, rush),
+            TRAFFIC_MAX_SPEED
+        );
     }
 
     #[test]

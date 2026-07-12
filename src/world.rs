@@ -36,7 +36,7 @@ use bevy::color::LinearRgba;
 use bevy::math::primitives::Circle;
 use bevy::prelude::*;
 
-use crate::car::Car;
+use crate::car::{Car, InputFrozen};
 use crate::game::SpawnSet;
 use crate::game::events::CoinCollected;
 use crate::game::resources::{RoundActive, Score, TimeLeft};
@@ -1663,14 +1663,26 @@ fn collect_coins(
     mut commands: Commands,
     mut score: ResMut<Score>,
     mut timeleft: ResMut<TimeLeft>,
+    input_frozen: Res<InputFrozen>,
     mut coin_events: MessageWriter<CoinCollected>,
 ) {
+    // Fresh blocks are spawned during the countdown. Waiting until input is
+    // released avoids collecting anything before the round visibly begins.
+    if input_frozen.0 {
+        return;
+    }
     let Ok(car_t) = car.single() else {
         return;
     };
     for (e, coin_t) in &mut coins {
         // Coins are block-root children -> `Transform` is local; use
         // `GlobalTransform` for the world position or pickup won't line up.
+        // Newly spawned children still carry IDENTITY until transform
+        // propagation; treating that as a world position would mass-collect
+        // every fresh/recycled coin whenever the car is near the origin.
+        if *coin_t == GlobalTransform::IDENTITY {
+            continue;
+        }
         if car_t.translation.distance(coin_t.translation()) < 1.2 {
             commands.entity(e).despawn();
             score.coins += 1;

@@ -10,6 +10,7 @@ mod effects;
 mod game;
 mod health;
 mod minimap;
+mod modifiers;
 mod palette;
 mod persist;
 mod pickups;
@@ -34,6 +35,7 @@ use effects::EffectsPlugin;
 use game::GamePlugin;
 use health::HealthPlugin;
 use minimap::MinimapPlugin;
+use modifiers::ModifiersPlugin;
 use persist::PersistPlugin;
 use pickups::PickupsPlugin;
 use shaders::ShaderPlugin;
@@ -85,6 +87,9 @@ fn main() {
         // Registered separately so neither plugin tuple approaches Bevy's
         // tuple implementation limit as features are added.
         .add_plugins(TransparencyPlugin)
+        // Modifier selection must be registered independently of the feature
+        // tuple so adding it cannot approach Bevy's plugin tuple limit.
+        .add_plugins(ModifiersPlugin)
         .add_plugins((
             ChickensPlugin,
             HealthPlugin,

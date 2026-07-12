@@ -26,10 +26,11 @@ use bevy::prelude::*;
 use std::f32::consts::TAU;
 
 use crate::car::Car;
+use crate::game::SpawnSet;
 use crate::game::events::ChickenHit;
 use crate::game::resources::{GameConfig, RoundActive, Score};
 use crate::game::state::GameState;
-use crate::game::SpawnSet;
+use crate::modifiers::ActiveModifier;
 
 // ---------------------------------------------------------------------------
 // Tuning constants
@@ -261,10 +262,7 @@ impl Plugin for ChickensPlugin {
             // Fresh-round spawn: inside SpawnSet so it runs before reset_run
             // flips RoundActive (risk E11). Checks RoundActive.0 to skip on
             // resume from Paused.
-            .add_systems(
-                OnEnter(GameState::Playing),
-                spawn_chickens.in_set(SpawnSet),
-            )
+            .add_systems(OnEnter(GameState::Playing), spawn_chickens.in_set(SpawnSet))
             // Hit detection runs before wandering (chained — they share
             // Transform access on Chicken entities; ordering resolves the
             // borrow). update_particles is disjoint (Feather/Puff components)
@@ -295,12 +293,13 @@ impl Plugin for ChickensPlugin {
 // Spawn systems
 // ---------------------------------------------------------------------------
 
-/// Fresh-round spawn: scatter `CHICKEN_COUNT` chickens within radius
-/// `SCATTER_RADIUS` of the car. Runs in `SpawnSet` (before `reset_run`) and
-/// skips on resume from `Paused` (when `RoundActive.0` is already true).
+/// Fresh-round spawn: scatter the modifier-adjusted chicken target within
+/// radius `SCATTER_RADIUS` of the car. Runs in `SpawnSet` (before `reset_run`)
+/// and skips on resume from `Paused` (when `RoundActive.0` is already true).
 fn spawn_chickens(
     mut commands: Commands,
     assets: Res<ChickenAssets>,
+    modifier: Res<ActiveModifier>,
     car: Query<&Transform, (With<Car>, Without<Chicken>)>,
     round_active: Res<RoundActive>,
     mut seed: Local<u32>,
@@ -314,7 +313,7 @@ fn spawn_chickens(
     };
     let car_pos = car_t.translation;
 
-    for _ in 0..CHICKEN_COUNT {
+    for _ in 0..effective_chicken_target(&modifier) {
         let angle = rand(&mut seed) * TAU;
         let radius = SCATTER_INNER + rand(&mut seed) * (SCATTER_RADIUS - SCATTER_INNER);
         let pos = Vec3::new(
@@ -505,12 +504,14 @@ fn wander_chickens(
 // ---------------------------------------------------------------------------
 
 /// On car-to-chicken contact (XZ distance < `HIT_RADIUS`): despawn the chicken,
-/// bump `Score.chickens`, write a `ChickenHit` message (audio.rs plays the hit
-/// SFX), spawn a feather + puff particle burst, and respawn a chicken ahead of
-/// the car so the flock population stays constant.
+/// bump `Score.chickens` by its normal point plus any road-condition bonus,
+/// write a `ChickenHit` message (audio.rs plays the hit SFX), spawn a feather +
+/// puff particle burst, and respawn one chicken ahead of the car so the flock
+/// population stays constant at its fresh-round target.
 fn hit_chickens(
     mut commands: Commands,
     assets: Res<ChickenAssets>,
+    modifier: Res<ActiveModifier>,
     car: Query<&Transform, (With<Car>, Without<Chicken>)>,
     chickens: Query<(Entity, &Transform), With<Chicken>>,
     mut score: ResMut<Score>,
@@ -529,7 +530,9 @@ fn hit_chickens(
         let dz = car_pos.z - chicken_t.translation.z;
         if dx * dx + dz * dz < hit_r2 {
             commands.entity(e).despawn();
-            score.chickens += 1;
+            // Keep combo handling on the single ChickenHit message; only the
+            // direct chicken award receives the road-condition bonus here.
+            score.chickens += chicken_score_per_hit(&modifier);
             chicken_hits.write(ChickenHit);
             spawn_particle_burst(&mut commands, &assets, chicken_t.translation, &mut seed);
             // Respawn ahead so the player always has chickens to chase.
@@ -676,6 +679,17 @@ fn cleanup_particles(
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Fresh-round chicken population after applying the active road condition.
+const fn effective_chicken_target(modifier: &ActiveModifier) -> usize {
+    modifier.chicken_target(CHICKEN_COUNT)
+}
+
+/// Direct score awarded by one chicken hit. Combo scoring remains driven by
+/// the single `ChickenHit` message and is deliberately not included here.
+const fn chicken_score_per_hit(modifier: &ActiveModifier) -> u32 {
+    1 + modifier.chicken_score_bonus()
+}
+
 /// Tiny LCG (matches `world.rs::rand`) — deterministic pseudo-random 0..1
 /// without pulling in the `rand` crate (keeps the web build lean).
 fn rand(seed: &mut u32) -> f32 {
@@ -704,5 +718,33 @@ fn respawn_ahead_pos(car_pos: Vec3, seed: &mut u32) -> Vec3 {
 fn ensure_seeded(seed: &mut u32, initial: u32) {
     if *seed == 0 {
         *seed = initial;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::modifiers::ModifierKind;
+
+    #[test]
+    fn chicken_frenzy_changes_only_the_population_target() {
+        let standard = ActiveModifier(ModifierKind::Standard);
+        let frenzy = ActiveModifier(ModifierKind::ChickenFrenzy);
+        let stampede = ActiveModifier(ModifierKind::Stampede);
+
+        assert_eq!(effective_chicken_target(&standard), CHICKEN_COUNT);
+        assert_eq!(effective_chicken_target(&frenzy), 35);
+        assert_eq!(effective_chicken_target(&stampede), CHICKEN_COUNT);
+    }
+
+    #[test]
+    fn chicken_frenzy_adds_one_direct_point_per_hit() {
+        let standard = ActiveModifier(ModifierKind::Standard);
+        let frenzy = ActiveModifier(ModifierKind::ChickenFrenzy);
+        let glass_cannon = ActiveModifier(ModifierKind::GlassCannon);
+
+        assert_eq!(chicken_score_per_hit(&standard), 1);
+        assert_eq!(chicken_score_per_hit(&frenzy), 2);
+        assert_eq!(chicken_score_per_hit(&glass_cannon), 1);
     }
 }

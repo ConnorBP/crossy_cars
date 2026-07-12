@@ -16,10 +16,11 @@ use bevy::prelude::*;
 use bevy::text::FontSize;
 
 use crate::car::Car;
+use crate::game::SpawnSet;
 use crate::game::events::ObstacleHit;
 use crate::game::resources::RoundActive;
 use crate::game::state::GameState;
-use crate::game::SpawnSet;
+use crate::modifiers::ActiveModifier;
 
 /// Damage multiplier: `impact_speed * DAMAGE_K` health lost per hit.
 /// A full-speed (~12 u/s) hit => ~48 dmg, so 2-3 hard hits wreck the car.
@@ -115,17 +116,10 @@ impl Plugin for HealthPlugin {
             // UI lifecycle tied to the Playing state (despawned on exit so a
             // pause/resume cycle respawns it cleanly, like the HUD).
             .add_systems(OnEnter(GameState::Playing), spawn_health_bar)
-            .add_systems(
-                OnExit(GameState::Playing),
-                despawn_marker::<HealthBarRoot>,
-            )
+            .add_systems(OnExit(GameState::Playing), despawn_marker::<HealthBarRoot>)
             .add_systems(
                 Update,
-                (
-                    apply_damage,
-                    update_health_bar,
-                    update_damage_flash,
-                )
+                (apply_damage, update_health_bar, update_damage_flash)
                     .run_if(in_state(GameState::Playing)),
             )
             // Color refresh runs in every state so the bar recolors even while
@@ -137,6 +131,23 @@ impl Plugin for HealthPlugin {
 // ---------------------------------------------------------------------------
 // Damage application
 // ---------------------------------------------------------------------------
+
+/// Calculate damage for one qualifying obstacle impact. Collision code owns
+/// the low-speed hit threshold; this keeps the existing positive-speed rule
+/// while applying the round modifier and bounding exceptional float inputs.
+fn obstacle_damage(impact_speed: f32, modifier: &ActiveModifier) -> f32 {
+    if impact_speed.is_nan() || impact_speed <= 0.0 {
+        return 0.0;
+    }
+
+    let multiplier = modifier.damage_multiplier();
+    if multiplier.is_nan() || multiplier <= 0.0 {
+        return 0.0;
+    }
+
+    ((impact_speed as f64) * (DAMAGE_K as f64) * (multiplier as f64)).clamp(0.0, f32::MAX as f64)
+        as f32
+}
 
 /// Convert [`ObstacleHit`] impacts into health loss. On any damage, play a
 /// low-volume thud and flash the vignette. When health hits zero, stop the
@@ -151,10 +162,11 @@ fn apply_damage(
     mut reason: ResMut<crate::game::resources::GameOverReason>,
     mut commands: Commands,
     audio: Res<DamageAudioHandles>,
+    modifier: Res<ActiveModifier>,
 ) {
     let mut damaged_this_frame = false;
     for hit in hits.read() {
-        let dmg = hit.impact_speed * DAMAGE_K;
+        let dmg = obstacle_damage(hit.impact_speed, &modifier);
         if dmg <= 0.0 {
             continue;
         }
@@ -349,9 +361,7 @@ fn spawn_damage_flash(commands: &mut Commands) {
             ..default()
         },
         BackgroundColor(Color::srgba(1.0, 0.0, 0.0, FLASH_PEAK_ALPHA)),
-        DamageFlash {
-            t: FLASH_DURATION,
-        },
+        DamageFlash { t: FLASH_DURATION },
     ));
 }
 
@@ -380,5 +390,31 @@ fn update_damage_flash(
 fn despawn_marker<M: Component>(mut commands: Commands, q: Query<Entity, With<M>>) {
     for e in &q {
         commands.entity(e).despawn();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DAMAGE_K, obstacle_damage};
+    use crate::modifiers::{ActiveModifier, ModifierKind};
+
+    #[test]
+    fn standard_and_glass_cannon_damage_are_exact() {
+        let standard = ActiveModifier(ModifierKind::Standard);
+        let glass_cannon = ActiveModifier(ModifierKind::GlassCannon);
+
+        assert_eq!(obstacle_damage(12.0, &standard), 12.0 * DAMAGE_K);
+        assert_eq!(obstacle_damage(12.0, &glass_cannon), 12.0 * DAMAGE_K * 2.0);
+    }
+
+    #[test]
+    fn damage_preserves_non_damaging_impacts_and_clamps_extremes() {
+        let glass_cannon = ActiveModifier(ModifierKind::GlassCannon);
+
+        assert_eq!(obstacle_damage(0.0, &glass_cannon), 0.0);
+        assert_eq!(obstacle_damage(-1.0, &glass_cannon), 0.0);
+        assert_eq!(obstacle_damage(f32::NAN, &glass_cannon), 0.0);
+        assert_eq!(obstacle_damage(f32::INFINITY, &glass_cannon), f32::MAX);
+        assert_eq!(obstacle_damage(f32::MAX, &glass_cannon), f32::MAX);
     }
 }

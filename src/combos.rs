@@ -8,7 +8,8 @@
 //! Score interaction: `chickens.rs::hit_chickens` and `world.rs::collect_coins`
 //! already add +1 to `Score.chickens` / `Score.coins` per hit. This module
 //! adds the **bonus** on top: `score.chickens += multiplier - 1` (and likewise
-//! for coins), so the total per hit = base 1 + (multiplier - 1) = `multiplier`.
+//! for coins). Standard therefore totals `multiplier` points per hit; round
+//! modifiers may scale only the bonus while the originating +1 stays intact.
 
 use bevy::prelude::*;
 use bevy::text::FontSize;
@@ -17,6 +18,7 @@ use crate::game::SpawnSet;
 use crate::game::events::{ChickenHit, CoinCollected};
 use crate::game::resources::{RoundActive, Score};
 use crate::game::state::GameState;
+use crate::modifiers::ActiveModifier;
 use crate::palette;
 
 // ---------------------------------------------------------------------------
@@ -89,9 +91,18 @@ impl Combo {
     }
 }
 
+/// Bonus owned by this module for one hit. The hit's base point is awarded by
+/// the originating gameplay system and is deliberately never multiplied.
+fn combo_bonus_for_hit(multiplier: u32, modifier: &ActiveModifier) -> u32 {
+    multiplier
+        .saturating_sub(1)
+        .saturating_mul(modifier.combo_bonus_multiplier())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::Combo;
+    use super::{Combo, combo_bonus_for_hit};
+    use crate::modifiers::{ActiveModifier, ModifierKind};
 
     #[test]
     fn multiplier_thresholds_and_cap() {
@@ -113,6 +124,29 @@ mod tests {
                 "unexpected multiplier at count {count}"
             );
         }
+    }
+
+    #[test]
+    fn standard_and_glass_cannon_only_scale_the_bonus() {
+        let standard = ActiveModifier(ModifierKind::Standard);
+        let glass_cannon = ActiveModifier(ModifierKind::GlassCannon);
+
+        assert_eq!(combo_bonus_for_hit(4, &standard), 3);
+        assert_eq!(combo_bonus_for_hit(4, &glass_cannon), 6);
+        // Including the point awarded by the hit's owning system, the awards
+        // are 4 and 7 rather than 4 and 8: the base point stays unscaled.
+        assert_eq!(1_u32.saturating_add(combo_bonus_for_hit(4, &standard)), 4);
+        assert_eq!(
+            1_u32.saturating_add(combo_bonus_for_hit(4, &glass_cannon)),
+            7
+        );
+    }
+
+    #[test]
+    fn combo_bonus_math_saturates() {
+        let glass_cannon = ActiveModifier(ModifierKind::GlassCannon);
+        assert_eq!(combo_bonus_for_hit(0, &glass_cannon), 0);
+        assert_eq!(combo_bonus_for_hit(u32::MAX, &glass_cannon), u32::MAX);
     }
 }
 
@@ -196,8 +230,8 @@ impl Plugin for CombosPlugin {
 /// Read `ChickenHit` and `CoinCollected` messages. On any hit: increment the
 /// combo counter, refresh the timer to [`COMBO_WINDOW`], recompute the
 /// multiplier, and add the bonus (`multiplier - 1`) to `Score` on top of the
-/// +1 the existing systems already added — so the total per hit equals
-/// `multiplier`.
+/// +1 the existing systems already added. Glass Cannon scales only that bonus;
+/// Standard therefore keeps the original total-per-hit behavior exactly.
 ///
 /// `ChickenHit` / `CoinCollected` are already registered as messages in
 /// `game/mod.rs`; this module only **reads** them (never re-registers).
@@ -206,23 +240,28 @@ fn register_hit(
     mut coin_hits: MessageReader<CoinCollected>,
     mut combo: ResMut<Combo>,
     mut score: ResMut<Score>,
+    modifier: Res<ActiveModifier>,
 ) {
     // Process each hit individually so the counter + multiplier advance
     // correctly even if multiple hits arrive in one frame (rare but possible
     // — e.g. hitting two chickens simultaneously).
     for _ in chicken_hits.read() {
-        combo.count += 1;
+        combo.count = combo.count.saturating_add(1);
         combo.timer = COMBO_WINDOW;
         combo.multiplier = Combo::multiplier_from_count(combo.count);
         // Bonus on top of the base +1 from chickens.rs::hit_chickens.
-        score.chickens += combo.multiplier.saturating_sub(1);
+        score.chickens = score
+            .chickens
+            .saturating_add(combo_bonus_for_hit(combo.multiplier, &modifier));
     }
     for _ in coin_hits.read() {
-        combo.count += 1;
+        combo.count = combo.count.saturating_add(1);
         combo.timer = COMBO_WINDOW;
         combo.multiplier = Combo::multiplier_from_count(combo.count);
         // Bonus on top of the base +1 from world.rs::collect_coins.
-        score.coins += combo.multiplier.saturating_sub(1);
+        score.coins = score
+            .coins
+            .saturating_add(combo_bonus_for_hit(combo.multiplier, &modifier));
     }
 }
 

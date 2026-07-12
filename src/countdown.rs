@@ -17,6 +17,7 @@ use crate::car::InputFrozen;
 use crate::game::SpawnSet;
 use crate::game::resources::RoundActive;
 use crate::game::state::GameState;
+use crate::modifiers::ActiveModifier;
 use crate::palette;
 
 const PUNCH_DURATION: f32 = 0.2;
@@ -152,6 +153,7 @@ fn start_countdown(
     round_active: Res<RoundActive>,
     mut countdown: ResMut<Countdown>,
     mut input_frozen: ResMut<InputFrozen>,
+    active_modifier: Res<ActiveModifier>,
 ) {
     // Resume from Paused: round already active -> no countdown.
     if round_active.0 {
@@ -164,13 +166,13 @@ fn start_countdown(
     countdown.last_cue = None;
     countdown.punch_remaining = 0.0;
     input_frozen.0 = true;
-    spawn_countdown_overlay(&mut commands);
+    spawn_countdown_overlay(&mut commands, &active_modifier);
 }
 
 /// Spawn the full-screen centered overlay with a big number/word that
 /// `tick_countdown` updates each frame. The initial span is "3" so there's
 /// no one-frame flash before the first tick fires.
-fn spawn_countdown_overlay(commands: &mut Commands) {
+fn spawn_countdown_overlay(commands: &mut Commands, active_modifier: &ActiveModifier) {
     commands
         .spawn((
             Node {
@@ -181,6 +183,7 @@ fn spawn_countdown_overlay(commands: &mut Commands) {
                 height: Val::Percent(100.0),
                 align_items: AlignItems::Center,
                 justify_content: JustifyContent::Center,
+                flex_direction: FlexDirection::Column,
                 ..default()
             },
             // Light dim so the big number pops without hiding the road.
@@ -188,6 +191,32 @@ fn spawn_countdown_overlay(commands: &mut Commands) {
             CountdownRoot,
         ))
         .with_children(|p| {
+            // Announce the freshly selected condition independently of the
+            // animated cue so 3-2-1/GO retains its own text and punch.
+            p.spawn((
+                Text::new("ROAD CONDITION"),
+                TextFont {
+                    font_size: FontSize::Px(16.0),
+                    ..default()
+                },
+                TextColor(Color::srgba(0.85, 0.85, 0.9, 1.0).into()),
+                Node {
+                    margin: UiRect::bottom(px(3.0)),
+                    ..default()
+                },
+            ));
+            p.spawn((
+                Text::new(active_modifier.display_name()),
+                TextFont {
+                    font_size: FontSize::Px(32.0),
+                    ..default()
+                },
+                TextColor(active_modifier.color()),
+                Node {
+                    margin: UiRect::bottom(px(18.0)),
+                    ..default()
+                },
+            ));
             p.spawn((
                 Text::new(""),
                 TextFont {

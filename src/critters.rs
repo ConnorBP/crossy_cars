@@ -27,10 +27,11 @@ use bevy::prelude::*;
 use std::f32::consts::TAU;
 
 use crate::car::Car;
+use crate::game::SpawnSet;
 use crate::game::resources::{GameConfig, RoundActive, Score};
 use crate::game::state::GameState;
-use crate::game::SpawnSet;
 use crate::health::Health;
+use crate::modifiers::ActiveModifier;
 
 // ---------------------------------------------------------------------------
 // Tuning constants
@@ -371,10 +372,7 @@ impl Plugin for CrittersPlugin {
             // Fresh-round spawn: inside SpawnSet so it runs before reset_run
             // flips RoundActive (risk E11). Checks RoundActive.0 to skip on
             // resume from Paused.
-            .add_systems(
-                OnEnter(GameState::Playing),
-                spawn_critters.in_set(SpawnSet),
-            )
+            .add_systems(OnEnter(GameState::Playing), spawn_critters.in_set(SpawnSet))
             // Hit detection runs before wandering (chained — they share
             // Transform access on Critter entities; ordering resolves the
             // borrow). update_particles is disjoint (Gib/BloodPuff comps) so
@@ -406,13 +404,15 @@ impl Plugin for CrittersPlugin {
 // Spawn systems
 // ---------------------------------------------------------------------------
 
-/// Fresh-round spawn: scatter `CRITTER_COUNT` critters (random kinds) within
-/// radius `SCATTER_RADIUS` of the car. Runs in `SpawnSet` (before `reset_run`)
-/// and skips on resume from `Paused` (when `RoundActive.0` is already true).
+/// Fresh-round spawn: scatter the modifier-adjusted critter target (random
+/// kinds) within radius `SCATTER_RADIUS` of the car. Runs in `SpawnSet` (before
+/// `reset_run`) and skips on resume from `Paused` (when `RoundActive.0` is
+/// already true).
 fn spawn_critters(
     mut commands: Commands,
     assets: Res<CritterAssets>,
     cfg: Res<GameConfig>,
+    modifier: Res<ActiveModifier>,
     car: Query<&Transform, (With<Car>, Without<Critter>)>,
     round_active: Res<RoundActive>,
     mut seed: Local<u32>,
@@ -426,7 +426,7 @@ fn spawn_critters(
     };
     let car_pos = car_t.translation;
 
-    for _ in 0..CRITTER_COUNT {
+    for _ in 0..effective_critter_target(&modifier) {
         let angle = rand(&mut seed) * TAU;
         let radius = SCATTER_INNER + rand(&mut seed) * (SCATTER_RADIUS - SCATTER_INNER);
         let pos = Vec3::new(
@@ -481,7 +481,12 @@ fn spawn_one_critter(
         .spawn((
             Transform::from_translation(pos),
             Visibility::default(),
-            Critter { dir, speed, timer, bob },
+            Critter {
+                dir,
+                speed,
+                timer,
+                bob,
+            },
             kind,
         ))
         .with_children(|root| {
@@ -505,8 +510,7 @@ fn spawn_one_critter(
             root.spawn((
                 Mesh3d(assets.shadow_mesh.clone()),
                 MeshMaterial3d(assets.shadow_mat.clone()),
-                Transform::from_xyz(0.0, 0.02, 0.0)
-                    .with_scale(Vec3::new(sw, 1.0, sl)),
+                Transform::from_xyz(0.0, 0.02, 0.0).with_scale(Vec3::new(sw, 1.0, sl)),
             ));
         });
 }
@@ -615,8 +619,7 @@ fn build_moose(body: &mut ChildSpawnerCommands, assets: &CritterAssets) {
             head.spawn((
                 Mesh3d(assets.antler_mesh.clone()),
                 MeshMaterial3d(assets.antler_mat.clone()),
-                Transform::from_xyz(x, 0.34, -0.12)
-                    .with_rotation(Quat::from_rotation_x(0.5)),
+                Transform::from_xyz(x, 0.34, -0.12).with_rotation(Quat::from_rotation_x(0.5)),
             ));
         }
     });
@@ -682,10 +685,7 @@ fn wander_critters(
     assets: Res<CritterAssets>,
     cfg: Res<GameConfig>,
     car: Query<&Transform, (With<Car>, Without<Critter>)>,
-    mut critters: Query<
-        (Entity, &mut Critter, &mut Transform, &Children),
-        Without<Car>,
-    >,
+    mut critters: Query<(Entity, &mut Critter, &mut Transform, &Children), Without<Car>>,
     mut bodies: Query<(&mut Transform, &CritterBody), (Without<Critter>, Without<Car>)>,
     time: Res<Time>,
     mut seed: Local<u32>,
@@ -945,6 +945,12 @@ fn cleanup_particles(
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Fresh-round critter population after applying the active road condition.
+/// Recycling and hits replace exactly one critter, so this target stays fixed.
+const fn effective_critter_target(modifier: &ActiveModifier) -> usize {
+    CRITTER_COUNT * modifier.critter_count_multiplier()
+}
+
 /// Tiny LCG (matches `world.rs::rand`) — deterministic pseudo-random 0..1
 /// without pulling in the `rand` crate (keeps the web build lean).
 fn rand(seed: &mut u32) -> f32 {
@@ -981,8 +987,8 @@ fn ensure_seeded(seed: &mut u32, initial: u32) {
 fn critter_speed(kind: CritterKind, cfg: &GameConfig) -> f32 {
     match kind {
         CritterKind::Pedestrian => cfg.max_speed * 0.15, // ~1.8 u/s
-        CritterKind::Cow => cfg.max_speed * 0.08,       // ~0.96 u/s
-        CritterKind::Moose => cfg.max_speed * 0.12,     // ~1.44 u/s
+        CritterKind::Cow => cfg.max_speed * 0.08,        // ~0.96 u/s
+        CritterKind::Moose => cfg.max_speed * 0.12,      // ~1.44 u/s
     }
 }
 
@@ -1002,5 +1008,22 @@ fn critter_shadow_size(kind: CritterKind) -> (f32, f32) {
         CritterKind::Pedestrian => (0.40, 0.40),
         CritterKind::Cow => (0.80, 1.20),
         CritterKind::Moose => (0.70, 1.30),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::modifiers::ModifierKind;
+
+    #[test]
+    fn stampede_doubles_only_the_critter_population_target() {
+        let standard = ActiveModifier(ModifierKind::Standard);
+        let stampede = ActiveModifier(ModifierKind::Stampede);
+        let frenzy = ActiveModifier(ModifierKind::ChickenFrenzy);
+
+        assert_eq!(effective_critter_target(&standard), CRITTER_COUNT);
+        assert_eq!(effective_critter_target(&stampede), CRITTER_COUNT * 2);
+        assert_eq!(effective_critter_target(&frenzy), CRITTER_COUNT);
     }
 }

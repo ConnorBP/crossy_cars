@@ -1,8 +1,10 @@
 use bevy::{prelude::*, text::FontSize};
 
 use crate::car::Car;
+use crate::game::SpawnSet;
 use crate::game::resources::{GameOverReason, Score, TimeLeft};
 use crate::game::state::GameState;
+use crate::modifiers::ActiveModifier;
 use crate::palette;
 use crate::persist::BestAtRoundStart;
 
@@ -80,7 +82,12 @@ impl Plugin for UiPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(OnEnter(GameState::Menu), spawn_menu)
             .add_systems(OnExit(GameState::Menu), despawn_marker::<MenuRoot>)
-            .add_systems(OnEnter(GameState::Playing), (spawn_hud, spawn_hint))
+            // Modifier selection happens before SpawnSet on fresh rounds, so
+            // the HUD always captures the condition selected for this run.
+            .add_systems(
+                OnEnter(GameState::Playing),
+                (spawn_hud.after(SpawnSet), spawn_hint),
+            )
             .add_systems(
                 OnExit(GameState::Playing),
                 (despawn_marker::<HudRoot>, despawn_marker::<HintRoot>),
@@ -198,7 +205,7 @@ fn spawn_menu(mut commands: Commands) {
         });
 }
 
-fn spawn_hud(mut commands: Commands) {
+fn spawn_hud(mut commands: Commands, active_modifier: Res<ActiveModifier>) {
     // --- Top-left cockpit cluster on a semi-transparent panel ---
     commands
         .spawn((
@@ -356,6 +363,10 @@ fn spawn_hud(mut commands: Commands) {
                     ..default()
                 },
                 TextColor(palette::HUD_TEXT.into()),
+                Node {
+                    margin: UiRect::bottom(px(8.0)),
+                    ..default()
+                },
             ))
             .with_child((
                 TextSpan::default(),
@@ -365,6 +376,28 @@ fn spawn_hud(mut commands: Commands) {
                 },
                 TextColor(palette::HUD_ACCENT.into()),
                 CoinsText,
+            ));
+            // Current road condition. It is created once with the HUD and
+            // removed by the existing HudRoot lifecycle (including pauses).
+            p.spawn((
+                Text::new("ROAD CONDITION"),
+                TextFont {
+                    font_size: FontSize::Px(12.0),
+                    ..default()
+                },
+                TextColor(Color::srgba(0.75, 0.75, 0.8, 1.0).into()),
+                Node {
+                    margin: UiRect::bottom(px(1.0)),
+                    ..default()
+                },
+            ));
+            p.spawn((
+                Text::new(active_modifier.display_name()),
+                TextFont {
+                    font_size: FontSize::Px(18.0),
+                    ..default()
+                },
+                TextColor(active_modifier.color()),
             ));
         });
 
