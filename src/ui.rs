@@ -9,6 +9,7 @@ use crate::palette;
 use crate::persist::{
     BestAtRoundStart, ConditionBests, ConditionBestsAtRoundStart, Medal, medal_for,
 };
+use crate::touch::TouchControlsActive;
 
 const ALL_CONDITIONS: [ModifierKind; 5] = [
     ModifierKind::Standard,
@@ -490,7 +491,12 @@ fn spawn_hud(mut commands: Commands, active_modifier: Res<ActiveModifier>) {
         ));
 }
 
-fn spawn_hint(mut commands: Commands) {
+fn spawn_hint(mut commands: Commands, touch_active: Res<TouchControlsActive>) {
+    // Touch-started rounds have persistent on-screen controls; the keyboard
+    // hint would overlap them, especially on short landscape viewports.
+    if touch_active.0 {
+        return;
+    }
     // Lower-center transient hint, auto-dismissed after ~3.5s by `update_hint`.
     commands
         .spawn((

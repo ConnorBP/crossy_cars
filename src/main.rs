@@ -17,6 +17,7 @@ mod pickups;
 mod run_events;
 mod shaders;
 mod textures;
+mod touch;
 mod transparency;
 mod ui;
 mod world;
@@ -42,6 +43,7 @@ use pickups::PickupsPlugin;
 use run_events::RunEventsPlugin;
 use shaders::ShaderPlugin;
 use textures::TexturesPlugin;
+use touch::TouchPlugin;
 use transparency::TransparencyPlugin;
 use ui::UiPlugin;
 use world::WorldPlugin;
@@ -61,6 +63,9 @@ fn main() {
                 .set(WindowPlugin {
                     primary_window: Some(Window {
                         title: "Roady Car".into(),
+                        // On Wasm, keep Bevy's logical window and touch
+                        // coordinates matched to the responsive CSS canvas.
+                        fit_canvas_to_parent: true,
                         ..default()
                     }),
                     ..default()
@@ -89,6 +94,9 @@ fn main() {
         // Registered separately so neither plugin tuple approaches Bevy's
         // tuple implementation limit as features are added.
         .add_plugins(TransparencyPlugin)
+        // Touch controls share the ordered car input sets but remain an
+        // independently registered input/UI feature.
+        .add_plugins(TouchPlugin)
         // Modifier selection must be registered independently of the feature
         // tuple so adding it cannot approach Bevy's plugin tuple limit.
         .add_plugins(ModifiersPlugin)

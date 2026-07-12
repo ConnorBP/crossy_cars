@@ -4,7 +4,7 @@ Roady Car is an isometric arcade driving game built with [Bevy 0.19](https://bev
 
 The chicken-crossing riddle is reversed: **you are the traffic**. Race through a continuously recycled city, hit wandering chickens for points, collect coins, avoid innocent critters and oncoming cars, and keep the car alive until the clock expires.
 
-> **Input requirement:** the current game requires a desktop keyboard, including when played in a browser. Touch controls are planned but are not implemented yet.
+> **Controls:** the game supports a desktop keyboard and on-screen touch controls. Touch controls appear after the first touch and are intended for landscape orientation.
 
 ## Gameplay
 
@@ -29,6 +29,8 @@ Every new round cycles through one of five road conditions:
 
 ## Controls
 
+### Keyboard
+
 | Key | Action |
 | --- | --- |
 | `Enter` or `Space` | Start from the menu; play again after game over |
@@ -40,6 +42,24 @@ Every new round cycles through one of five road conditions:
 | `R` | Restart from pause or game over |
 | `Q` | Return to the menu from pause or game over |
 | `M` | Toggle mute |
+
+### Touch controls
+
+On-screen touch controls appear after the first touch and stay available for the rest of the session; landscape orientation is recommended. The lower portion of the screen is split into driving zones (labeled STEER, BRAKE, GO):
+
+| Zone | Action |
+| --- | --- |
+| **Steer** (bottom-left) | Press and drag left or right to steer; distance from center sets turn strength |
+| **Brake** (bottom-center) | Hold to brake |
+| **GO** (bottom-right) | Hold to accelerate forward |
+
+- Several touches at once are combined, and brake takes priority over GO.
+- Tap the top-center **PAUSE** button while driving to pause.
+- From the menu, tap anywhere to start a round.
+- On the pause screen, tap the left third to resume, the middle third to restart, or the right third to return to the menu.
+- On the game-over screen, tap the left two-thirds to play again, or the right third to return to the menu.
+
+Mute (`M`) and reverse (`S` / `↓`) are keyboard-only and have no on-screen touch equivalent.
 
 ## Run natively
 
@@ -85,7 +105,7 @@ The deployable files are written to `dist/`; serve that directory from an HTTP s
 `src/main.rs` composes the game from focused Bevy plugins:
 
 - `game/` owns states, shared resources and messages, round timing, pause/restart/menu transitions, and fresh-round ordering.
-- `car.rs` and `camera.rs` implement arcade driving, collisions, vehicle animation, fixed isometric following, zoom, and impact shake.
+- `car.rs` and `camera.rs` implement arcade driving, collisions, vehicle animation, fixed isometric following, zoom, and impact shake; `touch.rs` adds on-screen touch driving zones, multi-touch merging, and touch-driven menu/pause/game-over transitions.
 - `world.rs` streams the deterministic city grid, roads, buildings, props, obstacles, and coins; `textures.rs` generates tiled surface textures and normal maps.
 - `chickens.rs` and `critters.rs` own the wandering targets, hit rules, recycling, models, and particles.
 - `combos.rs`, `countdown.rs`, `modifiers.rs`, `difficulty.rs`, `pickups.rs`, and `health.rs` implement round scoring, conditions, traffic, power-ups, and survival systems.
@@ -122,7 +142,14 @@ For interactive browser QA, start the development server:
 trunk serve
 ```
 
-At `http://localhost:8080`, use a desktop keyboard and check menu start, the countdown, all driving controls, pause/resume/restart/menu transitions, mute, a full timed round, and browser-console output. Also confirm that the best score and mute preference survive a page reload when browser storage is available.
+At `http://localhost:8080`, use a desktop keyboard (and, on a touch-enabled device, the on-screen touch controls) and check menu start, the countdown, all driving controls, pause/resume/restart/menu transitions, mute, a full timed round, and browser-console output. Also confirm that the best score and mute preference survive a page reload when browser storage is available.
+
+Automated desktop and touch scenarios are available after serving the game:
+
+```sh
+python tools/browser_scenarios.py --url http://localhost:8080
+python tools/browser_touch_scenarios.py --url http://localhost:8080
+```
 
 ## License
 

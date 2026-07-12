@@ -91,17 +91,32 @@ struct FrontWheel;
 #[derive(Component)]
 struct BrakeLight;
 
+/// Update ordering shared by keyboard, touch, and car simulation. Touch input
+/// augments the keyboard-populated [`PlayerInput`] before driving consumes it.
+#[derive(SystemSet, Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct KeyboardInputSet;
+
+#[derive(SystemSet, Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct TouchInputSet;
+
+#[derive(SystemSet, Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct DrivingSet;
+
 pub struct CarPlugin;
 
 impl Plugin for CarPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<InputFrozen>()
             .init_resource::<PlayerInput>()
+            .configure_sets(
+                Update,
+                (KeyboardInputSet, TouchInputSet, DrivingSet).chain(),
+            )
             .add_systems(Startup, spawn_car)
             // Keep this reader active in every state so menu/pause/freeze
             // transitions immediately clear input instead of retaining a held
             // value from the previous Playing frame.
-            .add_systems(Update, read_keyboard_input.before(move_car))
+            .add_systems(Update, read_keyboard_input.in_set(KeyboardInputSet))
             .add_systems(
                 Update,
                 // move_car first, then resolve curb hops + obstacle collisions,
@@ -114,6 +129,7 @@ impl Plugin for CarPlugin {
                     brake_lights,
                 )
                     .chain()
+                    .in_set(DrivingSet)
                     .run_if(in_state(GameState::Playing)),
             );
     }

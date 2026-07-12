@@ -6,13 +6,13 @@
     <title>Roady Car</title>
     <meta
       name="description"
-      content="Drive an endless isometric road, chase chickens, and dodge hazards in Roady Car, a desktop keyboard game."
+      content="Drive an endless isometric road, chase chickens, and dodge hazards in Roady Car, a browser game with keyboard or touch controls."
     />
     <meta name="theme-color" content="#111111" />
     <meta property="og:title" content="Roady Car" />
     <meta
       property="og:description"
-      content="Drive an endless isometric road, chase chickens, and dodge hazards in this browser driving game."
+      content="Drive an endless isometric road, chase chickens, and dodge hazards in this browser driving game with keyboard or touch controls."
     />
     <meta property="og:type" content="website" />
     <meta property="og:locale" content="en_US" />
@@ -206,9 +206,12 @@
   </head>
   <body>
     <p id="keyboard-instructions" class="sr-only">
-      Roady Car is designed for a desktop keyboard. Use W or Up Arrow to accelerate,
-      S or Down Arrow to brake and reverse, and A and D or the Left and Right Arrow
-      keys to steer. Your first key press or pointer action also enables game audio.
+      Roady Car supports a desktop keyboard or touch controls. Use W or Up Arrow to
+      accelerate, S or Down Arrow to brake and reverse, and A and D or the Left and
+      Right Arrow keys to steer; Space brakes and Esc pauses. On touch devices,
+      on-screen STEER, BRAKE, and GO zones drive the car, and tapping the screen
+      starts, pauses, and navigates menus. Your first key press or touch also
+      enables game audio.
     </p>
     <div id="loading" class="loading" role="status" aria-live="polite" aria-atomic="true" hidden>
       <div id="loading-content" class="loading-content">
@@ -216,8 +219,9 @@
         <h1>Roady Car</h1>
         <p>Loading the game&hellip;</p>
         <p class="instructions">
-          Desktop keyboard controls: W or Up Arrow accelerates, S or Down Arrow
-          brakes, and A/D or Left/Right Arrow steers.
+          Keyboard: W or Up Arrow accelerates, S or Down Arrow brakes, A/D or
+          Left/Right Arrow steers, Space brakes, and Esc pauses. Touch devices use
+          on-screen STEER, BRAKE, and GO zones.
         </p>
       </div>
       <div id="error-content" class="error-content" hidden>
@@ -234,8 +238,8 @@
         <h1>JavaScript is required</h1>
         <p>
           Roady Car needs JavaScript, WebAssembly, and WebGL2. Enable JavaScript in a
-          compatible browser, then reload this page. A desktop keyboard is required
-          for the W/A/S/D or arrow-key controls.
+          compatible browser, then reload this page. Use a desktop keyboard
+          (W/A/S/D or arrow keys) or on-screen touch controls to play.
         </p>
       </div>
     </noscript>
