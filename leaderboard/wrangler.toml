@@ -1,0 +1,85 @@
+name = "roady-leaderboard"
+main = "src/index.ts"
+compatibility_date = "2025-05-01"
+compatibility_flags = ["nodejs_compat"]
+
+# ────────────────────────────────────────────────────────────────────────────
+# D1 database
+#
+# The `database_id` below is a PLACEHOLDER. Create the real database first:
+#
+#   npx wrangler d1 create roady_leaderboard
+#
+# Wrangler prints a `database_id`; paste it here before `wrangler dev` or
+# `wrangler deploy`. Do not commit a real id if this repo is public — a D1 id
+# is not a secret, but keeping it out of source avoids coupling deploys to a
+# specific account.
+# ────────────────────────────────────────────────────────────────────────────
+[[d1_databases]]
+binding = "DB"
+database_name = "roady_leaderboard"
+# PLACEHOLDER — replace with output of `wrangler d1 create roady_leaderboard`.
+database_id = "00000000-0000-0000-0000-000000000000"
+migrations_dir = "migrations"
+
+# ────────────────────────────────────────────────────────────────────────────
+# Rate limiting bindings (Cloudflare Rate Limiting).
+#
+# Each binding is an independent anonymous pool with a `simple` limit (limit
+# requests per `period` seconds; period must be 10 or 60). The per-IP keys are
+# constructed in src/index.ts from CF-Connecting-IP. Limits match the
+# architecture §9 recommendations. Read endpoints fail open if a binding is
+# unavailable; write endpoints (session/submit) fail closed so a missing or
+# erroring binding cannot bypass the throttle.
+# ────────────────────────────────────────────────────────────────────────────
+[[unsafe.bindings]]
+name = "RATE_LIMIT_READ"
+type = "ratelimit"
+namespace_id = "1001"
+simple = { limit = 30, period = 60 }
+
+[[unsafe.bindings]]
+name = "RATE_LIMIT_SESSION"
+type = "ratelimit"
+namespace_id = "1002"
+simple = { limit = 3, period = 60 }
+
+[[unsafe.bindings]]
+name = "RATE_LIMIT_SUBMIT"
+type = "ratelimit"
+namespace_id = "1003"
+simple = { limit = 5, period = 60 }
+
+[[unsafe.bindings]]
+name = "RATE_LIMIT_RANK"
+type = "ratelimit"
+namespace_id = "1004"
+simple = { limit = 60, period = 60 }
+
+# ────────────────────────────────────────────────────────────────────────────
+# Non-secret vars. Secrets are installed via `wrangler secret put` and are
+# NOT listed here (see .dev.vars.example for local dev values):
+#   LB_SESSION_HMAC_KEY, LB_IP_HASH_PEPPER, LB_ADMIN_TOKEN,
+#   LB_TURNSTILE_SECRET, LB_CLIENT_HMAC_KEY
+#
+# The Worker fail-closes if any of these is missing or a placeholder
+# (REPLACE_*), and if LB_TURNSTILE_SECRET is the test secret outside a
+# dev/test/local BUILD. Set BUILD=dev for local development.
+# ────────────────────────────────────────────────────────────────────────────
+[vars]
+ALLOWED_ORIGINS = "https://roady-car.pages.dev,http://localhost:8080,http://127.0.0.1:8080"
+# Local default; deployment workflow replaces this with the production commit SHA.
+BUILD = "dev"
+# Per-condition plausibility caps as JSON: { "0": cap, ... }. Conservative,
+# intentionally generous provisional caps based on the effective 99s maximum.
+# Deterministic event plans make Glass Cannon + Combo Frenzy unreachable; caps
+# must be recalibrated from simulation and production telemetry before launch.
+# Only above-cap scores are rejected; near-cap scores are flagged.
+# All five conditions (0–4) MUST be present — the Worker fails closed if any
+# cap is missing or non-positive (see configError in src/index.ts).
+SCORE_CAPS_JSON = "{\"0\":3000,\"1\":3000,\"2\":4000,\"3\":3000,\"4\":6000}"
+
+# Optional scheduled cleanup of expired sessions and old non-top scores.
+# Disabled by default (comment out to enable once retention policy is reviewed).
+# [triggers]
+# crons = ["0 */6 * * *"]

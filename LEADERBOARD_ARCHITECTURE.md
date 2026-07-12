@@ -307,7 +307,7 @@ Hard invariants:
 - `round_duration_ms` and `time_left_ms` are in broad sane ranges
 - `terminal_total <= SCORE_CAPS[condition]`
 
-The caps must be generous and derived from the shipped rules: up to 90 seconds, 5× combo, objective bonus, condition/event bonuses, and maximum plausible pickups. Scores near the cap should be flagged for moderation rather than rejected merely for being high. Only above-cap values are hard rejected.
+The caps must be generous and derived from the shipped rules. The **effective maximum round length is 99 seconds**, not 90: a fresh round starts at 60s, ordinary coins add +1.5s each but clamp the clock to 90s (`MAX_ROUND_TIME = 90.0` in `src/world.rs`), and the Time power-up adds +5s each clamped to a hard 99s ceiling (`TIME_CAP = 99.0` in `src/pickups.rs`). Coins alone cannot reach 99s; the Time power-up can push the clock from 90s up to 99s, so `round_duration_ms` and `time_left_ms` can legitimately approach `99_000 ms`. Caps are derived from that ~99s ceiling, 5× combo, objective +10 bonus, condition/event bonuses, and maximum plausible pickups. Scores near the cap should be flagged for moderation rather than rejected merely for being high. Only above-cap values are hard rejected. `validation.ts` rejects `round_duration_ms`/`time_left_ms` above `120_000 ms` as a broad sane-range guard, while `SCORE_CAPS[condition]` is the primary score bound.
 
 Telemetry such as duration, objective completion, combo, client timestamp, or build is advisory and forgeable. It may generate moderation flags but is not proof.
 
@@ -414,7 +414,7 @@ Non-secret vars:
 - `SCORE_CAPS_JSON`
 - `BUILD`
 
-GitHub deployment credentials are separate from Worker runtime secrets. The GitHub token needs Workers Scripts Edit and D1 Edit; runtime secrets are installed into the Worker through Wrangler and never exposed to the game client.
+GitHub deployment credentials are separate from Worker runtime secrets. The GitHub token needs Workers Scripts Edit, D1 Edit, and Account Settings Read; runtime secrets are installed into the Worker through `wrangler secret put` and never exposed to the game client. The committed `wrangler.toml` keeps a placeholder D1 `database_id`; the deployment workflow ([`.github/workflows/deploy-cloudflare-leaderboard.yml`](.github/workflows/deploy-cloudflare-leaderboard.yml)) injects the real id from the GitHub variable `CLOUDFLARE_D1_DATABASE_ID` into the CI checkout copy at deploy time. See [DEPLOYMENT.md](DEPLOYMENT.md) for the exact variables, secrets, and permissions.
 
 ## 15. Retention and moderation
 
@@ -447,11 +447,15 @@ Flag suspicious entries for review rather than automatically deleting plausible 
 
 ## 18. Deployment relationship
 
-The current Cloudflare Pages workflow is blocked because the available token lacks **Cloudflare Pages Edit**, and the `roady-car` Pages project does not yet exist. The leaderboard Worker requires a separate token or expanded token with Workers Scripts Edit and D1 Edit.
+Roady Car has **two independent deployment workflows**, each with its own least-privilege Cloudflare token. See [DEPLOYMENT.md](DEPLOYMENT.md) for the full operational walkthrough, exact GitHub variables/secrets, and one-time Cloudflare setup.
 
-Prefer separate deployment workflows and least-privilege tokens:
+- **Static site** — [`deploy-cloudflare-pages.yml`](.github/workflows/deploy-cloudflare-pages.yml) builds the WASM and uploads `dist/` to a Cloudflare Pages Direct Upload project. Token scope: `Account` / `Cloudflare Pages` / `Edit`.
+- **Leaderboard Worker** — [`deploy-cloudflare-leaderboard.yml`](.github/workflows/deploy-cloudflare-leaderboard.yml) typechecks and tests the Worker, applies D1 migrations, deploys the Worker, installs runtime secrets, and smoke-tests `/healthz` and `/v1/leaderboard`. Token scope: `Account` / `Workers Scripts` / `Edit`, `Account` / `D1` / `Edit`, `Account` / `Account Settings` / `Read`.
 
-- Static Pages workflow: Pages Edit
-- Leaderboard Worker workflow: Workers Scripts Edit + D1 Edit
+The leaderboard workflow does **not** assume the D1 database, Turnstile widget, or Workers subdomain already exist. It reads the D1 database id and deployed URL from GitHub **variables** (`CLOUDFLARE_D1_DATABASE_ID`, `LEADERBOARD_BASE_URL`) and the runtime secrets from GitHub **secrets** (`LB_SESSION_HMAC_KEY`, `LB_IP_HASH_PEPPER`, `LB_ADMIN_TOKEN`, `LB_TURNSTILE_SECRET`, `ROADY_LEADERBOARD_CLIENT_HMAC_KEY` installed as Worker `LB_CLIENT_HMAC_KEY`, plus `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`). If any are missing it fails with an actionable `::error::` checklist before touching Cloudflare. Secret values are never echoed: each is piped over stdin to `wrangler secret put`.
 
-A custom domain can route the site and API cleanly without granting broad DNS permissions to CI; configure routes/custom domains once in the Cloudflare dashboard.
+The committed `leaderboard/wrangler.toml` keeps a placeholder D1 `database_id`; the workflow substitutes the real id into the CI checkout copy at deploy time (via `sed`), so no source edit is needed and the public repo stays decoupled from a specific Cloudflare account.
+
+`ROADY_LEADERBOARD_CLIENT_HMAC_KEY` is the single shared nuisance client-HMAC key: the Pages workflow embeds it into the WASM at build time and the leaderboard workflow installs it as the Worker's `LB_CLIENT_HMAC_KEY` runtime secret, so the two are guaranteed identical when both workflows read the same GitHub secret.
+
+A custom domain or Workers route can serve the site and API cleanly without granting broad DNS permissions to CI; configure routes/custom domains once in the Cloudflare dashboard and put the resulting URL in `LEADERBOARD_BASE_URL`.

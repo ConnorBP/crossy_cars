@@ -7,3 +7,10 @@ best_score.txt
 tools/qa_screenshot.png
 tools/scenarios/
 tools/__pycache__/
+
+# Local environment, Cloudflare caches, and Worker secrets
+.env
+.env.*
+!.env.example
+.wrangler/
+leaderboard/.dev.vars

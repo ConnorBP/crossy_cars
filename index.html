@@ -21,6 +21,14 @@
       href="data:image/svg+xml,%3Csvg%20xmlns=%22http://www.w3.org/2000/svg%22%20viewBox=%220%200%2064%2064%22%3E%3Crect%20width=%2264%22%20height=%2264%22%20rx=%2214%22%20fill=%22%23111%22/%3E%3Cpath%20d=%22M14%2038h36l-4-14H22z%22%20fill=%22%23f7c948%22/%3E%3Ccircle%20cx=%2222%22%20cy=%2243%22%20r=%226%22%20fill=%22%23fff%22/%3E%3Ccircle%20cx=%2243%22%20cy=%2243%22%20r=%226%22%20fill=%22%23fff%22/%3E%3C/svg%3E"
     />
     <link data-trunk rel="copy-dir" href="assets" />
+    <!--
+      Cloudflare Turnstile widget (architecture §10). Loaded async so it does
+      not block the game. The `roadyLeaderboard.getTurnstileToken` bridge below
+      renders a widget on demand only when the player chooses to submit a score.
+      The site key is injected at build time via `LB_TURNSTILE_SITE_KEY`; in dev
+      the test key `1x00000000000000000000AA` is used.
+    -->
+    <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
     <style>
       html, body {
         width: 100%;
@@ -208,10 +216,10 @@
     <p id="keyboard-instructions" class="sr-only">
       Roady Car supports a desktop keyboard or touch controls. Use W or Up Arrow to
       accelerate, S or Down Arrow to brake and reverse, and A and D or the Left and
-      Right Arrow keys to steer; Space brakes and Esc pauses. On touch devices,
-      on-screen STEER, BRAKE, and GO zones drive the car, and tapping the screen
-      starts, pauses, and navigates menus. Your first key press or touch also
-      enables game audio.
+      Right Arrow keys to steer; Space brakes, Shift holds the handbrake to drift
+      through corners, and Esc pauses. On touch devices, on-screen STEER, HANDBRAKE,
+      BRAKE, and GO zones drive the car, and tapping the screen starts, pauses, and
+      navigates menus. Your first key press or touch also enables game audio.
     </p>
     <div id="loading" class="loading" role="status" aria-live="polite" aria-atomic="true" hidden>
       <div id="loading-content" class="loading-content">
@@ -220,8 +228,9 @@
         <p>Loading the game&hellip;</p>
         <p class="instructions">
           Keyboard: W or Up Arrow accelerates, S or Down Arrow brakes, A/D or
-          Left/Right Arrow steers, Space brakes, and Esc pauses. Touch devices use
-          on-screen STEER, BRAKE, and GO zones.
+          Left/Right Arrow steers, Space brakes, Shift holds the handbrake to drift,
+          and Esc pauses. Touch devices use on-screen STEER, HANDBRAKE, BRAKE, and GO
+          zones.
         </p>
       </div>
       <div id="error-content" class="error-content" hidden>
@@ -245,6 +254,123 @@
     </noscript>
 
     <link data-trunk rel="rust" data-bin="car_game_ai" data-wasm-opt="z" />
+    <!--
+      Roady Car leaderboard JS bridge (architecture §12).
+
+      The game-facing UI lives entirely in Bevy. Fetch uses raw `web-sys`
+      bindings in Rust (architecture §12 recommends this to preserve WASM
+      size). This bridge provides two async functions on
+      `window.roadyLeaderboard` that the Rust WASM client calls via `js_sys` /
+      `wasm_bindgen_futures`:
+
+        - getTurnstileToken(siteKey)
+            Renders a Cloudflare Turnstile widget on demand and resolves with
+            { ok: true, token } or { ok: false, error }.
+        - hmacSha256Base64Url(keyUtf8, dataUtf8)
+            WebCrypto HMAC-SHA-256, returning unpadded base64url.
+
+      A `fetchJson` helper is also exposed for convenience/debugging but the
+      Rust client does not call it in normal operation.
+
+      SECURITY: The HMAC key passed to `hmacSha256Base64Url` is the embedded
+      nuisance key from the WASM binary. It is extractable and does NOT prove
+      honest gameplay (architecture §1). See `src/leaderboard.rs` for the full
+      security note. This bridge never logs or persists the key.
+    -->
+    <script>
+      (function () {
+        if (typeof window === "undefined") return;
+        var api = {};
+
+        // ── fetch wrapper ──────────────────────────────────────────────
+        // Returns a Promise resolving to { ok: bool, status: number, body: string }.
+        api.fetchJson = function (url, method, body, signature) {
+          return fetch(url, {
+            method: method || "GET",
+            headers: Object.assign(
+              { "Content-Type": "application/json" },
+              signature ? { "X-Roady-Client-Signature": signature } : {}
+            ),
+            body: body || undefined,
+          })
+            .then(function (resp) {
+              return resp.text().then(function (text) {
+                return { ok: resp.ok, status: resp.status, body: text };
+              });
+            })
+            .catch(function (e) {
+              return { ok: false, status: 0, body: String(e) };
+            });
+        };
+
+        // ── Turnstile token ────────────────────────────────────────────
+        // Renders a widget in a temporary container and resolves with the
+        // token. Only called when the player chooses to submit a score.
+        api.getTurnstileToken = function (siteKey) {
+          return new Promise(function (resolve) {
+            if (!siteKey || !window.turnstile) {
+              resolve({ ok: false, error: "Turnstile not loaded" });
+              return;
+            }
+            var container = document.createElement("div");
+            container.style.cssText =
+              "position:fixed;bottom:10px;left:10px;z-index:200;";
+            document.body.appendChild(container);
+            var settled = false;
+            function done(result) {
+              if (settled) return;
+              settled = true;
+              resolve(result);
+              setTimeout(function () {
+                if (container.parentNode) container.parentNode.removeChild(container);
+              }, 200);
+            }
+            try {
+              window.turnstile.render(container, {
+                sitekey: siteKey,
+                action: "roady_score_session",
+                callback: function (token) { done({ ok: true, token: token }); },
+                "error-callback": function () { done({ ok: false, error: "Turnstile error" }); },
+                "expired-callback": function () { done({ ok: false, error: "Turnstile expired" }); },
+              });
+            } catch (e) {
+              done({ ok: false, error: String(e) });
+            }
+          });
+        };
+
+        // ── WebCrypto HMAC-SHA-256 → unpadded base64url ────────────────
+        // The key is the extractable embedded nuisance key. See the security
+        // note in src/leaderboard.rs and LEADERBOARD_ARCHITECTURE.md §1.
+        api.hmacSha256Base64Url = function (keyUtf8, dataUtf8) {
+          var enc = new TextEncoder();
+          return crypto.subtle
+            .importKey(
+              "raw",
+              enc.encode(keyUtf8),
+              { name: "HMAC", hash: "SHA-256" },
+              false,
+              ["sign"]
+            )
+            .then(function (key) {
+              return crypto.subtle.sign("HMAC", key, enc.encode(dataUtf8));
+            })
+            .then(function (sig) {
+              var bytes = new Uint8Array(sig);
+              var s = "";
+              for (var i = 0; i < bytes.length; i++)
+                s += String.fromCharCode(bytes[i]);
+              return btoa(s)
+                .replace(/\+/g, "-")
+                .replace(/\//g, "_")
+                .replace(/=+$/, "");
+            })
+            .catch(function () { return null; });
+        };
+
+        window.roadyLeaderboard = api;
+      })();
+    </script>
     <script>
       (function () {
         var loading = document.getElementById("loading");
@@ -262,7 +388,7 @@
           canvas.setAttribute("role", "application");
           canvas.setAttribute("aria-label", "Roady Car driving game");
           canvas.setAttribute("aria-describedby", "keyboard-instructions");
-          canvas.setAttribute("aria-keyshortcuts", "W S A D ArrowUp ArrowDown ArrowLeft ArrowRight");
+          canvas.setAttribute("aria-keyshortcuts", "W S A D Shift ArrowUp ArrowDown ArrowLeft ArrowRight");
           canvas.tabIndex = 0;
         }
 

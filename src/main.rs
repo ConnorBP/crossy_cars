@@ -9,6 +9,7 @@ mod difficulty;
 mod effects;
 mod game;
 mod health;
+mod leaderboard;
 mod minimap;
 mod modifiers;
 mod objectives;
@@ -38,6 +39,7 @@ use difficulty::DifficultyPlugin;
 use effects::EffectsPlugin;
 use game::GamePlugin;
 use health::HealthPlugin;
+use leaderboard::LeaderboardPlugin;
 use minimap::MinimapPlugin;
 use modifiers::ModifiersPlugin;
 use objectives::ObjectivesPlugin;
@@ -124,5 +126,8 @@ fn main() {
             CrittersPlugin,
             DifficultyPlugin,
         ))
+        // Cloudflare leaderboard web client; degrades to read-only/unavailable
+        // on native or when LEADERBOARD_API_URL is not set at build time.
+        .add_plugins(LeaderboardPlugin)
         .run();
 }

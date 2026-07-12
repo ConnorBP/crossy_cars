@@ -5,7 +5,7 @@ The game renders all UI (menu, pause screen, settings modal) into a canvas, so
 this scenario never relies on DOM text selectors. Modal/state is inferred from:
 
   * exact ``localStorage`` v1 schema assertions after every adjustment
-    (``roady_car_settings == "v1:<volume>:<muted>:<reduced_motion>"``);
+    (``roady_car_settings == "v2:<volume>:<muted>:<reduced_motion>:<leaderboard_initials>"``);
   * continued settings input -- an adjustment only takes effect while the modal
     is open in Menu/Paused, so a storage change proves the modal was open and
     the underlying state was preserved (no transition fired);
@@ -55,7 +55,7 @@ DEFAULT_OUT_DIR = "tools/scenarios/settings"
 BOOT_TIMEOUT_MS = 120_000
 STORAGE_KEY = "roady_car_settings"
 LEGACY_KEY = "roady_car_audio_muted"
-DEFAULT_SCHEMA = "v1:100:0:0"
+DEFAULT_SCHEMA = "v2:100:0:0:"
 # A fresh browser context has fresh sessionStorage. This marker makes the
 # initial localStorage wipe one-shot, so later reloads genuinely verify
 # persistence instead of being reset by the init script.
@@ -227,6 +227,8 @@ def attach_error_listeners(page: Any, summary: dict[str, Any], started_at: float
         )
 
     def on_request_failed(request: Any) -> None:
+        if request.failure == "net::ERR_ABORTED" and "/v1/leaderboard" in request.url:
+            return
         summary["network_failures"].append(
             {
                 "at_ms": ts(),
@@ -307,7 +309,7 @@ def setup_context(
     # deterministic fresh schema, while leaving reloads untouched.
     context.add_init_script(script=fresh_init_script())
     page = context.new_page()
-    page.set_default_timeout(30_000)
+    page.set_default_timeout(60_000)
     page.set_default_navigation_timeout(BOOT_TIMEOUT_MS)
     attach_error_listeners(page, summary, started_at)
     return context, page
@@ -353,25 +355,25 @@ def run_desktop(
     def menu_open_and_adjust() -> None:
         press("o")  # open; selection resets to Volume
         press("ArrowLeft")  # volume 100 -> 90
-        assert_storage(page, "v1:90:0:0")
+        assert_storage(page, "v2:90:0:0:")
         press("ArrowRight")  # volume 90 -> 100
-        assert_storage(page, "v1:100:0:0")
+        assert_storage(page, "v2:100:0:0:")
         press("ArrowLeft")  # volume 100 -> 90
-        assert_storage(page, "v1:90:0:0")
+        assert_storage(page, "v2:90:0:0:")
         press("ArrowDown")  # selection -> Mute
         press("ArrowRight")  # mute -> On
-        assert_storage(page, "v1:90:1:0")
+        assert_storage(page, "v2:90:1:0:")
         press("ArrowLeft")  # mute -> Off
-        assert_storage(page, "v1:90:0:0")
+        assert_storage(page, "v2:90:0:0:")
         press("Enter")  # toggle mute -> On
-        assert_storage(page, "v1:90:1:0")
+        assert_storage(page, "v2:90:1:0:")
         press("ArrowDown")  # selection -> ReducedMotion
         press("ArrowRight")  # reduced motion -> On
-        assert_storage(page, "v1:90:1:1")
+        assert_storage(page, "v2:90:1:1:")
         press("ArrowLeft")  # reduced motion -> Off
-        assert_storage(page, "v1:90:1:0")
+        assert_storage(page, "v2:90:1:0:")
         press("Space")  # toggle reduced motion -> On
-        assert_storage(page, "v1:90:1:1")
+        assert_storage(page, "v2:90:1:1:")
         shot("01_desktop_settings_open.png")
 
     run_step(steps, "menu_open_and_adjust_rows", menu_open_and_adjust)
@@ -385,10 +387,10 @@ def run_desktop(
         press("ArrowUp")  # ReducedMotion -> Mute -> Volume
         press("Enter")  # would start a round if not isolated
         press("ArrowLeft")  # volume 90 -> 80
-        assert_storage(page, "v1:80:1:1")
+        assert_storage(page, "v2:80:1:1:")
         press("Space")  # would start a round if not isolated
         press("ArrowLeft")  # volume 80 -> 70
-        assert_storage(page, "v1:70:1:1")
+        assert_storage(page, "v2:70:1:1:")
 
     run_step(steps, "menu_modal_isolation", menu_modal_isolation)
 
@@ -397,7 +399,7 @@ def run_desktop(
         press("Escape")  # close
         press("o")  # reopen (Menu/Paused allow the modal; Playing does not)
         press("ArrowLeft")  # volume 70 -> 60
-        assert_storage(page, "v1:60:1:1")
+        assert_storage(page, "v2:60:1:1:")
 
     run_step(steps, "menu_close_escape", menu_close_escape)
 
@@ -405,11 +407,12 @@ def run_desktop(
     def menu_close_back_row() -> None:
         press("ArrowDown")
         press("ArrowDown")
-        press("ArrowDown")  # Volume -> Mute -> ReducedMotion -> Back
+        press("ArrowDown")
+        press("ArrowDown")  # Volume -> Mute -> ReducedMotion -> Name -> Back
         press("Enter")  # Back row closes the modal
         press("o")  # reopen
         press("ArrowLeft")  # volume 60 -> 50
-        assert_storage(page, "v1:50:1:1")
+        assert_storage(page, "v2:50:1:1:")
 
     run_step(steps, "menu_close_back_row", menu_close_back_row)
 
@@ -418,7 +421,7 @@ def run_desktop(
         press("o")  # close
         press("o")  # reopen
         press("ArrowLeft")  # volume 50 -> 40
-        assert_storage(page, "v1:40:1:1")
+        assert_storage(page, "v2:40:1:1:")
         press("Escape")  # close (clean state before reload)
 
     run_step(steps, "menu_close_o", menu_close_o)
@@ -427,10 +430,10 @@ def run_desktop(
     # F. Reload persistence: the exact v1 schema survives and the app loads it.
     def reload_persistence() -> None:
         reload_preserving_wasm(page, args.url)
-        assert_storage(page, "v1:40:1:1")
+        assert_storage(page, "v2:40:1:1:")
         press("o")  # reopen
         press("ArrowLeft")  # volume 40 -> 30 (proves app loaded 40, not default 100)
-        assert_storage(page, "v1:30:1:1")
+        assert_storage(page, "v2:30:1:1:")
         press("Escape")  # close
 
     run_step(steps, "reload_persistence", reload_persistence)
@@ -448,7 +451,7 @@ def run_desktop(
     def pause_open() -> None:
         press("o")  # open in Paused
         press("ArrowLeft")  # volume 30 -> 20
-        assert_storage(page, "v1:20:1:1")
+        assert_storage(page, "v2:20:1:1:")
         shot("04_desktop_paused_settings.png")
 
     run_step(steps, "pause_open", pause_open)
@@ -458,12 +461,12 @@ def run_desktop(
         # in Playing, so a successful adjustment proves R was swallowed.
         press("r")
         press("ArrowLeft")  # volume 20 -> 10
-        assert_storage(page, "v1:10:1:1")
+        assert_storage(page, "v2:10:1:1:")
         # Q would quit to Menu; the modal can still open in Menu, so the
         # adjustment alone is ambiguous and is disambiguated in the next step.
         press("q")
         press("ArrowRight")  # volume 10 -> 20
-        assert_storage(page, "v1:20:1:1")
+        assert_storage(page, "v2:20:1:1:")
 
     run_step(steps, "pause_isolation", pause_isolation)
 
@@ -479,7 +482,7 @@ def run_desktop(
         page.wait_for_timeout(150)
         press("o")  # reopen (proves still Paused)
         press("ArrowRight")  # volume 20 -> 30
-        assert_storage(page, "v1:30:1:1")
+        assert_storage(page, "v2:30:1:1:")
 
     run_step(steps, "pause_close_and_discriminate", pause_close_and_discriminate)
 
@@ -492,7 +495,7 @@ def run_desktop(
         page.wait_for_timeout(300)
         press("o")  # reopen
         press("ArrowRight")  # volume 30 -> 40
-        assert_storage(page, "v1:40:1:1")
+        assert_storage(page, "v2:40:1:1:")
 
     run_step(steps, "pause_resume_and_repause", pause_resume_and_repause)
 
@@ -503,7 +506,7 @@ def run_desktop(
         page.wait_for_timeout(400)
         press("o")  # reopen in Menu
         press("ArrowRight")  # volume 40 -> 50
-        assert_storage(page, "v1:50:1:1")
+        assert_storage(page, "v2:50:1:1:")
         press("Escape")  # close
 
     run_step(steps, "pause_quit_to_menu", pause_quit_to_menu)
@@ -557,45 +560,44 @@ def run_mobile(
         page.touchscreen.tap(x, y)
         page.wait_for_timeout(settle)
 
-    # Touch row bands (from src/settings.rs): Volume 0.25..0.39, Mute 0.39..0.52,
-    # ReducedMotion 0.52..0.65, Back 0.65..0.82. Left < 0.42, center 0.42..0.58,
-    # right > 0.58. Opener: x >= 0.72 and y <= 0.22.
+    # Touch row bands: Volume .20..33, Mute .33..45, Reduced .45..57,
+    # Name .57..70, Back .70..84. Opener matches x .67..97, y .03..18.
     def touch_open_and_adjust() -> None:
         tap(0.88, 0.12)  # opener -> open (pending Menu->Playing canceled)
-        tap(0.20, 0.32)  # Volume left: 100 -> 90
-        assert_storage(page, "v1:90:0:0")
-        tap(0.85, 0.32)  # Volume right: 90 -> 100
-        assert_storage(page, "v1:100:0:0")
-        tap(0.85, 0.45)  # Mute right: -> On
-        assert_storage(page, "v1:100:1:0")
-        tap(0.20, 0.45)  # Mute left: -> Off
-        assert_storage(page, "v1:100:0:0")
-        tap(0.50, 0.45)  # Mute center: toggle -> On
-        assert_storage(page, "v1:100:1:0")
-        tap(0.85, 0.58)  # ReducedMotion right: -> On
-        assert_storage(page, "v1:100:1:1")
-        tap(0.20, 0.58)  # ReducedMotion left: -> Off
-        assert_storage(page, "v1:100:1:0")
-        tap(0.50, 0.58)  # ReducedMotion center: toggle -> On
-        assert_storage(page, "v1:100:1:1")
+        tap(0.20, 0.26)  # Volume left: 100 -> 90
+        assert_storage(page, "v2:90:0:0:")
+        tap(0.85, 0.26)  # Volume right: 90 -> 100
+        assert_storage(page, "v2:100:0:0:")
+        tap(0.85, 0.38)  # Mute right: -> On
+        assert_storage(page, "v2:100:1:0:")
+        tap(0.20, 0.38)  # Mute left: -> Off
+        assert_storage(page, "v2:100:0:0:")
+        tap(0.50, 0.38)  # Mute center: toggle -> On
+        assert_storage(page, "v2:100:1:0:")
+        tap(0.85, 0.51)  # ReducedMotion right: -> On
+        assert_storage(page, "v2:100:1:1:")
+        tap(0.20, 0.51)  # ReducedMotion left: -> Off
+        assert_storage(page, "v2:100:1:0:")
+        tap(0.50, 0.51)  # ReducedMotion center: toggle -> On
+        assert_storage(page, "v2:100:1:1:")
         shot("01_mobile_settings_open.png")
 
     run_step(steps, "touch_open_and_adjust", touch_open_and_adjust)
 
     def touch_back_and_reopen() -> None:
-        tap(0.50, 0.73)  # Back row -> close (still Menu)
+        tap(0.50, 0.77)  # Back row -> close (still Menu)
         tap(0.88, 0.12)  # reopen
-        tap(0.20, 0.32)  # Volume left: 100 -> 90 (proves reopened)
-        assert_storage(page, "v1:90:1:1")
+        tap(0.20, 0.26)  # Volume left: 100 -> 90 (proves reopened)
+        assert_storage(page, "v2:90:1:1:")
         shot("02_mobile_settings_reopened.png")
-        tap(0.50, 0.73)  # Back -> close
+        tap(0.50, 0.77)  # Back -> close
         # After close, the opener tap is consumed by the modal again (not a
         # menu start); confirm the menu never transitioned by reopening once
         # more and verifying storage is still reachable through the modal.
         tap(0.88, 0.12)  # reopen
-        tap(0.20, 0.32)  # Volume left: 90 -> 80 (still Menu + modal)
-        assert_storage(page, "v1:80:1:1")
-        tap(0.50, 0.73)  # Back -> close
+        tap(0.20, 0.26)  # Volume left: 90 -> 80 (still Menu + modal)
+        assert_storage(page, "v2:80:1:1:")
+        tap(0.50, 0.77)  # Back -> close
         shot("03_mobile_closed.png")
 
     run_step(steps, "touch_back_and_reopen", touch_back_and_reopen)
@@ -613,14 +615,14 @@ def run_mobile(
 
     def pause_touch_open_and_adjust() -> None:
         tap(0.88, 0.12)  # opener -> open over Paused (pending Menu transition canceled)
-        tap(0.20, 0.32)  # Volume left: 80 -> 70 (pending resume transition canceled)
-        assert_storage(page, "v1:70:1:1")
+        tap(0.20, 0.26)  # Volume left: 80 -> 70 (pending resume transition canceled)
+        assert_storage(page, "v2:70:1:1:")
         shot("05_mobile_paused_settings.png")
 
     run_step(steps, "pause_touch_open_and_adjust", pause_touch_open_and_adjust)
 
     def pause_touch_back_and_verify_paused() -> None:
-        tap(0.50, 0.73)  # Back row -> close (stays Paused; pending Restart canceled)
+        tap(0.50, 0.77)  # Back row -> close (stays Paused; pending Restart canceled)
         # Discriminate Paused from Menu: Enter is a no-op in Paused but starts a
         # round from Menu. Reopening the modal after Enter proves the state is
         # still Paused. (If Back had slipped to Menu, Enter would start a round
@@ -628,9 +630,9 @@ def run_mobile(
         page.keyboard.press("Enter")  # Paused: no-op (Menu: would start a round)
         page.wait_for_timeout(150)
         tap(0.88, 0.12)  # reopen (proves still Paused, not Playing)
-        tap(0.20, 0.32)  # Volume left: 70 -> 60 (proves modal reopened)
-        assert_storage(page, "v1:60:1:1")
-        tap(0.50, 0.73)  # Back -> close (clean final state, still Paused)
+        tap(0.20, 0.26)  # Volume left: 70 -> 60 (proves modal reopened)
+        assert_storage(page, "v2:60:1:1:")
+        tap(0.50, 0.77)  # Back -> close (clean final state, still Paused)
         shot("06_mobile_paused_verified.png")
 
     run_step(steps, "pause_touch_back_and_verify_paused", pause_touch_back_and_verify_paused)

@@ -13,7 +13,7 @@ The chicken-crossing riddle is reversed: **you are the traffic**. Race through a
 Each fresh round begins with a 3-2-1 countdown, followed by **60 seconds** of active play.
 
 - Hit chickens to score and keep chaining chicken or coin pickups to build a timed combo multiplier, up to 5x.
-- Collect ordinary coins for score and **+1.5 seconds** each, with the round clock capped at 90 seconds.
+- Collect ordinary coins for score and **+1.5 seconds** each (coins cap the clock at 90 seconds; Time power-ups can raise it to the 99-second absolute cap).
 - Avoid pedestrians, cows, and moose. Hitting a critter costs health and removes chicken-score points.
 - Buildings, roadside obstacles, and moving traffic are solid. Hard impacts damage the car; reaching zero health ends the round.
 - Difficulty rises during the round, adding and accelerating oncoming traffic.
@@ -41,6 +41,8 @@ Every new round cycles through one of five road conditions:
 | `S` or `↓` | Reverse |
 | `A` / `D` or `←` / `→` | Steer left / right |
 | `Space` | Brake while driving |
+| `Shift` | Hold the handbrake to drift through tighter turns and leave tire marks |
+| `O` or click/tap `⚙ SETTINGS` | Open Settings from Menu or Pause |
 | `Esc` | Pause or resume; return to the menu from game over |
 | `R` | Restart from pause or game over |
 | `Q` | Return to the menu from pause or game over |

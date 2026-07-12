@@ -62,7 +62,9 @@ impl Plugin for TouchPlugin {
                 OnExit(GameState::Paused),
                 despawn_marker::<TouchGuidanceRoot>,
             )
-            .add_systems(OnEnter(GameState::GameOver), spawn_gameover_guidance)
+            // GameOver touch guidance is owned by LeaderboardPlugin while
+            // initials/submission controls are active; omitting the old broad
+            // tap-zone banner avoids showing actions that are temporarily gated.
             .add_systems(
                 OnExit(GameState::GameOver),
                 despawn_marker::<TouchGuidanceRoot>,
@@ -347,14 +349,6 @@ fn spawn_paused_guidance(mut commands: Commands, active: Res<TouchControlsActive
         &mut commands,
         active.0,
         "LEFT: RESUME     MIDDLE: RESTART     RIGHT: MENU",
-    );
-}
-
-fn spawn_gameover_guidance(mut commands: Commands, active: Res<TouchControlsActive>) {
-    spawn_guidance(
-        &mut commands,
-        active.0,
-        "LEFT 2/3: PLAY AGAIN          RIGHT 1/3: MENU",
     );
 }
 

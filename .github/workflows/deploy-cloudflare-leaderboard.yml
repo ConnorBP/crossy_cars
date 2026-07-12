@@ -1,0 +1,344 @@
+name: Deploy Cloudflare Leaderboard Worker
+
+# Deploys the Roady Car leaderboard backend (a Cloudflare Worker with D1,
+# Turnstile, rate-limiting, and HMAC-gated score submission) described in
+# LEADERBOARD_ARCHITECTURE.md. This is intentionally a SEPARATE workflow from
+# deploy-cloudflare-pages.yml: the static site (Pages) and the leaderboard API
+# (Workers + D1) use least-privilege tokens and independent rollout cadences.
+#
+# Pipeline per run:
+#   1. Install leaderboard deps, typecheck, and run unit tests.
+#   2. Verify every required GitHub variable/secret is configured; fail with
+#      actionable setup diagnostics if anything is missing. Secret VALUES are
+#      never printed — only presence is checked.
+#   3. Inject the real D1 database_id (from a GitHub variable) into the CI
+#      checkout copy of leaderboard/wrangler.toml. The committed file keeps a
+#      placeholder id and is never modified by this workflow.
+#   4. Apply pending D1 migrations to the remote database.
+#   5. Deploy the Worker (wrangler deploy creates the Worker on first run and
+#      updates it thereafter, including D1 and rate-limit bindings).
+#   6. Install Worker runtime secrets via `wrangler secret put`, piping each
+#      value over stdin so it is never echoed or logged.
+#   7. Smoke-test GET /healthz and GET /v1/leaderboard against the deployed URL.
+#
+# See DEPLOYMENT.md for the exact GitHub variables, secrets, API-token
+# permissions, and one-time Cloudflare setup (D1 database, Turnstile widget).
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - 'leaderboard/**'
+      - '.github/workflows/deploy-cloudflare-leaderboard.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cloudflare-leaderboard-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: leaderboard/package-lock.json
+
+      - name: Install leaderboard dependencies
+        run: |
+          cd leaderboard
+          npm ci
+
+      - name: Typecheck
+        run: |
+          cd leaderboard
+          npm run typecheck
+
+      - name: Run unit tests
+        run: |
+          cd leaderboard
+          npm test
+
+      # ────────────────────────────────────────────────────────────────────
+      # Prerequisite verification.
+      #
+      # The D1 database id, Turnstile secret, and other Cloudflare resources
+      # may not exist yet on a fresh repo. This step checks that every required
+      # GitHub variable and secret is configured and fails with clear, actionable
+      # diagnostics if any are missing. Secret VALUES are NEVER printed — only
+      # their presence (non-empty) is reported.
+      # ────────────────────────────────────────────────────────────────────
+      - name: Verify deployment prerequisites
+        env:
+          # GitHub variables (non-secret).
+          CLOUDFLARE_D1_DATABASE_ID: ${{ vars.CLOUDFLARE_D1_DATABASE_ID }}
+          LEADERBOARD_BASE_URL: ${{ vars.LEADERBOARD_BASE_URL }}
+          # GitHub secrets — exposed to the shell only as empty/non-empty
+          # values; the step never prints them.
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          LB_SESSION_HMAC_KEY: ${{ secrets.LB_SESSION_HMAC_KEY }}
+          LB_IP_HASH_PEPPER: ${{ secrets.LB_IP_HASH_PEPPER }}
+          LB_ADMIN_TOKEN: ${{ secrets.LB_ADMIN_TOKEN }}
+          LB_TURNSTILE_SECRET: ${{ secrets.LB_TURNSTILE_SECRET }}
+          ROADY_LEADERBOARD_CLIENT_HMAC_KEY: ${{ secrets.ROADY_LEADERBOARD_CLIENT_HMAC_KEY }}
+        run: |
+          set +e
+          missing=0
+          echo "::group::Leaderboard deployment prerequisite checks"
+
+          # --- GitHub variables -----------------------------------------
+          # D1 database id. The committed leaderboard/wrangler.toml carries a
+          # placeholder id; the operator must create the database once and
+          # store the real id here.
+          if [ -z "$CLOUDFLARE_D1_DATABASE_ID" ] || \
+             [ "$CLOUDFLARE_D1_DATABASE_ID" = "00000000-0000-0000-0000-000000000000" ]; then
+            echo "::error::GitHub variable CLOUDFLARE_D1_DATABASE_ID is missing or still the placeholder."
+            echo "::error::Create the D1 database once (local auth, not in CI):"
+            echo "::error::    cd leaderboard && npx wrangler@4 d1 create roady_leaderboard"
+            echo "::error::Wrangler prints a database_id. Add it as a repository VARIABLE:"
+            echo "::error::    Settings → Secrets and variables → Actions → Variables → New variable"
+            echo "::error::    Name:  CLOUDFLARE_D1_DATABASE_ID"
+            echo "::error::    Value: <the printed database_id>"
+            missing=1
+          else
+            echo "OK   variable CLOUDFLARE_D1_DATABASE_ID is set (not the placeholder)."
+          fi
+
+          # Deployed Worker base URL, used by the smoke test.
+          if [ -z "$LEADERBOARD_BASE_URL" ]; then
+            echo "::error::GitHub variable LEADERBOARD_BASE_URL is not set."
+            echo "::error::Set it to the deployed Worker URL used for the post-deploy smoke test, e.g."
+            echo "::error::    https://roady-leaderboard.<account-subdomain>.workers.dev"
+            echo "::error::or your custom domain / Workers route. Find the workers.dev subdomain in"
+            echo "::error::the Cloudflare dashboard (Workers & Pages → the Worker → Triggers)."
+            missing=1
+          else
+            echo "OK   variable LEADERBOARD_BASE_URL is set."
+          fi
+
+          # --- GitHub secrets (presence only; values never printed) -------
+          check_secret() {
+            local name="$1" val="$2"
+            if [ -z "$val" ]; then
+              echo "::error::GitHub secret $name is not set."
+              missing=1
+            else
+              echo "OK   secret  $name is present."
+            fi
+          }
+          check_secret CLOUDFLARE_API_TOKEN             "$CLOUDFLARE_API_TOKEN"
+          check_secret CLOUDFLARE_ACCOUNT_ID            "$CLOUDFLARE_ACCOUNT_ID"
+          check_secret LB_SESSION_HMAC_KEY              "$LB_SESSION_HMAC_KEY"
+          check_secret LB_IP_HASH_PEPPER                "$LB_IP_HASH_PEPPER"
+          check_secret LB_ADMIN_TOKEN                   "$LB_ADMIN_TOKEN"
+          check_secret LB_TURNSTILE_SECRET              "$LB_TURNSTILE_SECRET"
+          check_secret ROADY_LEADERBOARD_CLIENT_HMAC_KEY "$ROADY_LEADERBOARD_CLIENT_HMAC_KEY"
+
+          echo "::endgroup::"
+
+          if [ "$missing" -ne 0 ]; then
+            echo ""
+            echo "::error::One or more prerequisites are not configured. Deployment aborted."
+            echo "::error::"
+            echo "::error::Required repository VARIABLES (Settings → Secrets and variables → Actions → Variables):"
+            echo "::error::  • CLOUDFLARE_D1_DATABASE_ID  — from `npx wrangler@4 d1 create roady_leaderboard`"
+            echo "::error::  • LEADERBOARD_BASE_URL       — deployed Worker URL for smoke tests"
+            echo "::error::"
+            echo "::error::Required repository SECRETS (Settings → Secrets and variables → Actions → Secrets):"
+            echo "::error::  • CLOUDFLARE_API_TOKEN               — Workers Scripts:Edit + D1:Edit + Account Settings:Read"
+            echo "::error::  • CLOUDFLARE_ACCOUNT_ID             — Cloudflare account id"
+            echo "::error::  • LB_SESSION_HMAC_KEY               — >=32 random bytes (base64), Worker session proof HMAC"
+            echo "::error::  • LB_IP_HASH_PEPPER                — >=32 random bytes (base64), IP hash pepper"
+            echo "::error::  • LB_ADMIN_TOKEN                   — random bearer token for moderation endpoints"
+            echo "::error::  • LB_TURNSTILE_SECRET              — Cloudflare Turnstile secret key for the widget"
+            echo "::error::  • ROADY_LEADERBOARD_CLIENT_HMAC_KEY — >=32 random bytes; also injected into the WASM build"
+            echo "::error::    (installed into the Worker as LB_CLIENT_HMAC_KEY; the two must be identical)"
+            echo "::error::"
+            echo "::error::One-time Cloudflare setup also required:"
+            echo "::error::  • D1 database `roady_leaderboard` (see CLOUDFLARE_D1_DATABASE_ID above)"
+            echo "::error::  • Turnstile widget (dashboard → Turnstile → add site) → copy the secret key into LB_TURNSTILE_SECRET"
+            echo "::error::  • Workers subdomain or custom route so LEADERBOARD_BASE_URL resolves"
+            echo "::error::"
+            echo "::error::See DEPLOYMENT.md for the full walkthrough."
+            exit 1
+          fi
+
+          echo "All leaderboard deployment prerequisites are configured."
+
+      # ────────────────────────────────────────────────────────────────────
+      # Inject the real D1 database id into the CI copy of wrangler.toml.
+      # The committed file keeps the placeholder; only the runner's checkout
+      # is patched, so no source changes are needed and the repo stays
+      # decoupled from a specific Cloudflare account.
+      # ────────────────────────────────────────────────────────────────────
+      - name: Inject D1 database id into wrangler config
+        env:
+          CLOUDFLARE_D1_DATABASE_ID: ${{ vars.CLOUDFLARE_D1_DATABASE_ID }}
+        run: |
+          cd leaderboard
+          placeholder="00000000-0000-0000-0000-000000000000"
+          if ! grep -q "$placeholder" wrangler.toml; then
+            echo "::error::Expected D1 placeholder id not found in leaderboard/wrangler.toml."
+            echo "::error::The committed config should carry database_id = \"$placeholder\"."
+            echo "::error::This workflow replaces it at deploy time with CLOUDFLARE_D1_DATABASE_ID."
+            exit 1
+          fi
+          # In-place substitute deployment values in the CI copy only.
+          sed -i "s/$placeholder/$CLOUDFLARE_D1_DATABASE_ID/" wrangler.toml
+          sed -i "s/BUILD = \"dev\"/BUILD = \"${GITHUB_SHA}\"/" wrangler.toml
+          # Verify the injection landed. A D1 id is not secret, but we avoid
+          # printing it to keep CI logs tidy.
+          if grep -q "database_id = \"$CLOUDFLARE_D1_DATABASE_ID\"" wrangler.toml; then
+            echo "OK   D1 database_id injected into CI wrangler.toml."
+          else
+            echo "::error::Failed to inject D1 database_id into wrangler.toml."
+            exit 1
+          fi
+          if grep -q "BUILD = \"${GITHUB_SHA}\"" wrangler.toml; then
+            echo "OK   production BUILD identifier injected."
+          else
+            echo "::error::Failed to replace local BUILD=dev before production deploy."
+            exit 1
+          fi
+
+      # ────────────────────────────────────────────────────────────────────
+      # Apply pending D1 migrations to the remote database. Wrangler tracks
+      # applied migrations in a d1_migrations table inside the database, so
+      # this is idempotent and only runs new migration files.
+      # ────────────────────────────────────────────────────────────────────
+      - name: Apply D1 migrations
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          cd leaderboard
+          # printf (not `yes`) supplies the single confirmation answer in CI.
+          # `yes` would keep writing until SIGPIPE, and under the runner's
+          # default `bash -eo pipefail` that non-zero exit would fail the step
+          # even when wrangler succeeded. printf writes 2 bytes, exits 0, and
+          # cleanly answers the one "Ok to proceed? (y/N)" prompt.
+          printf 'y\n' | npx wrangler@4 d1 migrations apply roady_leaderboard --remote
+
+      # ────────────────────────────────────────────────────────────────────
+      # Deploy the Worker. `wrangler deploy` creates the Worker on first run
+      # and updates it on subsequent runs, including the D1 binding and the
+      # rate-limit bindings declared under [[unsafe.bindings]] in wrangler.toml.
+      # ────────────────────────────────────────────────────────────────────
+      - name: Deploy Worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          cd leaderboard
+          npx wrangler@4 deploy
+
+      # ────────────────────────────────────────────────────────────────────
+      # Install Worker runtime secrets. Each value is piped over stdin to
+      # `wrangler secret put`, which writes it to the Worker's secret store
+      # and never echoes it back. GitHub Actions also masks referenced
+      # `secrets.*` values in logs. Re-running this step is idempotent and
+      # keeps the Worker in sync with rotated GitHub secrets.
+      #
+      # ROADY_LEADERBOARD_CLIENT_HMAC_KEY is installed under the Worker binding
+      # name LB_CLIENT_HMAC_KEY so the nuisance client-HMAC key is identical
+      # in the deployed WASM and the Worker.
+      # ────────────────────────────────────────────────────────────────────
+      - name: Install Worker runtime secrets
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          LB_SESSION_HMAC_KEY: ${{ secrets.LB_SESSION_HMAC_KEY }}
+          LB_IP_HASH_PEPPER: ${{ secrets.LB_IP_HASH_PEPPER }}
+          LB_ADMIN_TOKEN: ${{ secrets.LB_ADMIN_TOKEN }}
+          LB_TURNSTILE_SECRET: ${{ secrets.LB_TURNSTILE_SECRET }}
+          LB_CLIENT_HMAC_KEY: ${{ secrets.ROADY_LEADERBOARD_CLIENT_HMAC_KEY }}
+        run: |
+          cd leaderboard
+          put_secret() {
+            local name="$1" var="$2"
+            if [ -z "$var" ]; then
+              echo "::error::Refusing to install empty secret $name."
+              exit 1
+            fi
+            printf '%s' "$var" | npx wrangler@4 secret put "$name"
+            echo "OK   installed secret $name"
+          }
+          put_secret LB_SESSION_HMAC_KEY  "$LB_SESSION_HMAC_KEY"
+          put_secret LB_IP_HASH_PEPPER    "$LB_IP_HASH_PEPPER"
+          put_secret LB_ADMIN_TOKEN       "$LB_ADMIN_TOKEN"
+          put_secret LB_TURNSTILE_SECRET  "$LB_TURNSTILE_SECRET"
+          put_secret LB_CLIENT_HMAC_KEY   "$LB_CLIENT_HMAC_KEY"
+
+      # ────────────────────────────────────────────────────────────────────
+      # Smoke test the two endpoints that should work immediately after a
+      # deploy + migrate + secrets run:
+      #   • GET /healthz        — no secrets/D1 required; returns ok/build/time.
+      #   • GET /v1/leaderboard — needs the D1 binding + migrations; no HMAC
+      #     secrets required for public reads.
+      # The session/score endpoints are not exercised here because they need a
+      # valid Turnstile token and client HMAC signature, which a CI runner
+      # cannot produce without a browser.
+      # ────────────────────────────────────────────────────────────────────
+      - name: Smoke test deployed endpoints
+        env:
+          LEADERBOARD_BASE_URL: ${{ vars.LEADERBOARD_BASE_URL }}
+        run: |
+          base="${LEADERBOARD_BASE_URL%/}"
+          echo "Smoke testing endpoints at $base"
+
+          # --- GET /healthz -------------------------------------------------
+          set +e
+          health_code=$(curl -sS -o /tmp/health.json -w '%{http_code}' -m 20 "$base/healthz")
+          health_body=$(cat /tmp/health.json 2>/dev/null)
+          set -e
+          echo "GET /healthz -> HTTP $health_code"
+          echo "  body: $health_body"
+          if [ "$health_code" != "200" ]; then
+            echo "::error::GET /healthz returned HTTP $health_code, expected 200."
+            echo "::error::The Worker may not be deployed, LEADERBOARD_BASE_URL may be wrong,"
+            echo "::error::or the Worker threw on startup. Check `wrangler tail` and the deploy step."
+            exit 1
+          fi
+          if ! echo "$health_body" | grep -q '"ok"[[:space:]]*:[[:space:]]*true'; then
+            echo "::error::/healthz body did not contain \"ok\": true."
+            exit 1
+          fi
+          echo "OK   /healthz is healthy."
+
+          # --- GET /v1/leaderboard?limit=1 ---------------------------------
+          set +e
+          board_code=$(curl -sS -o /tmp/board.json -w '%{http_code}' -m 20 "$base/v1/leaderboard?limit=1")
+          board_body=$(cat /tmp/board.json 2>/dev/null)
+          set -e
+          echo "GET /v1/leaderboard?limit=1 -> HTTP $board_code"
+          echo "  body: $board_body"
+          if [ "$board_code" != "200" ]; then
+            echo "::error::GET /v1/leaderboard returned HTTP $board_code, expected 200."
+            echo "::error::The D1 binding may be missing, migrations may not have applied,"
+            echo "::error::or the DB binding name in wrangler.toml is wrong. Check:"
+            echo "::error::  • `wrangler d1 list` shows roady_leaderboard"
+            echo "::error::  • leaderboard/wrangler.toml [[d1_databases]] binding = \"DB\""
+            echo "::error::  • the migrations step above reported success"
+            echo "::error::  • `wrangler tail` for runtime errors"
+            exit 1
+          fi
+          if ! echo "$board_body" | grep -q '"entries"'; then
+            echo "::error::/v1/leaderboard body did not contain an \"entries\" array."
+            exit 1
+          fi
+          echo "OK   /v1/leaderboard returns an entries array."
+
+          echo ""
+          echo "Smoke test passed: /healthz and /v1/leaderboard both responded correctly."

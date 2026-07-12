@@ -268,6 +268,10 @@ struct ComboPresentation {
 // Plugin
 // ---------------------------------------------------------------------------
 
+/// Ordering point for systems that need the final combo value for this frame.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ComboUpdateSet;
+
 pub struct CombosPlugin;
 
 impl Plugin for CombosPlugin {
@@ -292,6 +296,7 @@ impl Plugin for CombosPlugin {
                 // the UI reflects the final state for this frame.
                 (register_hit, tick_combo, update_combo_ui)
                     .chain()
+                    .in_set(ComboUpdateSet)
                     .run_if(in_state(GameState::Playing)),
             );
     }

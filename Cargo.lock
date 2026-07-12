@@ -1943,6 +1943,11 @@ name = "car_game_ai"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "js-sys",
+ "serde",
+ "serde_json",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
  "web-sys",
 ]
 

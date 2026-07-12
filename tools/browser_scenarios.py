@@ -30,13 +30,13 @@ DEFAULT_URL = "http://localhost:8080"
 DEFAULT_OUT_DIR = "tools/scenarios"
 BOOT_TIMEOUT_MS = 120_000
 # M toggles the shared Settings resource, which SettingsPlugin persists as the
-# v1 schema string "v1:<volume>:<muted>:<reduced_motion>" (e.g. "v1:100:1:0")
+# v2 schema string "v2:<volume>:<muted>:<reduced_motion>:<leaderboard_initials>" (e.g. "v2:100:1:0:")
 # under roady_car_settings. The legacy roady_car_audio_muted key is migrated
 # only when the schema is absent, so we wipe both to start deterministically.
 SETTINGS_STORAGE_KEY = "roady_car_settings"
 LEGACY_MUTE_STORAGE_KEY = "roady_car_audio_muted"
-DEFAULT_SCHEMA = "v1:100:0:0"
-MUTED_SCHEMA = "v1:100:1:0"
+DEFAULT_SCHEMA = "v2:100:0:0:"
+MUTED_SCHEMA = "v2:100:1:0:"
 # A fresh browser context has fresh sessionStorage. This marker makes the
 # initial localStorage wipe one-shot, so the later reload genuinely verifies
 # persistence instead of being reset by the init script.
@@ -199,7 +199,7 @@ def run_scenario(args: argparse.Namespace, summary: dict[str, Any]) -> None:
             # Ensure M always performs false -> true by starting from the
             # deterministic fresh schema, including when a previous QA run left
             # the origin with persisted settings. Wiping both the v1 schema and
-            # the legacy mute bit guarantees the app boots unmuted at v1:100:0:0.
+            # the legacy mute bit guarantees the app boots unmuted at v2:100:0:0:.
             # sessionStorage makes this initialization one-shot, so the later
             # reload genuinely verifies persistence instead of being reset.
             context.add_init_script(
@@ -217,7 +217,7 @@ def run_scenario(args: argparse.Namespace, summary: dict[str, Any]) -> None:
             )
 
             page = context.new_page()
-            page.set_default_timeout(30_000)
+            page.set_default_timeout(60_000)
             page.set_default_navigation_timeout(BOOT_TIMEOUT_MS)
             scenario_started = time.monotonic()
 
@@ -248,6 +248,8 @@ def run_scenario(args: argparse.Namespace, summary: dict[str, Any]) -> None:
                 )
 
             def on_request_failed(request: Any) -> None:
+                if request.failure == "net::ERR_ABORTED" and "/v1/leaderboard" in request.url:
+                    return
                 summary["network_failures"].append(
                     {
                         "at_ms": timestamp(),

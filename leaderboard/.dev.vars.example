@@ -1,0 +1,31 @@
+# ────────────────────────────────────────────────────────────────────────────
+# Local development secrets for `wrangler dev`.
+#
+# Copy this file to `.dev.vars` and fill in RANDOM values for local testing.
+# NEVER commit a real `.dev.vars`. NEVER put production secrets here.
+# These keys are NUISANCE FRICTION ONLY (see LEADERBOARD_ARCHITECTURE.md §1):
+# the client HMAC key is embedded in public WASM and is recoverable; it only
+# deters trivial unsigned API calls.
+# ────────────────────────────────────────────────────────────────────────────
+
+# HMAC-SHA-256 key for Worker-issued session proofs. At least 32 random bytes,
+# base64-encoded. Generate with: openssl rand -base64 32
+LB_SESSION_HMAC_KEY=REPLACE_WITH_BASE64_32_RANDOM_BYTES_LOCAL_ONLY
+
+# Pepper mixed with the client IP before SHA-256 hashing for ip_hash storage.
+# At least 32 random bytes, base64-encoded. Generate with: openssl rand -base64 32
+LB_IP_HASH_PEPPER=REPLACE_WITH_BASE64_32_RANDOM_BYTES_LOCAL_ONLY
+
+# Bearer token for moderation endpoints. Generate with: openssl rand -hex 32
+LB_ADMIN_TOKEN=REPLACE_WITH_RANDOM_LOCAL_ONLY
+
+# Cloudflare Turnstile secret key (test key 1x0000000000000000000000000000000AA
+# always validates; use it for local dev only). Production value comes from the
+# Cloudflare dashboard Turnstile widget settings.
+LB_TURNSTILE_SECRET=1x0000000000000000000000000000000AA
+
+# Client submission HMAC key. MUST match the production Rust/WASM build secret
+# ROADY_LEADERBOARD_CLIENT_HMAC_KEY. For local dev any value works as long as
+# the client uses the same one. Production value is installed via
+# `wrangler secret put LB_CLIENT_HMAC_KEY` and never written to source.
+LB_CLIENT_HMAC_KEY=REPLACE_WITH_LOCAL_DEV_KEY_ONLY_NOT_A_REAL_SECRET
