@@ -15,8 +15,9 @@ use bevy::prelude::*;
 use bevy::color::LinearRgba;
 
 use crate::car::Car;
+use crate::game::SpawnSet;
 use crate::game::events::CoinCollected;
-use crate::game::resources::{Score, TimeLeft};
+use crate::game::resources::{RoundActive, Score, TimeLeft};
 use crate::game::state::GameState;
 use crate::palette;
 use crate::textures::TextureAssets;
@@ -100,7 +101,15 @@ impl Plugin for WorldPlugin {
                     .chain()
                     .run_if(in_state(GameState::Playing)),
             )
-            // Recycle trailing chunks to the front as the car advances.
+            // Re-center the chunk pool on the car's spawn at the start of each
+            // fresh round (skips on resume from Paused via RoundActive). Runs in
+            // SpawnSet so it's before reset_run, which zeroes the car to origin.
+            .add_systems(
+                OnEnter(GameState::Playing),
+                reset_chunks.in_set(SpawnSet),
+            )
+            // Recycle chunks that fall off either end of the camera view to the
+            // opposite end, keeping a continuous window of chunks around the car.
             .add_systems(
                 Update,
                 recycle_chunks.run_if(in_state(GameState::Playing)),
@@ -475,7 +484,7 @@ fn recycle_chunks(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     textures: Res<TextureAssets>,
-    car: Query<&Transform, With<Car>>,
+    car: Query<&Transform, (With<Car>, Without<Chunk>)>,
     chunks: Query<(Entity, &Chunk, &Transform)>,
 ) {
     let Ok(car_t) = car.single() else {
@@ -484,52 +493,123 @@ fn recycle_chunks(
     let length = cfg.length;
     let count = cfg.count;
     let span = count as f32 * length;
+    // Don't recycle a chunk until it's fully off-screen behind/ahead of the
+    // car. The ortho viewport is ~12u; add look-ahead + padding so chunks
+    // never vanish while still visible.
+    const VIEW_MARGIN: f32 = 16.0;
+    let car_z = car_t.translation.z;
 
-    // Find the trailing chunk: the one whose root-z is largest (closest to +Z,
-    // furthest behind a car driving toward -Z).
+    // Trailing chunk = largest root-z (furthest behind, +Z); leading = smallest
+    // root-z (furthest ahead, -Z).
     let mut trailing: Option<(Entity, i32, f32)> = None;
+    let mut leading: Option<(Entity, i32, f32)> = None;
     for (e, chunk, tf) in &chunks {
-        let root_z = tf.translation.z;
-        match trailing {
-            None => trailing = Some((e, chunk.index, root_z)),
-            Some((_, _, best_z)) if root_z > best_z => {
-                trailing = Some((e, chunk.index, root_z));
-            }
-            _ => {}
+        let z = tf.translation.z;
+        if trailing.map_or(true, |(_, _, bz)| z > bz) {
+            trailing = Some((e, chunk.index, z));
+        }
+        if leading.map_or(true, |(_, _, bz)| z < bz) {
+            leading = Some((e, chunk.index, z));
         }
     }
-    let Some((chunk_e, old_index, root_z)) = trailing else {
-        return;
-    };
 
-    // Leading edge of the trailing chunk = root_z + length/2 (root sits at
-    // the chunk center). Recycle when the car is more than `length` past it.
-    let leading_edge = root_z + length / 2.0;
-    if car_t.translation.z > leading_edge - length {
-        return;
+    // Recycle trailing -> front when it's fully off-screen behind the car
+    // (car driving -Z). Chunk spans [z-L/2, z+L/2]; its nearest edge to the
+    // car is z-L/2. Off-screen behind when car_z < z - L/2 - VIEW_MARGIN.
+    if let Some((e, idx, z)) = trailing {
+        if car_z < z - length / 2.0 - VIEW_MARGIN {
+            commands.entity(e).despawn();
+            let new_index = idx + count;
+            let new_z = z - span;
+            let root = commands
+                .spawn((
+                    Transform::from_xyz(0.0, 0.0, new_z),
+                    Visibility::default(),
+                    Chunk { index: new_index },
+                ))
+                .id();
+            populate_chunk(
+                &mut commands,
+                &mut meshes,
+                &mut materials,
+                &textures,
+                root,
+                new_index,
+                seed_for(new_index),
+            );
+        }
     }
 
-    // Despawn the old chunk root (recursively nukes its children, safe in 0.19)
-    // and spawn a fresh root at the front with a progressed index + seed.
-    commands.entity(chunk_e).despawn();
-    let new_index = old_index + count;
-    let new_z = root_z - span;
-    let new_root = commands
-        .spawn((
-            Transform::from_xyz(0.0, 0.0, new_z),
-            Visibility::default(),
-            Chunk { index: new_index },
-        ))
-        .id();
-    populate_chunk(
-        &mut commands,
-        &mut meshes,
-        &mut materials,
-        &textures,
-        new_root,
-        new_index,
-        seed_for(new_index),
-    );
+    // Recycle leading -> back when it's fully off-screen ahead of the car
+    // (car reversed +Z). Off-screen ahead when car_z > z + L/2 + VIEW_MARGIN.
+    // Skip if it's the same entity as the trailing chunk (only possible with a
+    // single chunk; avoids a double-despawn panic).
+    if let Some((e, idx, z)) = leading {
+        let same_as_trailing = trailing.map_or(false, |(te, _, _)| te == e);
+        if !same_as_trailing && car_z > z + length / 2.0 + VIEW_MARGIN {
+            commands.entity(e).despawn();
+            let new_index = idx - count;
+            let new_z = z + span;
+            let root = commands
+                .spawn((
+                    Transform::from_xyz(0.0, 0.0, new_z),
+                    Visibility::default(),
+                    Chunk { index: new_index },
+                ))
+                .id();
+            populate_chunk(
+                &mut commands,
+                &mut meshes,
+                &mut materials,
+                &textures,
+                root,
+                new_index,
+                seed_for(new_index),
+            );
+        }
+    }
+}
+
+/// On a fresh round, re-center the chunk pool on the car's spawn (origin):
+/// despawn all chunks and re-spawn the initial pool covering `[0, -span)`.
+/// Skips on resume from Paused (`RoundActive` already true). Runs in `SpawnSet`
+/// before `reset_run` zeroes the car. The sun is `Startup`-only and persists —
+/// it is NOT re-spawned here.
+fn reset_chunks(
+    mut commands: Commands,
+    cfg: Res<ChunkConfig>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    textures: Res<TextureAssets>,
+    chunks: Query<Entity, With<Chunk>>,
+    round_active: Res<RoundActive>,
+) {
+    if round_active.0 {
+        return;
+    }
+    for e in &chunks {
+        commands.entity(e).despawn();
+    }
+    let length = cfg.length;
+    let count = cfg.count;
+    for i in 0..count {
+        let root = commands
+            .spawn((
+                Transform::from_xyz(0.0, 0.0, -(i as f32) * length),
+                Visibility::default(),
+                Chunk { index: i },
+            ))
+            .id();
+        populate_chunk(
+            &mut commands,
+            &mut meshes,
+            &mut materials,
+            &textures,
+            root,
+            i,
+            seed_for(i),
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

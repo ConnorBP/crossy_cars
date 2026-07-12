@@ -148,6 +148,7 @@ fn apply_damage(
     mut health: ResMut<Health>,
     mut car: Query<&mut Car>,
     mut next: ResMut<NextState<GameState>>,
+    mut reason: ResMut<crate::game::resources::GameOverReason>,
     mut commands: Commands,
     audio: Res<DamageAudioHandles>,
 ) {
@@ -169,6 +170,7 @@ fn apply_damage(
                 AudioPlayer::new(audio.crash.clone()),
                 PlaybackSettings::DESPAWN.with_volume(Volume::Linear(0.9)),
             ));
+            *reason = crate::game::resources::GameOverReason::Wrecked;
             next.set(GameState::GameOver);
             // No point flashing once the GameOver overlay covers the screen.
             return;

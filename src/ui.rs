@@ -1,7 +1,7 @@
 use bevy::{prelude::*, text::FontSize};
 
 use crate::car::Car;
-use crate::game::resources::{Score, TimeLeft};
+use crate::game::resources::{GameOverReason, Score, TimeLeft};
 use crate::game::state::GameState;
 use crate::palette;
 
@@ -444,8 +444,12 @@ fn spawn_pause(mut commands: Commands) {
         });
 }
 
-fn spawn_gameover(mut commands: Commands, score: Res<Score>) {
+fn spawn_gameover(mut commands: Commands, score: Res<Score>, reason: Res<GameOverReason>) {
     let total = score.chickens + score.coins;
+    let title = match *reason {
+        GameOverReason::Wrecked => "Wrecked!",
+        GameOverReason::TimeUp => "Time's up!",
+    };
     commands
         .spawn((
             Node {
@@ -465,7 +469,7 @@ fn spawn_gameover(mut commands: Commands, score: Res<Score>) {
         .with_children(|p| {
             // Title
             p.spawn((
-                Text::new("Time's up!"),
+                Text::new(title),
                 TextFont {
                     font_size: FontSize::Px(64.0),
                     ..default()

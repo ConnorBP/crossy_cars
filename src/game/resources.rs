@@ -49,3 +49,12 @@ impl Default for TimeLeft {
 /// from `Paused`, so pausing doesn't wipe the current run.
 #[derive(Resource, Default)]
 pub struct RoundActive(pub bool);
+
+/// Why the round ended — drives the GameOver screen title. Defaults to
+/// `TimeUp`; `health.rs` sets `Wrecked` when the car is destroyed.
+#[derive(Resource, Default, Clone, Copy)]
+pub enum GameOverReason {
+    #[default]
+    TimeUp,
+    Wrecked,
+}

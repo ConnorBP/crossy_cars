@@ -6,7 +6,7 @@ use bevy::prelude::*;
 
 use crate::car::{Car, InputFrozen};
 use crate::game::events::{ChickenHit, CoinCollected, ObstacleHit};
-use crate::game::resources::{GameConfig, RoundActive, Score, TimeLeft};
+use crate::game::resources::{GameConfig, GameOverReason, RoundActive, Score, TimeLeft};
 use crate::game::state::GameState;
 
 /// System set grouping all fresh-round spawn systems that run on
@@ -27,6 +27,7 @@ impl Plugin for GamePlugin {
             .init_resource::<TimeLeft>()
             .init_resource::<RoundActive>()
             .init_resource::<InputFrozen>()
+            .init_resource::<GameOverReason>()
             .add_message::<ChickenHit>()
             .add_message::<CoinCollected>()
             .add_message::<ObstacleHit>()
@@ -97,6 +98,7 @@ fn tick_timeleft(
     time: Res<Time>,
     mut next: ResMut<NextState<GameState>>,
     input_frozen: Res<InputFrozen>,
+    mut reason: ResMut<GameOverReason>,
 ) {
     // Don't burn the 60s round timer while a countdown overlay is active.
     if input_frozen.0 {
@@ -105,6 +107,7 @@ fn tick_timeleft(
     t.0 -= time.delta_secs();
     if t.0 <= 0.0 {
         t.0 = 0.0;
+        *reason = GameOverReason::TimeUp;
         next.set(GameState::GameOver);
     }
 }
