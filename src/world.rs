@@ -627,16 +627,21 @@ pub fn populate_block(
         // --- Curbs along the inner edges of each road (collidable, hop-up) ---
         // A road on edge E_dir spans the 8u around the edge line; its inner
         // curb sits 4.75u in from the edge line, on the block-interior side.
-        // IMPORTANT: a curb does NOT span the full block — it stops at the
-        // perpendicular road's inner edge (~4.75u in) so the sidewalk doesn't
-        // cross the intersection, while still meeting the perpendicular curb at
-        // the corner (no gap). 4.75 = the curb offset; 6.0 left a visible gap.
-        const CURB_GAP: f32 = 4.75;
+        // --- Curbs along the inner edges of each road (collidable, hop-up) ---
+        // Each road's inner curb sits 4.75u in from the edge line. To avoid the
+        // sidewalks crossing the intersection AND overlapping each other at the
+        // corner, we pick the W/E curbs as PRIMARY: they run the whole way along
+        // Z (trimmed only by the road half-width 4.0 at the N/S ends so they
+        // reach right up to the perpendicular road's inner edge). The S/N
+        // curbs are SECONDARY: they stop at the W/E curbs' OUTER edge (4.75 +
+        // 0.75 = 5.5) so they butt cleanly into the primary curb — no overlap,
+        // no gap, and one side (W/E) goes the whole way through the corner.
+        const ROAD_HALF: f32 = 4.0; // road half-width (road spans edge ± 4)
+        const CURB_OUTER: f32 = 5.5; // 4.75 (curb center) + 0.75 (curb half) = W/E curb outer edge
+        // W curb (primary, along Z at x = -half + 4.75) — whole way to road edges.
         if road_w {
-            // W curb runs along Z at x = -half + 4.75; trim its z-ends where
-            // the S/N roads cross.
-            let z_lo = -half + if road_s { CURB_GAP } else { 0.0 };
-            let z_hi = half - if road_n { CURB_GAP } else { 0.0 };
+            let z_lo = -half + if road_s { ROAD_HALF } else { 0.0 };
+            let z_hi = half - if road_n { ROAD_HALF } else { 0.0 };
             if z_hi > z_lo {
                 let len = z_hi - z_lo;
                 let cz = (z_lo + z_hi) * 0.5;
@@ -653,9 +658,10 @@ pub fn populate_block(
                 ));
             }
         }
+        // E curb (primary, along Z at x = half - 4.75) — whole way to road edges.
         if road_e {
-            let z_lo = -half + if road_s { CURB_GAP } else { 0.0 };
-            let z_hi = half - if road_n { CURB_GAP } else { 0.0 };
+            let z_lo = -half + if road_s { ROAD_HALF } else { 0.0 };
+            let z_hi = half - if road_n { ROAD_HALF } else { 0.0 };
             if z_hi > z_lo {
                 let len = z_hi - z_lo;
                 let cz = (z_lo + z_hi) * 0.5;
@@ -672,11 +678,11 @@ pub fn populate_block(
                 ));
             }
         }
+        // S curb (secondary, along X at z = -half + 4.75) — stops at the W/E
+        // curbs' outer edges so it butts into them (no overlap).
         if road_s {
-            // S curb runs along X at z = -half + 4.75; trim its x-ends where
-            // the W/E roads cross.
-            let x_lo = -half + if road_w { CURB_GAP } else { 0.0 };
-            let x_hi = half - if road_e { CURB_GAP } else { 0.0 };
+            let x_lo = -half + if road_w { CURB_OUTER } else { 0.0 };
+            let x_hi = half - if road_e { CURB_OUTER } else { 0.0 };
             if x_hi > x_lo {
                 let len = x_hi - x_lo;
                 let cx = (x_lo + x_hi) * 0.5;
@@ -693,9 +699,11 @@ pub fn populate_block(
                 ));
             }
         }
+        // N curb (secondary, along X at z = half - 4.75) — stops at the W/E
+        // curbs' outer edges.
         if road_n {
-            let x_lo = -half + if road_w { CURB_GAP } else { 0.0 };
-            let x_hi = half - if road_e { CURB_GAP } else { 0.0 };
+            let x_lo = -half + if road_w { CURB_OUTER } else { 0.0 };
+            let x_hi = half - if road_e { CURB_OUTER } else { 0.0 };
             if x_hi > x_lo {
                 let len = x_hi - x_lo;
                 let cx = (x_lo + x_hi) * 0.5;
@@ -722,8 +730,8 @@ pub fn populate_block(
         });
         // Dashes + edge lines on the W road (centered on x = −half, running Z).
         if road_w {
-            let z_lo = -half + if road_s { CURB_GAP } else { 0.0 };
-            let z_hi = half - if road_n { CURB_GAP } else { 0.0 };
+            let z_lo = -half + if road_s { ROAD_HALF } else { 0.0 };
+            let z_hi = half - if road_n { ROAD_HALF } else { 0.0 };
             let mut z = z_lo + 2.0;
             while z <= z_hi - 2.0 {
                 p.spawn((
@@ -750,8 +758,8 @@ pub fn populate_block(
         }
         // Dashes + edge lines on the E road (centered on x = +half, running Z).
         if road_e {
-            let z_lo = -half + if road_s { CURB_GAP } else { 0.0 };
-            let z_hi = half - if road_n { CURB_GAP } else { 0.0 };
+            let z_lo = -half + if road_s { ROAD_HALF } else { 0.0 };
+            let z_hi = half - if road_n { ROAD_HALF } else { 0.0 };
             let mut z = z_lo + 2.0;
             while z <= z_hi - 2.0 {
                 p.spawn((
@@ -776,8 +784,8 @@ pub fn populate_block(
         }
         // Dashes + edge lines on the S road (centered on z = −half, running X).
         if road_s {
-            let x_lo = -half + if road_w { CURB_GAP } else { 0.0 };
-            let x_hi = half - if road_e { CURB_GAP } else { 0.0 };
+            let x_lo = -half + if road_w { ROAD_HALF } else { 0.0 };
+            let x_hi = half - if road_e { ROAD_HALF } else { 0.0 };
             let mut x = x_lo + 2.0;
             while x <= x_hi - 2.0 {
                 p.spawn((
@@ -802,8 +810,8 @@ pub fn populate_block(
         }
         // Dashes + edge lines on the N road (centered on z = +half, running X).
         if road_n {
-            let x_lo = -half + if road_w { CURB_GAP } else { 0.0 };
-            let x_hi = half - if road_e { CURB_GAP } else { 0.0 };
+            let x_lo = -half + if road_w { ROAD_HALF } else { 0.0 };
+            let x_hi = half - if road_e { ROAD_HALF } else { 0.0 };
             let mut x = x_lo + 2.0;
             while x <= x_hi - 2.0 {
                 p.spawn((
