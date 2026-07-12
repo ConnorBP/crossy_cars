@@ -14,6 +14,7 @@ mod modifiers;
 mod palette;
 mod persist;
 mod pickups;
+mod run_events;
 mod shaders;
 mod textures;
 mod transparency;
@@ -38,6 +39,7 @@ use minimap::MinimapPlugin;
 use modifiers::ModifiersPlugin;
 use persist::PersistPlugin;
 use pickups::PickupsPlugin;
+use run_events::RunEventsPlugin;
 use shaders::ShaderPlugin;
 use textures::TexturesPlugin;
 use transparency::TransparencyPlugin;
@@ -90,6 +92,9 @@ fn main() {
         // Modifier selection must be registered independently of the feature
         // tuple so adding it cannot approach Bevy's plugin tuple limit.
         .add_plugins(ModifiersPlugin)
+        // Mid-run event scheduling is independent of the feature tuple for
+        // the same tuple-limit reason as modifiers.
+        .add_plugins(RunEventsPlugin)
         .add_plugins((
             ChickensPlugin,
             HealthPlugin,
