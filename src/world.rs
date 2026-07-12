@@ -543,9 +543,9 @@ impl FromWorld for WorldAssets {
             trunk: a.add(Cylinder::new(0.18, 0.9)),
             foliage: a.add(Sphere::new(0.75).mesh().uv(12, 8)),
             tree_shadow: a.add(Circle::new(0.9)),
-            pole: a.add(Cylinder::new(0.07, 3.2)),
-            arm: a.add(Cuboid::new(0.8, 0.06, 0.06)),
-            lamp: a.add(Sphere::new(0.14).mesh().uv(8, 6)),
+            pole: a.add(Cylinder::new(0.07, POLE_HEIGHT)),
+            arm: a.add(Cuboid::new(ARM_LEN, ARM_THICK, ARM_THICK)),
+            lamp: a.add(Sphere::new(LAMP_RADIUS).mesh().uv(8, 6)),
             coin: a.add(Cylinder::new(0.3, 0.08)),
             cone_body: a.add(bevy::math::primitives::Cone::new(0.18, 0.4)),
             cone_base: a.add(Cuboid::new(0.4, 0.04, 0.4)),
@@ -775,6 +775,143 @@ fn spawn_grid_window(
 /// function of (gx, gz).
 fn seed_for(gx: i32, gz: i32) -> u32 {
     (gx as u32).wrapping_mul(1664525) ^ (gz as u32).wrapping_mul(22695477).wrapping_add(0x9e3779b9)
+}
+
+// ---------------------------------------------------------------------------
+// Street-lamp geometry helpers (pure — no ECS, unit-testable in isolation)
+// ---------------------------------------------------------------------------
+//
+// The lamp post is a 3-part assembly parented to the `LampPost` block child:
+//   1. POLE  — vertical cylinder rooted at ground (y = 0), height POLE_HEIGHT.
+//   2. ARM   — horizontal bar attached to the pole top, extending ARM_LEN
+//              toward the nearest road edge.
+//   3. LAMP  — emissive sphere hanging from the arm's outer end.
+// These pure helpers compute the road-pointing direction and the three
+// local Transforms from the cached mesh dimensions, so the geometry
+// contract (pole roots at ground, arm connected + oriented toward the road,
+// lamp hanging at the arm end, no gaps / no floating parts) is unit-testable
+// without spinning up a Bevy ECS world. They are the single source of truth
+// for `populate_block`'s lamp-post spawning.
+
+/// Cached pole mesh: `Cylinder::new(0.07, POLE_HEIGHT)` (radius 0.07, height
+/// `POLE_HEIGHT`) — a cylinder centered on its midpoint, so placing its
+/// center at `POLE_HEIGHT / 2` roots it at the ground (y = 0) with its top at
+/// `POLE_HEIGHT`. Only the height is needed for vertical placement, so the
+/// radius is not promoted to a named constant.
+const POLE_HEIGHT: f32 = 3.2;
+
+/// Cached arm mesh: `Cuboid::new(ARM_LEN, ARM_THICK, ARM_THICK)` — a bar long
+/// along local +X and thin in Y/Z. It is rotated π/2 about Y only when the
+/// arm points along Z, so its long axis always tracks the road direction.
+const ARM_LEN: f32 = 0.8;
+const ARM_THICK: f32 = 0.06;
+
+/// Cached lamp mesh: `Sphere::new(LAMP_RADIUS)`.
+const LAMP_RADIUS: f32 = 0.14;
+
+/// Unit horizontal direction the lamp arm should point, toward the nearest
+/// `Road` edge of the block from the post's local position `(lx, lz)` within
+/// a block of half-size `half`. Only edges that are actually roads are
+/// considered — a non-road edge is never chosen even if it is closer. Returns
+/// `(0.0, 0.0)` when no edge is a road; callers fall back to a default. The
+/// result is always axis-aligned with exactly one nonzero component of
+/// magnitude 1.0 (or both zero).
+fn lamp_arm_direction(
+    road_w: bool,
+    road_e: bool,
+    road_s: bool,
+    road_n: bool,
+    lx: f32,
+    lz: f32,
+    half: f32,
+) -> (f32, f32) {
+    let mut best = (0.0_f32, 0.0_f32);
+    let mut best_dist = f32::MAX;
+    // Order W, E, S, N — the first (closest) declared road edge wins ties.
+    if road_w {
+        let d = (-half - lx).abs();
+        if d < best_dist {
+            best_dist = d;
+            best = (-1.0, 0.0);
+        }
+    }
+    if road_e {
+        let d = (half - lx).abs();
+        if d < best_dist {
+            best_dist = d;
+            best = (1.0, 0.0);
+        }
+    }
+    if road_s {
+        let d = (-half - lz).abs();
+        if d < best_dist {
+            best_dist = d;
+            best = (0.0, -1.0);
+        }
+    }
+    if road_n && (half - lz).abs() < best_dist {
+        best = (0.0, 1.0);
+    }
+    best
+}
+
+/// Local Transform of the pole: a vertical cylinder rooted at the ground.
+/// The mesh is centered on its midpoint, so center.y = `POLE_HEIGHT / 2`
+/// makes it span exactly `0 .. POLE_HEIGHT` (bottom at ground, top at
+/// `POLE_HEIGHT`). No horizontal offset — the pole sits at the post's XZ
+/// origin.
+fn lamp_pole_transform() -> Transform {
+    Transform::from_xyz(0.0, POLE_HEIGHT / 2.0, 0.0)
+}
+
+/// Local Transform of the arm: a horizontal bar connected to the pole top,
+/// extending `ARM_LEN` toward `(dir_x, dir_z)`. The arm's inner end sits at
+/// the pole (XZ origin) and its outer end at `(dir_x * ARM_LEN, _,
+/// dir_z * ARM_LEN)`. The mesh is long along local +X, so it is rotated π/2
+/// about Y only when the direction is along Z (`dir_x == 0`); the direction's
+/// sign is carried by the translation because the bar is symmetric about its
+/// center. The arm's Y is the pole top, so it overlaps the pole top —
+/// connected, no gap.
+fn lamp_arm_transform(dir_x: f32, dir_z: f32) -> Transform {
+    let rot = if dir_x == 0.0 {
+        Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)
+    } else {
+        Quat::IDENTITY
+    };
+    Transform::from_xyz(dir_x * ARM_LEN / 2.0, POLE_HEIGHT, dir_z * ARM_LEN / 2.0)
+        .with_rotation(rot)
+}
+
+/// Local Transform of the lamp (fixture/bulb): hangs from the arm's outer
+/// end, just below the arm so the bulb's top touches the arm's bottom —
+/// connected, not floating. Same XZ as the arm outer end.
+fn lamp_fixture_transform(dir_x: f32, dir_z: f32) -> Transform {
+    let arm_bottom = POLE_HEIGHT - ARM_THICK / 2.0;
+    Transform::from_xyz(dir_x * ARM_LEN, arm_bottom - LAMP_RADIUS, dir_z * ARM_LEN)
+}
+
+/// Half-extents of the arm's axis-aligned bounding box in the `LampPost`
+/// local frame, derived from the actual orientation in `lamp_arm_transform`.
+/// The long axis (`ARM_LEN`) ends up along the chosen direction and the thin
+/// axes (`ARM_THICK`) along the other two — i.e. the arm is oriented ALONG
+/// the road direction, not across it. Pure; used by the geometry tests to
+/// verify connection (inner end at the pole, outer end toward the road) and
+/// orientation (long along the road, thin across it).
+#[cfg(test)]
+fn lamp_arm_aabb_half_extents(dir_x: f32, dir_z: f32) -> Vec3 {
+    let rot = lamp_arm_transform(dir_x, dir_z).rotation;
+    // Local half-extents of the arm mesh (long along X, thin in Y/Z).
+    let h = Vec3::new(ARM_LEN / 2.0, ARM_THICK / 2.0, ARM_THICK / 2.0);
+    // World-space directions of the local X / Y / Z axes after rotation.
+    let bx = rot * Vec3::X;
+    let by = rot * Vec3::Y;
+    let bz = rot * Vec3::Z;
+    // AABB half-extents = sum over local axes of |world component| * local half.
+    Vec3::new(
+        bx.x.abs() * h.x + by.x.abs() * h.y + bz.x.abs() * h.z,
+        bx.y.abs() * h.x + by.y.abs() * h.y + bz.y.abs() * h.z,
+        bx.z.abs() * h.x + by.z.abs() * h.y + bz.z.abs() * h.z,
+    )
 }
 
 /// Build all of one block's contents as children of `root`, per the chosen
@@ -1477,30 +1614,13 @@ pub fn populate_block(
                 ) else {
                     continue;
                 };
-                // Arm extends toward the nearest Road edge (so the light
-                // hangs over the road). If no road, default to -X.
-                let mut best_dir = (-1.0_f32, 0.0_f32);
-                let mut best_dist = (-half - lx).abs(); // distance to W road
-                let d_e = (half - lx).abs();
-                if road_e && d_e < best_dist {
-                    best_dist = d_e;
-                    best_dir = (1.0, 0.0);
+                // Arm points toward the nearest Road edge. Only actual road
+                // edges are considered; with no road, preserve the -X default.
+                let (mut dir_x, dir_z) =
+                    lamp_arm_direction(road_w, road_e, road_s, road_n, lx, lz, half);
+                if dir_x == 0.0 && dir_z == 0.0 {
+                    dir_x = -1.0;
                 }
-                let d_s = (-half - lz).abs();
-                if road_s && d_s < best_dist {
-                    best_dist = d_s;
-                    best_dir = (0.0, -1.0);
-                }
-                let d_n = (half - lz).abs();
-                if road_n && d_n < best_dist {
-                    best_dist = d_n;
-                    best_dir = (0.0, 1.0);
-                }
-                if !any_road {
-                    // No road at all -> arm toward -X (default).
-                    best_dir = (-1.0, 0.0);
-                }
-                let (dir_x, dir_z) = best_dir;
                 p.spawn((
                     Transform::from_xyz(lx, 0.0, lz),
                     Visibility::default(),
@@ -1514,24 +1634,17 @@ pub fn populate_block(
                     lp.spawn((
                         Mesh3d(pole_mesh.clone()),
                         MeshMaterial3d(metal_mat.clone()),
-                        Transform::from_xyz(0.0, 1.6, 0.0),
+                        lamp_pole_transform(),
                     ));
                     lp.spawn((
                         Mesh3d(arm_mesh.clone()),
                         MeshMaterial3d(metal_mat.clone()),
-                        // Orient the arm along the chosen axis.
-                        Transform::from_xyz(dir_x * 0.4, 3.1, dir_z * 0.4).with_rotation(
-                            Quat::from_rotation_y(if dir_x != 0.0 {
-                                std::f32::consts::FRAC_PI_2
-                            } else {
-                                0.0
-                            }),
-                        ),
+                        lamp_arm_transform(dir_x, dir_z),
                     ));
                     lp.spawn((
                         Mesh3d(lamp_mesh.clone()),
                         MeshMaterial3d(lamp_mat.clone()),
-                        Transform::from_xyz(dir_x * 0.8, 3.1, dir_z * 0.8),
+                        lamp_fixture_transform(dir_x, dir_z),
                     ));
                 });
             }
@@ -2521,5 +2634,263 @@ mod tests {
             let mut d = seed_for(4, 4);
             rand(&mut d)
         });
+    }
+
+    // --- Street-lamp geometry (pure helpers; no ECS hierarchy) ---
+
+    /// The arm points toward the nearest Road edge, and only Road edges are
+    /// candidates — a closer non-road edge is never chosen.
+    #[test]
+    fn lamp_arm_direction_picks_nearest_road_edge() {
+        // All four roads: the closest edge by distance wins.
+        assert_eq!(
+            lamp_arm_direction(true, true, true, true, -18.0, 0.0, 20.0),
+            (-1.0, 0.0),
+            "near W -> W"
+        );
+        assert_eq!(
+            lamp_arm_direction(true, true, true, true, 18.0, 0.0, 20.0),
+            (1.0, 0.0),
+            "near E -> E"
+        );
+        assert_eq!(
+            lamp_arm_direction(true, true, true, true, 0.0, -18.0, 20.0),
+            (0.0, -1.0),
+            "near S -> S"
+        );
+        assert_eq!(
+            lamp_arm_direction(true, true, true, true, 0.0, 18.0, 20.0),
+            (0.0, 1.0),
+            "near N -> N"
+        );
+    }
+
+    #[test]
+    fn lamp_arm_direction_ignores_non_road_edges() {
+        // Only S is a road; even though the post is closer to the W edge
+        // (no road), the arm must point S — never toward a non-road edge.
+        assert_eq!(
+            lamp_arm_direction(false, false, true, false, -18.0, 5.0, 20.0),
+            (0.0, -1.0)
+        );
+        // Only E is a road; post closer to W (no road) -> still E.
+        assert_eq!(
+            lamp_arm_direction(false, true, false, false, -18.0, 0.0, 20.0),
+            (1.0, 0.0)
+        );
+        // Only N is a road; post closer to S (no road) -> still N.
+        assert_eq!(
+            lamp_arm_direction(false, false, false, true, 5.0, -18.0, 20.0),
+            (0.0, 1.0)
+        );
+    }
+
+    #[test]
+    fn lamp_arm_direction_zero_when_no_road() {
+        assert_eq!(
+            lamp_arm_direction(false, false, false, false, 0.0, 0.0, 20.0),
+            (0.0, 0.0)
+        );
+        assert_eq!(
+            lamp_arm_direction(false, false, false, false, -19.0, 19.0, 20.0),
+            (0.0, 0.0)
+        );
+    }
+
+    #[test]
+    fn lamp_arm_direction_is_axis_aligned_unit_vector() {
+        // Across a grid of post positions with all roads present, the
+        // direction is always a single axis-aligned unit vector.
+        for lx in -19..=19 {
+            for lz in -19..=19 {
+                let (dx, dz) =
+                    lamp_arm_direction(true, true, true, true, lx as f32, lz as f32, 20.0);
+                let mag = (dx * dx + dz * dz).sqrt();
+                assert!(
+                    (mag - 1.0).abs() < 1e-6,
+                    "non-unit direction ({dx},{dz}) at ({lx},{lz})"
+                );
+                assert!(
+                    (dx == 0.0) != (dz == 0.0),
+                    "non-axis-aligned direction ({dx},{dz}) at ({lx},{lz})"
+                );
+                assert!(dx.abs() <= 1.0 && dz.abs() <= 1.0);
+            }
+        }
+    }
+
+    #[test]
+    fn lamp_pole_roots_at_ground_and_spans_full_height() {
+        let t = lamp_pole_transform();
+        // Cylinder mesh is centered on its midpoint, so center.y = half the
+        // height means it spans exactly 0 .. POLE_HEIGHT.
+        assert_eq!(t.translation.y, POLE_HEIGHT / 2.0);
+        assert_eq!(
+            t.translation.y - POLE_HEIGHT / 2.0,
+            0.0,
+            "pole bottom at ground"
+        );
+        assert_eq!(t.translation.y + POLE_HEIGHT / 2.0, POLE_HEIGHT, "pole top");
+        // Pole sits at the post's XZ origin (no horizontal offset).
+        assert_eq!(t.translation.x, 0.0);
+        assert_eq!(t.translation.z, 0.0);
+    }
+
+    #[test]
+    fn lamp_arm_is_connected_to_pole_and_oriented_along_road() {
+        for (dx, dz, label) in [
+            (-1.0_f32, 0.0_f32, "W"),
+            (1.0, 0.0, "E"),
+            (0.0, -1.0, "S"),
+            (0.0, 1.0, "N"),
+        ] {
+            let t = lamp_arm_transform(dx, dz);
+            let he = lamp_arm_aabb_half_extents(dx, dz);
+
+            // Arm Y is the pole top -> arm overlaps the pole top (connected).
+            assert_eq!(t.translation.y, POLE_HEIGHT, "arm Y for {label}");
+            let arm_bottom = t.translation.y - ARM_THICK / 2.0;
+            let arm_top = t.translation.y + ARM_THICK / 2.0;
+            assert!(
+                arm_bottom <= POLE_HEIGHT && POLE_HEIGHT <= arm_top,
+                "arm must overlap pole top for {label}"
+            );
+
+            // Along the road direction: inner end at the pole (0), outer end
+            // at dir * ARM_LEN. Perpendicular: thin (ARM_THICK), not long.
+            let (along_center, along_half, perp_half) = if dx != 0.0 {
+                (t.translation.x, he.x, he.z)
+            } else {
+                (t.translation.z, he.z, he.x)
+            };
+            let end_a = along_center - along_half;
+            let end_b = along_center + along_half;
+            let want = (dx + dz) * ARM_LEN;
+            assert!(
+                (end_a - 0.0).abs() < 1e-6 || (end_b - 0.0).abs() < 1e-6,
+                "arm inner end not at pole for {label}: ends {end_a},{end_b}"
+            );
+            assert!(
+                (end_a - want).abs() < 1e-6 || (end_b - want).abs() < 1e-6,
+                "arm outer end not toward road for {label}: ends {end_a},{end_b} want {want}"
+            );
+            assert!(
+                (along_half - ARM_LEN / 2.0).abs() < 1e-6,
+                "arm long along road for {label}"
+            );
+            assert!(
+                (perp_half - ARM_THICK / 2.0).abs() < 1e-6,
+                "arm thin perpendicular for {label}"
+            );
+        }
+    }
+
+    #[test]
+    fn lamp_arm_rotation_aligns_long_axis_with_road_direction() {
+        // Along X: no rotation (the mesh is already long along X).
+        assert_eq!(lamp_arm_transform(-1.0, 0.0).rotation, Quat::IDENTITY);
+        assert_eq!(lamp_arm_transform(1.0, 0.0).rotation, Quat::IDENTITY);
+        // Along Z: π/2 about Y. The arm is symmetric about its center, so the
+        // direction's sign is carried by the translation; the rotation is the
+        // same for +Z and -Z.
+        let want = Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
+        for (dx, dz) in [(0.0_f32, -1.0_f32), (0.0, 1.0)] {
+            let q = lamp_arm_transform(dx, dz).rotation;
+            assert!(
+                (q.x - want.x).abs() < 1e-6
+                    && (q.y - want.y).abs() < 1e-6
+                    && (q.z - want.z).abs() < 1e-6
+                    && (q.w - want.w).abs() < 1e-6,
+                "arm along Z must be rotated π/2 about Y for ({dx},{dz}), got {q}"
+            );
+        }
+    }
+
+    #[test]
+    fn lamp_fixture_hangs_connected_at_arm_end() {
+        for (dx, dz, label) in [
+            (-1.0_f32, 0.0_f32, "W"),
+            (1.0, 0.0, "E"),
+            (0.0, -1.0, "S"),
+            (0.0, 1.0, "N"),
+        ] {
+            let arm = lamp_arm_transform(dx, dz);
+            let lamp = lamp_fixture_transform(dx, dz);
+
+            // Same XZ as the arm's outer end.
+            assert!(
+                (lamp.translation.x - dx * ARM_LEN).abs() < 1e-6,
+                "lamp X at arm outer end for {label}"
+            );
+            assert!(
+                (lamp.translation.z - dz * ARM_LEN).abs() < 1e-6,
+                "lamp Z at arm outer end for {label}"
+            );
+
+            // Hangs BELOW the arm.
+            assert!(
+                lamp.translation.y < arm.translation.y,
+                "lamp must hang below arm for {label}"
+            );
+
+            // Bulb top touches arm bottom — connected, no gap, no float.
+            let arm_bottom = arm.translation.y - ARM_THICK / 2.0;
+            let lamp_top = lamp.translation.y + LAMP_RADIUS;
+            assert!(
+                (lamp_top - arm_bottom).abs() < 1e-6,
+                "lamp top must meet arm bottom for {label}: {lamp_top} vs {arm_bottom}"
+            );
+
+            // Entire bulb sits below the arm (no overlap with the bar) and
+            // clears the ground.
+            assert!(
+                lamp_top <= arm_bottom + 1e-6,
+                "bulb must not overlap arm for {label}"
+            );
+            assert!(
+                lamp.translation.y - LAMP_RADIUS > 0.0,
+                "lamp must clear the ground for {label}"
+            );
+        }
+    }
+
+    #[test]
+    fn lamp_post_vertical_chain_is_connected_with_no_gaps() {
+        // Pole: roots at ground, top at POLE_HEIGHT.
+        let pole = lamp_pole_transform();
+        assert_eq!(
+            pole.translation.y - POLE_HEIGHT / 2.0,
+            0.0,
+            "pole roots at ground"
+        );
+        assert_eq!(
+            pole.translation.y + POLE_HEIGHT / 2.0,
+            POLE_HEIGHT,
+            "pole top"
+        );
+
+        // Arm: at the pole top, overlapping it (connected — no gap to pole).
+        let arm = lamp_arm_transform(1.0, 0.0);
+        let arm_bottom = arm.translation.y - ARM_THICK / 2.0;
+        let arm_top = arm.translation.y + ARM_THICK / 2.0;
+        assert!(
+            arm_bottom <= POLE_HEIGHT && POLE_HEIGHT <= arm_top,
+            "arm must overlap pole top (no gap)"
+        );
+
+        // Lamp: hangs from the arm end, top meeting the arm bottom (no gap).
+        let lamp = lamp_fixture_transform(1.0, 0.0);
+        let lamp_top = lamp.translation.y + LAMP_RADIUS;
+        assert!(
+            (lamp_top - arm_bottom).abs() < 1e-6,
+            "lamp top must meet arm bottom (no gap)"
+        );
+
+        // The whole assembly is above ground and vertically ordered.
+        assert!(lamp.translation.y - LAMP_RADIUS > 0.0, "lamp clears ground");
+        assert!(
+            arm.translation.y > pole.translation.y,
+            "arm above pole center"
+        );
     }
 }
