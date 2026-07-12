@@ -4,6 +4,22 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>Roady Car</title>
+    <meta
+      name="description"
+      content="Drive an endless isometric road, chase chickens, and dodge hazards in Roady Car, a desktop keyboard game."
+    />
+    <meta name="theme-color" content="#111111" />
+    <meta property="og:title" content="Roady Car" />
+    <meta
+      property="og:description"
+      content="Drive an endless isometric road, chase chickens, and dodge hazards in this browser driving game."
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:locale" content="en_US" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg%20xmlns=%22http://www.w3.org/2000/svg%22%20viewBox=%220%200%2064%2064%22%3E%3Crect%20width=%2264%22%20height=%2264%22%20rx=%2214%22%20fill=%22%23111%22/%3E%3Cpath%20d=%22M14%2038h36l-4-14H22z%22%20fill=%22%23f7c948%22/%3E%3Ccircle%20cx=%2222%22%20cy=%2243%22%20r=%226%22%20fill=%22%23fff%22/%3E%3Ccircle%20cx=%2243%22%20cy=%2243%22%20r=%226%22%20fill=%22%23fff%22/%3E%3C/svg%3E"
+    />
     <link data-trunk rel="copy-dir" href="assets" />
     <style>
       html, body {
@@ -35,14 +51,15 @@
         display: grid;
         place-content: center;
         justify-items: center;
-        gap: 0.8rem;
         box-sizing: border-box;
+        overflow: auto;
         padding: calc(1rem + env(safe-area-inset-top))
           calc(1rem + env(safe-area-inset-right))
           calc(1rem + env(safe-area-inset-bottom))
           calc(1rem + env(safe-area-inset-left));
         color: #fff;
         background: #111;
+        text-align: center;
         font: 600 1rem/1.4 system-ui, sans-serif;
         letter-spacing: 0.03em;
         pointer-events: none;
@@ -51,8 +68,38 @@
       .loading.is-hidden {
         opacity: 0;
       }
-      .loading[hidden] {
+      .loading.is-error {
+        pointer-events: auto;
+      }
+      .loading[hidden],
+      .loading-content[hidden],
+      .error-content[hidden] {
         display: none;
+      }
+      .loading-content,
+      .error-content {
+        display: grid;
+        justify-items: center;
+        gap: 0.8rem;
+        width: min(32rem, 100%);
+      }
+      .loading h1,
+      .noscript h1 {
+        margin: 0;
+        font-size: clamp(1.35rem, 4vw, 2rem);
+        line-height: 1.2;
+      }
+      .loading p,
+      .noscript p {
+        margin: 0;
+      }
+      .instructions,
+      .error-guidance,
+      .noscript p {
+        max-width: 32rem;
+        color: #d7d7d7;
+        font-weight: 400;
+        letter-spacing: normal;
       }
       .spinner {
         width: 2rem;
@@ -63,13 +110,46 @@
         border-radius: 50%;
         animation: spin 800ms linear infinite;
       }
+      .retry-button {
+        min-width: 7rem;
+        min-height: 2.75rem;
+        margin-top: 0.35rem;
+        padding: 0.65rem 1.1rem;
+        border: 2px solid #fff;
+        border-radius: 0.45rem;
+        color: #111;
+        background: #fff;
+        font: 700 1rem/1 system-ui, sans-serif;
+        cursor: pointer;
+      }
+      .retry-button:hover {
+        background: #f7c948;
+        border-color: #f7c948;
+      }
+      .retry-button:focus-visible {
+        outline: 3px solid #f7c948;
+        outline-offset: 3px;
+      }
+      .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+      }
       .noscript {
         position: fixed;
         z-index: 20;
         inset: 0;
         display: grid;
         place-content: center;
+        gap: 0.8rem;
         box-sizing: border-box;
+        overflow: auto;
         padding: calc(1rem + env(safe-area-inset-top))
           calc(1rem + env(safe-area-inset-right))
           calc(1rem + env(safe-area-inset-bottom))
@@ -125,45 +205,115 @@
     </script>
   </head>
   <body>
+    <p id="keyboard-instructions" class="sr-only">
+      Roady Car is designed for a desktop keyboard. Use W or Up Arrow to accelerate,
+      S or Down Arrow to brake and reverse, and A and D or the Left and Right Arrow
+      keys to steer. Your first key press or pointer action also enables game audio.
+    </p>
     <div id="loading" class="loading" role="status" aria-live="polite" aria-atomic="true" hidden>
-      <span class="spinner" aria-hidden="true"></span>
-      <span>Loading Roady Car&hellip;</span>
+      <div id="loading-content" class="loading-content">
+        <span class="spinner" aria-hidden="true"></span>
+        <h1>Roady Car</h1>
+        <p>Loading the game&hellip;</p>
+        <p class="instructions">
+          Desktop keyboard controls: W or Up Arrow accelerates, S or Down Arrow
+          brakes, and A/D or Left/Right Arrow steers.
+        </p>
+      </div>
+      <div id="error-content" class="error-content" hidden>
+        <h1>Roady Car could not start</h1>
+        <p class="error-guidance">
+          Make sure this browser supports WebGL2 and WebAssembly, hardware acceleration
+          is enabled, and content blockers are not preventing the game from loading.
+        </p>
+        <button id="retry" class="retry-button" type="button">Retry</button>
+      </div>
     </div>
     <noscript>
-      <div class="noscript">Roady Car needs JavaScript and WebAssembly enabled to run.</div>
+      <div class="noscript">
+        <h1>JavaScript is required</h1>
+        <p>
+          Roady Car needs JavaScript, WebAssembly, and WebGL2. Enable JavaScript in a
+          compatible browser, then reload this page. A desktop keyboard is required
+          for the W/A/S/D or arrow-key controls.
+        </p>
+      </div>
     </noscript>
 
-    <link data-trunk rel="rust" data-bin="car_game_ai" />
+    <link data-trunk rel="rust" data-bin="car_game_ai" data-wasm-opt="z" />
     <script>
       (function () {
         var loading = document.getElementById("loading");
-        if (!loading) return;
+        var loadingContent = document.getElementById("loading-content");
+        var errorContent = document.getElementById("error-content");
+        var retry = document.getElementById("retry");
+        if (!loading || !loadingContent || !errorContent || !retry) return;
+
         loading.hidden = false;
         var finished = false;
-        function hideLoading() {
-          if (finished) return;
+        var bootConfirmed = false;
+        var errorShown = false;
+
+        function configureCanvas(canvas) {
+          canvas.setAttribute("role", "application");
+          canvas.setAttribute("aria-label", "Roady Car driving game");
+          canvas.setAttribute("aria-describedby", "keyboard-instructions");
+          canvas.setAttribute("aria-keyshortcuts", "W S A D ArrowUp ArrowDown ArrowLeft ArrowRight");
+          canvas.tabIndex = 0;
+        }
+
+        function hideLoading(canvas) {
+          if (finished || !bootConfirmed) return;
           finished = true;
+          if (errorShown && document.activeElement === retry) {
+            try { canvas.focus({ preventScroll: true }); } catch (e) { canvas.focus(); }
+          }
           loading.setAttribute("aria-hidden", "true");
           loading.classList.add("is-hidden");
           window.setTimeout(function () { loading.hidden = true; }, 200);
           observer.disconnect();
         }
+
         function canvasReady() {
-          if (!document.querySelector("canvas")) return false;
+          var canvas = document.querySelector("canvas");
+          if (!canvas) return false;
+          configureCanvas(canvas);
           window.requestAnimationFrame(function () {
-            window.requestAnimationFrame(hideLoading);
+            window.requestAnimationFrame(function () {
+              if (!canvas.isConnected) return;
+              bootConfirmed = true;
+              hideLoading(canvas);
+            });
           });
           return true;
         }
+
+        function showError() {
+          if (finished || bootConfirmed) return;
+          errorShown = true;
+          loadingContent.hidden = true;
+          errorContent.hidden = false;
+          loading.classList.add("is-error");
+          loading.setAttribute("role", "alert");
+          loading.setAttribute("aria-live", "assertive");
+          try { retry.focus({ preventScroll: true }); } catch (e) { retry.focus(); }
+        }
+
+        retry.addEventListener("click", function () {
+          retry.disabled = true;
+          retry.textContent = "Retrying...";
+          window.location.reload();
+        });
+
         var observer = new MutationObserver(canvasReady);
         if (!canvasReady()) {
           observer.observe(document.documentElement, { childList: true, subtree: true });
         }
-        ["keydown", "pointerdown", "touchstart"].forEach(function (eventName) {
-          window.addEventListener(eventName, hideLoading, { capture: true, once: true });
-        });
-        // Never leave a failed or unusually slow boot obscuring the page forever.
-        window.setTimeout(hideLoading, 15000);
+
+        // A gesture may unlock audio, but only a rendered game canvas dismisses this shell.
+        window.setTimeout(function () {
+          if (!canvasReady() && !bootConfirmed) showError();
+        }, 15000);
       })();
     </script>
   </body>

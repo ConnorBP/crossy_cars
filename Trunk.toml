@@ -1,0 +1,10 @@
+# Trunk 0.21 configuration. Production builds use release-mode asset processing
+# (including data-wasm-opt) plus the custom size-focused Cargo profile:
+#   trunk build --release --cargo-profile wasm-release
+[build]
+target = "index.html"
+dist = "dist"
+public_url = "./"
+filehash = true
+minify = "on_release"
+locked = true

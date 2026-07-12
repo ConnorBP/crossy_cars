@@ -5,3 +5,5 @@
 *.profraw
 best_score.txt
 tools/qa_screenshot.png
+tools/scenarios/
+tools/__pycache__/

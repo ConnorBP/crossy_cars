@@ -1,19 +1,19 @@
-"""Headless startup-crash audit for the Bevy/wasm car game.
+"""Headless runtime audit for the Bevy/wasm car game.
 
-Launches Chrome via Playwright, loads the served app, collects console + page
-errors, presses a key (to unlock audio + start gameplay), drives a bit, and
-reports any panics / render errors / runtime errors.
+Loads the served app, collects console and page errors, starts gameplay, and
+exercises driving. Every ``console.error`` or ``pageerror`` is a failure.
 
-Usage: python tools/browser_audit.py [url]   (default http://localhost:8080)
-Exit 0 = no crash detected; Exit 1 = crash/error detected.
+Usage: python tools/browser_audit.py [url] [--browser-channel chrome]
+Exit 0 = no error detected; Exit 1 = browser, page, or harness error detected.
 """
+import argparse
 import json
+import os
 import re
 import sys
 
-from playwright.sync_api import sync_playwright
-
-URL = sys.argv[1] if len(sys.argv) > 1 else "http://localhost:8080"
+DEFAULT_URL = "http://localhost:8080"
+DEFAULT_BROWSER_CHANNEL = "chrome"
 
 PANIC_RX = re.compile(
     r"panicked|RuntimeError|unreachable|__rust_abort|UnrecognizedFormat|"
@@ -23,7 +23,31 @@ PANIC_RX = re.compile(
 )
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Audit the Roady Car browser build.")
+    parser.add_argument("url", nargs="?", default=DEFAULT_URL)
+    parser.add_argument(
+        "--browser-channel",
+        default=os.environ.get("BROWSER_CHANNEL", DEFAULT_BROWSER_CHANNEL),
+        help=(
+            "Playwright Chromium channel (default: chrome, or BROWSER_CHANNEL). "
+            "Use 'chromium' to use Playwright's bundled browser."
+        ),
+    )
+    return parser.parse_args()
+
+
+def resolve_browser_channel(value: str) -> str | None:
+    """Map a friendly Chromium value to Playwright's channel-less launch."""
+    value = value.strip()
+    if value.lower() in {"", "chromium", "playwright", "bundled"}:
+        return None
+    return value
+
+
 def main() -> int:
+    args = parse_args()
+    browser_channel = resolve_browser_channel(args.browser_channel)
     logs: list[tuple[str, str]] = []
     page_errors: list[str] = []
     crashed = False
@@ -31,27 +55,39 @@ def main() -> int:
 
     def scan() -> None:
         nonlocal crashed, crash_reason
-        for typ, text in logs:
-            if typ == "error" and PANIC_RX.search(text):
-                crashed = True
-                crash_reason = f"console error: {text[:300]}"
-                return
-        for e in page_errors:
-            if PANIC_RX.search(e) or re.search(r"RuntimeError|unreachable", e, re.I):
-                crashed = True
-                crash_reason = f"pageerror: {e[:300]}"
-                return
+        # CI is intentionally strict: panic matching remains useful for the
+        # reason text, but no console.error or pageerror is ever ignored.
+        errors = [text for typ, text in logs if typ == "error"]
+        if errors:
+            crashed = True
+            text = errors[0]
+            kind = "panic/runtime console error" if PANIC_RX.search(text) else "console error"
+            crash_reason = f"{kind}: {text[:300]}"
+            return
+        if page_errors:
+            crashed = True
+            text = page_errors[0]
+            kind = "panic/runtime pageerror" if PANIC_RX.search(text) else "pageerror"
+            crash_reason = f"{kind}: {text[:300]}"
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(channel="chrome", headless=True)
-        ctx = browser.new_context(viewport={"width": 1280, "height": 720})
-        page = ctx.new_page()
+    browser = None
+    try:
+        # Import inside the guarded block so dependency/launch failures still
+        # produce the same machine-readable JSON report as page failures.
+        from playwright.sync_api import sync_playwright
 
-        page.on("console", lambda msg: logs.append((msg.type, msg.text)))
-        page.on("pageerror", lambda err: page_errors.append(str(err)))
+        with sync_playwright() as p:
+            launch_options = {"headless": True}
+            if browser_channel is not None:
+                launch_options["channel"] = browser_channel
+            browser = p.chromium.launch(**launch_options)
+            ctx = browser.new_context(viewport={"width": 1280, "height": 720})
+            page = ctx.new_page()
 
-        try:
-            page.goto(URL, wait_until="load", timeout=30000)
+            page.on("console", lambda msg: logs.append((msg.type, msg.text)))
+            page.on("pageerror", lambda err: page_errors.append(str(err)))
+
+            page.goto(args.url, wait_until="load", timeout=30000)
             page.wait_for_timeout(6000)  # boot: GPU init, first frames, asset load
             scan()
 
@@ -62,35 +98,60 @@ def main() -> int:
                 page.wait_for_timeout(4000)  # let the 3-2-1-GO countdown finish
                 # forward, turn left, forward, turn right, forward, reverse,
                 # turn around, forward — covers -Z, -X, +X, +Z, -Z.
-                for k in ["KeyW", "KeyW", "KeyW",
-                          "KeyA", "KeyA",
-                          "KeyW", "KeyW", "KeyW",
-                          "KeyD", "KeyD",
-                          "KeyW", "KeyW",
-                          "KeyS", "KeyS",
-                          "KeyA", "KeyA", "KeyA",
-                          "KeyW", "KeyW", "KeyW",
-                          "KeyD", "KeyW", "KeyW"]:
+                for k in [
+                    "KeyW", "KeyW", "KeyW",
+                    "KeyA", "KeyA",
+                    "KeyW", "KeyW", "KeyW",
+                    "KeyD", "KeyD",
+                    "KeyW", "KeyW",
+                    "KeyS", "KeyS",
+                    "KeyA", "KeyA", "KeyA",
+                    "KeyW", "KeyW", "KeyW",
+                    "KeyD", "KeyW", "KeyW",
+                ]:
                     page.keyboard.down(k)
                     page.wait_for_timeout(450)
                     page.keyboard.up(k)
                     page.wait_for_timeout(100)
                 page.wait_for_timeout(2500)
                 scan()
-        except Exception as e:  # noqa: BLE001
-            crashed = True
-            crash_reason = f"audit harness error: {str(e)[:300]}"
-        finally:
-            browser.close()
 
-    errors = [t for _, t in (x for x in logs if x[0] == "error")]
-    warns = [t for _, t in (x for x in logs if x[0] == "warning")]
+            # Close while Playwright's event loop is still alive. Closing in
+            # the outer finally after leaving `sync_playwright()` fabricates an
+            # "event loop is closed" cleanup failure on otherwise clean runs.
+            ctx.close()
+            browser.close()
+            browser = None
+    except Exception as e:  # noqa: BLE001
+        crashed = True
+        crash_reason = f"audit harness error: {str(e)[:300]}"
+    finally:
+        if browser is not None:
+            try:
+                browser.close()
+            except Exception as e:  # noqa: BLE001
+                crashed = True
+                if not crash_reason:
+                    crash_reason = f"browser cleanup error: {str(e)[:300]}"
+        # Include errors delivered at the end of the final wait/close. Do not
+        # replace a harness reason, which is generally the more actionable one.
+        if not crash_reason:
+            scan()
+        elif any(typ == "error" for typ, _ in logs) or page_errors:
+            crashed = True
+
+    errors = [text for typ, text in logs if typ == "error"]
+    warns = [text for typ, text in logs if typ == "warning"]
 
     def dedup(arr):
         return list(dict.fromkeys(arr))
 
     report = {
-        "url": URL,
+        "url": args.url,
+        "browser": {
+            "engine": "chromium",
+            "channel": browser_channel or "playwright-chromium",
+        },
         "crashed": crashed,
         "crashReason": crash_reason,
         "errorCount": len(errors),

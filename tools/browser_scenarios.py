@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """Repeatable browser QA scenario for Roady Car.
 
-Requires Playwright for Python and a locally installed Google Chrome::
+Requires Playwright for Python and, by default, locally installed Chrome::
 
     python -m pip install playwright
     python tools/browser_scenarios.py --url http://localhost:8080
+
+Pass ``--browser-channel chromium`` (or set ``BROWSER_CHANNEL=chromium``) to
+use Playwright's bundled Chromium, as CI does.
 
 The scenario deliberately interacts through keyboard input, timing, the loading
 DOM element, and localStorage. Game UI is rendered into a canvas, so it does not
@@ -15,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 import traceback
@@ -48,9 +52,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--headed",
         action="store_true",
-        help="Show Chrome instead of running headless.",
+        help="Show the browser instead of running headless.",
+    )
+    parser.add_argument(
+        "--browser-channel",
+        default=os.environ.get("BROWSER_CHANNEL", "chrome"),
+        help=(
+            "Playwright Chromium channel (default: chrome, or BROWSER_CHANNEL). "
+            "Use 'chromium' for Playwright's bundled browser."
+        ),
     )
     return parser.parse_args()
+
+
+def resolve_browser_channel(value: str) -> str | None:
+    value = value.strip()
+    if value.lower() in {"", "chromium", "playwright", "bundled"}:
+        return None
+    return value
 
 
 def elapsed_ms(started_at: float) -> int:
@@ -157,11 +176,13 @@ def run_scenario(args: argparse.Namespace, summary: dict[str, Any]) -> None:
 
     with sync_playwright() as playwright:
         try:
-            # The Chrome channel is intentional: this QA run exercises the installed
-            # Google Chrome rather than Playwright's bundled Chromium.
-            browser = playwright.chromium.launch(
-                channel="chrome", headless=not args.headed
-            )
+            # Local runs exercise installed Chrome by default; CI can select
+            # Playwright's installed Chromium without changing local behavior.
+            browser_channel = resolve_browser_channel(args.browser_channel)
+            launch_options: dict[str, Any] = {"headless": not args.headed}
+            if browser_channel is not None:
+                launch_options["channel"] = browser_channel
+            browser = playwright.chromium.launch(**launch_options)
             context = browser.new_context(
                 viewport={"width": 1440, "height": 900},
                 device_scale_factor=1,
@@ -414,6 +435,14 @@ def run_scenario(args: argparse.Namespace, summary: dict[str, Any]) -> None:
                 not summary["page_errors"],
                 f"observed {len(summary['page_errors'])} pageerror event(s)",
             )
+            assert_condition(
+                not summary["network_failures"],
+                f"observed {len(summary['network_failures'])} failed request(s)",
+            )
+            assert_condition(
+                not summary["http_errors"],
+                f"observed {len(summary['http_errors'])} HTTP error response(s)",
+            )
         finally:
             if context is not None:
                 try:
@@ -434,7 +463,12 @@ def main() -> int:
         "scenario": "wave_f_repeatable_browser_qa",
         "status": "running",
         "url": args.url,
-        "browser": {"engine": "chromium", "channel": "chrome", "headed": args.headed},
+        "browser": {
+            "engine": "chromium",
+            "channel": resolve_browser_channel(args.browser_channel)
+            or "playwright-chromium",
+            "headed": args.headed,
+        },
         "out_dir": str(Path(args.out_dir).expanduser()),
         "steps": [],
         "screenshots": [],
@@ -457,6 +491,14 @@ def main() -> int:
         assert_condition(
             not summary["page_errors"],
             f"observed {len(summary['page_errors'])} pageerror event(s)",
+        )
+        assert_condition(
+            not summary["network_failures"],
+            f"observed {len(summary['network_failures'])} failed request(s)",
+        )
+        assert_condition(
+            not summary["http_errors"],
+            f"observed {len(summary['http_errors'])} HTTP error response(s)",
         )
         if summary["cleanup_errors"]:
             raise RuntimeError("browser cleanup reported errors")

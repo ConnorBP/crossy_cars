@@ -162,17 +162,16 @@ fn follow_camera(
     };
     let vh = current_vh + (target_vh - current_vh) * t;
     if let Projection::Orthographic(ref mut o) = *proj {
-        o.scaling_mode = ScalingMode::FixedVertical { viewport_height: vh };
+        o.scaling_mode = ScalingMode::FixedVertical {
+            viewport_height: vh,
+        };
     }
 }
 
 /// T13: feed `ObstacleHit` messages into the `Shake` trauma accumulator. Runs
 /// before `follow_camera` (chained) so the freshly-added trauma is applied
 /// this same frame. Reads only — never touches the camera or car transform.
-fn handle_obstacle_hits(
-    mut hits: MessageReader<ObstacleHit>,
-    mut shake: ResMut<Shake>,
-) {
+fn handle_obstacle_hits(mut hits: MessageReader<ObstacleHit>, mut shake: ResMut<Shake>) {
     for hit in hits.read() {
         shake.trauma = (shake.trauma + hit.impact_speed * SHAKE_SCALE).clamp(0.0, 1.0);
     }

@@ -2,6 +2,7 @@
 name = "car_game_ai"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
 
 [dependencies]
 bevy = { version = "0.19", features = ["webgl2", "wav"] }
@@ -21,9 +22,12 @@ opt-level = 3
 codegen-units = 1
 lto = "thin"
 
-# Smaller wasm for web releases: `trunk build --release` or
-# `cargo build --release --target wasm32-unknown-unknown --profile wasm-release`
+# Smaller wasm for web releases. Use Trunk release-mode processing (wasm-opt
+# and minification) plus this profile: `trunk build --release --cargo-profile wasm-release`.
+# Cargo-only equivalent: `cargo build --profile wasm-release --target wasm32-unknown-unknown`.
 [profile.wasm-release]
 inherits = "release"
-opt-level = "s"
+opt-level = "z"
+lto = "fat"
+panic = "abort"
 strip = "debuginfo"
