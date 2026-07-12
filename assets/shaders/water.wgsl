@@ -5,7 +5,7 @@
 #import bevy_pbr::forward_io::VertexOutput
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> base: vec4<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(1) var<uniform> time: f32;
+@group(#{MATERIAL_BIND_GROUP}) @binding(1) var<uniform> time: vec4<f32>;
 
 @fragment
 fn fragment(mesh: VertexOutput) -> @location(0) vec4<f32> {
@@ -14,7 +14,7 @@ fn fragment(mesh: VertexOutput) -> @location(0) vec4<f32> {
     let r = length(uv);
 
     // Outward-traveling sine wave (phase scrolls with time).
-    let wave = sin(r * 12.0 - time * 3.0) * 0.5 + 0.5;
+    let wave = sin(r * 12.0 - time.x * 3.0) * 0.5 + 0.5;
 
     // Two blues: deep center, lighter troughs.
     let deep = vec4<f32>(0.05, 0.25, 0.45, 1.0);

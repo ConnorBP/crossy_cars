@@ -72,8 +72,11 @@ fn spawn_sky(
 pub struct WaterMaterial {
     #[uniform(0)]
     base: LinearRgba,
+    // WebGL2 requires uniform buffer bindings to be 16-byte aligned, so the
+    // animated phase is carried in a vec4 (we only use .x). A bare f32 (4B)
+    // fails pipeline creation on ANGLE/WebGL2.
     #[uniform(1)]
-    time: f32,
+    time: Vec4,
 }
 
 impl Material for WaterMaterial {
@@ -92,7 +95,7 @@ fn spawn_water(
         Mesh3d(meshes.add(Plane3d::default().mesh().size(12.0, 12.0))),
         MeshMaterial3d(materials.add(WaterMaterial {
             base: LinearRgba::new(0.10, 0.40, 0.60, 1.0),
-            time: 0.0,
+            time: Vec4::ZERO,
         })),
         // Slightly above the grass plane (y=0) to avoid z-fighting with it.
         Transform::from_xyz(30.0, 0.03, -10.0),
@@ -104,6 +107,6 @@ fn spawn_water(
 fn update_water(time: Res<Time>, mut water_materials: ResMut<Assets<WaterMaterial>>) {
     let t = time.elapsed_secs();
     for (_, mat) in water_materials.iter_mut() {
-        mat.time = t;
+        mat.time = Vec4::splat(t);
     }
 }
