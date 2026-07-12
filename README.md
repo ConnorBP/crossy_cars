@@ -1,7 +1,15 @@
-# Isometric Car Game
+# Roady Car
 
-A minimal isometric car-driving game built with [Bevy](https://bevyengine.org) 0.19.
+An isometric car-driving game built with [Bevy](https://bevyengine.org) 0.19.
 Runs natively **and** in the browser via WebAssembly (WebGL2).
+
+You know the riddle: *why did the chicken cross the road?* Roady Car flips
+it — the chicken isn't dodging traffic, **you** are the traffic. Drive an
+endless road and hunt down wandering chickens, who cross your path and award
+score when you run them over. The inverse chicken-crossing comes with a twist,
+though: pedestrians, cows, and moose also wander the road, and hitting one of
+those critters costs health and score. So chase the chickens, dodge
+everything else, and don't wreck the car before the timer runs out.
 
 ## Controls
 

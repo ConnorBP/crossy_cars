@@ -11,10 +11,11 @@ mod game;
 mod health;
 mod minimap;
 mod palette;
-mod pickups;
 mod persist;
+mod pickups;
 mod shaders;
 mod textures;
+mod transparency;
 mod ui;
 mod world;
 
@@ -37,20 +38,29 @@ use persist::PersistPlugin;
 use pickups::PickupsPlugin;
 use shaders::ShaderPlugin;
 use textures::TexturesPlugin;
+use transparency::TransparencyPlugin;
 use ui::UiPlugin;
 use world::WorldPlugin;
 
 fn main() {
     App::new()
         .add_plugins(
-            DefaultPlugins.set(AssetPlugin {
-                // On web, trunk's dev server returns index.html for the sidecar
-                // `<asset>.meta` 404s, which Bevy then fails to parse as RON.
-                // `Never` skips the .meta lookup and uses default meta, so the
-                // wav/wgsl assets load cleanly on both native and web.
-                meta_check: AssetMetaCheck::Never,
-                ..default()
-            }),
+            DefaultPlugins
+                .set(AssetPlugin {
+                    // On web, trunk's dev server returns index.html for the sidecar
+                    // `<asset>.meta` 404s, which Bevy then fails to parse as RON.
+                    // `Never` skips the .meta lookup and uses default meta, so the
+                    // wav/wgsl assets load cleanly on both native and web.
+                    meta_check: AssetMetaCheck::Never,
+                    ..default()
+                })
+                .set(WindowPlugin {
+                    primary_window: Some(Window {
+                        title: "Roady Car".into(),
+                        ..default()
+                    }),
+                    ..default()
+                }),
         )
         .insert_resource(ClearColor(palette::SKY))
         .insert_resource(GlobalAmbientLight {
@@ -72,6 +82,9 @@ fn main() {
             TexturesPlugin,
             PersistPlugin,
         ))
+        // Registered separately so neither plugin tuple approaches Bevy's
+        // tuple implementation limit as features are added.
+        .add_plugins(TransparencyPlugin)
         .add_plugins((
             ChickensPlugin,
             HealthPlugin,

@@ -8,9 +8,9 @@
 //!   mirroring `tick_timeleft`) and the derived difficulty level
 //!   (`level = (elapsed / 10) as u32`, capped at 6).
 //! - `Traffic { speed, axis, dir }` — a moving car the player must avoid.
-//!   Traffic entities are top-level (world `Transform`) and carry a
-//!   `world::Collider { half_x: 0.5, half_z: 1.0 }` so `car.rs::
-//!   physics_collisions` treats them as solid obstacles — crashing into one
+//!   Traffic entities are top-level (world `Transform`) and carry an
+//!   axis-correct `world::Collider` matching the 1×2 visual footprint, so
+//!   `car.rs::physics_collisions` treats them as solid obstacles — crashing into one
 //!   emits `ObstacleHit` → damage. The count scales with `level`
 //!   (`1 + level/2`, capped at 8); they drive straight along a world axis
 //!   and are recycled (despawned + respawned near/ahead) once they drift
@@ -33,12 +33,13 @@
 use bevy::color::LinearRgba;
 use bevy::prelude::*;
 use bevy::text::FontSize;
+use std::f32::consts::FRAC_PI_2;
 
 use crate::car::{Car, InputFrozen};
+use crate::game::SpawnSet;
 use crate::game::resources::RoundActive;
 use crate::game::state::GameState;
-use crate::game::SpawnSet;
-use crate::world::Collider;
+use crate::world::{Collider, is_road_line};
 
 // ===========================================================================
 // Tuning constants
@@ -60,9 +61,17 @@ const TRAFFIC_KEEP_RADIUS: f32 = 60.0;
 /// direction): `SPAWN_AHEAD_MIN .. + SPAWN_AHEAD_RANGE`.
 const SPAWN_AHEAD_MIN: f32 = 18.0;
 const SPAWN_AHEAD_RANGE: f32 = 32.0;
-/// Lateral offset (perpendicular to the car's forward, in the XZ plane) so
-/// traffic doesn't spawn exactly on the car's path line. ±`SPAWN_LATERAL`.
+/// Lateral jitter around the ahead-biased candidate point. The final
+/// cross-road coordinate is replaced by a deterministic road line + lane.
 const SPAWN_LATERAL: f32 = 3.0;
+/// World spacing and half-width of the roads built in `world.rs`.
+const ROAD_GRID: f32 = 40.0;
+const ROAD_HALF: f32 = 4.0;
+/// Centre of each directional lane. With the traffic half-width included,
+/// every car remains comfortably inside the road's ±4u paved area.
+const LANE_OFFSET: f32 = 1.5;
+const TRAFFIC_HALF_WIDTH: f32 = 0.5;
+const TRAFFIC_HALF_LENGTH: f32 = 1.0;
 
 /// Base traffic speed at level 0 (u/s). The player's `max_speed` is 12.0, so
 /// traffic is always slower and must be dodged, not outrun-forward forever.
@@ -74,16 +83,27 @@ const TRAFFIC_SPEED_PER_LEVEL: f32 = 0.7;
 const TRAFFIC_SPEED_JITTER: f32 = 0.3;
 const TRAFFIC_SPEED_JITTER_BASE: f32 = 0.85;
 
-// --- Traffic car mesh proportions (mirrors `car.rs` styling, no wheels) ---
+// --- Traffic car mesh proportions ---
 const BODY_W: f32 = 1.0;
-const BODY_H: f32 = 0.5;
 const BODY_D: f32 = 2.0;
-const CABIN_W: f32 = 0.8;
-const CABIN_H: f32 = 0.4;
-const CABIN_D: f32 = 1.0;
-const WINDSHIELD_W: f32 = 0.7;
-const WINDSHIELD_H: f32 = 0.2;
 const WINDSHIELD_D: f32 = 0.03;
+
+/// Shared visual silhouettes. Selection reads the module's deterministic
+/// LCG state without advancing it, so visuals do not perturb movement rolls.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TrafficKind {
+    Sedan,
+    Van,
+}
+
+impl TrafficKind {
+    fn index(self) -> usize {
+        match self {
+            Self::Sedan => 0,
+            Self::Van => 1,
+        }
+    }
+}
 
 // --- UI placement (top-right, below the minimap) ---
 /// Minimap bottom edge = `minimap::PANEL_TOP (54) + MAP_SIZE (120)`; sit 8px
@@ -113,82 +133,121 @@ pub struct Difficulty {
 /// mirroring `chickens.rs::ChickenAssets` / `pickups.rs::PickupAssets`).
 #[derive(Resource)]
 pub struct TrafficAssets {
-    body_mesh: Handle<Mesh>,
-    cabin_mesh: Handle<Mesh>,
-    windshield_mesh: Handle<Mesh>,
-    headlight_mesh: Handle<Mesh>,
-    /// A small palette of car-paint body materials (one per color) for
-    /// variety. Indexed by `weighted`-ish uniform pick at spawn.
+    /// Sedan and van geometry, indexed by [`TrafficKind::index`].
+    body_meshes: [Handle<Mesh>; 2],
+    cabin_meshes: [Handle<Mesh>; 2],
+    windshield_meshes: [Handle<Mesh>; 2],
+    light_mesh: Handle<Mesh>,
+    wheel_mesh: Handle<Mesh>,
+    hub_mesh: Handle<Mesh>,
+    shadow_mesh: Handle<Mesh>,
+    /// A small shared car-paint palette, selected at spawn.
     body_mats: [Handle<StandardMaterial>; 5],
     cabin_mat: Handle<StandardMaterial>,
     windshield_mat: Handle<StandardMaterial>,
     headlight_mat: Handle<StandardMaterial>,
+    rear_light_mat: Handle<StandardMaterial>,
+    wheel_mat: Handle<StandardMaterial>,
+    hub_mat: Handle<StandardMaterial>,
+    shadow_mat: Handle<StandardMaterial>,
 }
 
 impl FromWorld for TrafficAssets {
     fn from_world(world: &mut World) -> Self {
-        // Scope meshes first, then materials inside the closure so we never
-        // hold `&mut Assets<Mesh>` + `&mut Assets<StandardMaterial>` without
-        // scoping (risk E3 — mirrors `chickens.rs` / `pickups.rs`).
+        // Build every mesh/material exactly once. Spawns below only clone
+        // these handles; they never touch either Assets collection.
         world.resource_scope::<Assets<Mesh>, _>(|world, mut meshes| {
             let mut materials = world.resource_mut::<Assets<StandardMaterial>>();
 
-            let body_mesh = meshes.add(Cuboid::new(BODY_W, BODY_H, BODY_D));
-            let cabin_mesh = meshes.add(Cuboid::new(CABIN_W, CABIN_H, CABIN_D));
-            let windshield_mesh = meshes.add(Cuboid::new(WINDSHIELD_W, WINDSHIELD_H, WINDSHIELD_D));
-            let headlight_mesh = meshes.add(Cuboid::new(0.18, 0.12, 0.04));
-
-            // Car-paint palette: slightly metallic, low-ish roughness so the
-            // IBL + bloom read them as glossy cars (T15-style PBR).
-            let body_colors = [
-                Color::srgb(0.85, 0.12, 0.10), // red
-                Color::srgb(0.15, 0.35, 0.85), // blue
-                Color::srgb(0.18, 0.55, 0.22), // green
-                Color::srgb(0.78, 0.78, 0.82), // silver
-                Color::srgb(0.95, 0.65, 0.08), // orange
+            let body_meshes = [
+                meshes.add(Cuboid::new(BODY_W, 0.5, BODY_D)),
+                meshes.add(Cuboid::new(BODY_W, 0.65, BODY_D)),
             ];
-            let body_mats = body_colors.map(|c| {
+            let cabin_meshes = [
+                meshes.add(Cuboid::new(0.8, 0.4, 1.0)),
+                meshes.add(Cuboid::new(0.86, 0.65, 1.45)),
+            ];
+            let windshield_meshes = [
+                meshes.add(Cuboid::new(0.7, 0.2, WINDSHIELD_D)),
+                meshes.add(Cuboid::new(0.76, 0.38, WINDSHIELD_D)),
+            ];
+            let light_mesh = meshes.add(Cuboid::new(0.18, 0.12, 0.04));
+            let wheel_mesh = meshes.add(Cylinder::new(0.15, 0.18));
+            let hub_mesh = meshes.add(Cylinder::new(0.066, 0.19));
+            let shadow_mesh = meshes.add(Plane3d::default().mesh().size(1.55, 2.35));
+
+            let body_colors = [
+                Color::srgb(0.85, 0.12, 0.10),
+                Color::srgb(0.15, 0.35, 0.85),
+                Color::srgb(0.18, 0.55, 0.22),
+                Color::srgb(0.78, 0.78, 0.82),
+                Color::srgb(0.95, 0.65, 0.08),
+            ];
+            let body_mats = body_colors.map(|base_color| {
                 materials.add(StandardMaterial {
-                    base_color: c,
+                    base_color,
                     metallic: 0.6,
                     perceptual_roughness: 0.35,
                     ..default()
                 })
             });
-
-            // Cabin: dark glass-like box (matches `car.rs::CAR_CABIN`).
             let cabin_mat = materials.add(StandardMaterial {
                 base_color: Color::srgb(0.10, 0.10, 0.18),
                 perceptual_roughness: 0.4,
                 metallic: 0.2,
                 ..default()
             });
-
-            // Windshield: dark, glossy, metallic so it catches reflections.
             let windshield_mat = materials.add(StandardMaterial {
                 base_color: Color::srgb(0.05, 0.08, 0.12),
                 perceptual_roughness: 0.08,
                 metallic: 0.6,
                 ..default()
             });
-
-            // Headlights: warm emissive cubes (front = -Z). `LinearRgba`
-            // emissive so they glow under bloom (T9 rendering).
             let headlight_mat = materials.add(StandardMaterial {
                 base_color: Color::srgb(1.0, 0.9, 0.6),
                 emissive: LinearRgba::new(1.0, 0.9, 0.6, 1.0),
+                perceptual_roughness: 0.18,
+                ..default()
+            });
+            let rear_light_mat = materials.add(StandardMaterial {
+                base_color: Color::srgb(0.45, 0.015, 0.01),
+                emissive: LinearRgba::new(0.8, 0.025, 0.015, 1.0),
+                perceptual_roughness: 0.22,
+                ..default()
+            });
+            let wheel_mat = materials.add(StandardMaterial {
+                base_color: Color::srgb(0.025, 0.025, 0.03),
+                perceptual_roughness: 0.92,
+                ..default()
+            });
+            let hub_mat = materials.add(StandardMaterial {
+                base_color: Color::srgb(0.5, 0.53, 0.56),
+                metallic: 0.95,
+                perceptual_roughness: 0.18,
+                ..default()
+            });
+            let shadow_mat = materials.add(StandardMaterial {
+                base_color: Color::srgba(0.0, 0.0, 0.0, 0.35),
+                alpha_mode: AlphaMode::Blend,
                 ..default()
             });
 
             TrafficAssets {
-                body_mesh,
-                cabin_mesh,
-                windshield_mesh,
-                headlight_mesh,
+                body_meshes,
+                cabin_meshes,
+                windshield_meshes,
+                light_mesh,
+                wheel_mesh,
+                hub_mesh,
+                shadow_mesh,
                 body_mats,
                 cabin_mat,
                 windshield_mat,
                 headlight_mat,
+                rear_light_mat,
+                wheel_mat,
+                hub_mat,
+                shadow_mat,
             }
         })
     }
@@ -205,8 +264,8 @@ impl FromWorld for TrafficAssets {
 /// - `dir`   — `+1.0` or `-1.0` (direction along the axis).
 ///
 /// The entity is **top-level** (world `Transform`) and also carries a
-/// `Collider { half_x: 0.5, half_z: 1.0 }` so `physics_collisions` crashes
-/// the car into it. The root `Transform`'s rotation is set at spawn so the
+/// axis-correct `Collider` matching its 1×2 footprint so `physics_collisions`
+/// crashes the car into it. The root `Transform`'s rotation is set at spawn so the
 /// body's front (-Z, where the headlights are) faces the movement direction;
 /// `manage_traffic` only advances `translation` each frame.
 #[derive(Component)]
@@ -253,8 +312,7 @@ impl Plugin for DifficultyPlugin {
             // Per-frame: ramp the level + manage the traffic population.
             .add_systems(
                 Update,
-                (tick_difficulty, manage_traffic)
-                    .run_if(in_state(GameState::Playing)),
+                (tick_difficulty, manage_traffic).run_if(in_state(GameState::Playing)),
             )
             // UI refresh runs in every state so the label recovers even while
             // paused; the query is trivial when the UI root is absent.
@@ -366,9 +424,10 @@ fn manage_traffic(
         let axis = rand(&mut seed) < 0.5; // true = X, false = Z
         let dir = if rand(&mut seed) < 0.5 { 1.0 } else { -1.0 };
         let speed = traffic_speed(difficulty.level, &mut seed);
-        // Choose axis BEFORE position so the spawn can snap the cross-axis
-        // coordinate onto a road grid line (traffic drives on roads, not grass).
-        let pos = traffic_spawn_pos_on_road(car_pos, forward, right, axis, &mut seed);
+        // Choose axis + direction before position: the cross-axis coordinate
+        // is placed on a real deterministic road line, then offset into the
+        // direction's lane so opposing traffic does not overlap.
+        let pos = traffic_spawn_pos_on_road(car_pos, forward, right, axis, dir, &mut seed);
         spawn_one_traffic(&mut commands, &assets, pos, axis, dir, speed, &mut seed);
     }
 }
@@ -398,33 +457,89 @@ fn traffic_speed(level: u32, seed: &mut u32) -> f32 {
     base * (TRAFFIC_SPEED_JITTER_BASE + rand(seed) * TRAFFIC_SPEED_JITTER)
 }
 
-/// A spawn position ahead of the car (along its forward direction) with a
-/// small lateral offset so traffic doesn't spawn on the car's exact path.
+/// Translate `Traffic::axis` into `world::is_road_line`'s axis convention.
+/// X-moving traffic needs a horizontal (Z-indexed) line; Z-moving traffic
+/// needs a vertical (X-indexed) line.
+fn road_exists_for_movement(axis: bool, line: i32) -> bool {
+    is_road_line(!axis, line)
+}
+
+/// Find the nearest deterministic road line to a cross-road world coordinate.
+/// Search order is stable, and the bounded fallback is line zero, which
+/// `world.rs` guarantees is a road.
+fn nearest_road_line(axis: bool, cross: f32) -> i32 {
+    let center = (cross / ROAD_GRID).round() as i32;
+    if road_exists_for_movement(axis, center) {
+        return center;
+    }
+    for distance in 1..=64_i32 {
+        let lower = center.saturating_sub(distance);
+        let upper = center.saturating_add(distance);
+        let lower_is_road = road_exists_for_movement(axis, lower);
+        let upper_is_road = road_exists_for_movement(axis, upper);
+        match (lower_is_road, upper_is_road) {
+            (true, true) => {
+                let lower_distance = (cross - lower as f32 * ROAD_GRID).abs();
+                let upper_distance = (cross - upper as f32 * ROAD_GRID).abs();
+                return if lower_distance <= upper_distance {
+                    lower
+                } else {
+                    upper
+                };
+            }
+            (true, false) => return lower,
+            (false, true) => return upper,
+            (false, false) => {}
+        }
+    }
+    0
+}
+
+/// Direction-aware centre offset for one of the road's two lanes.
+fn lane_offset(dir: f32) -> f32 {
+    dir.signum() * LANE_OFFSET
+}
+
+/// A spawn position ahead of the player, constrained to a road that actually
+/// exists in the deterministic world network. The final lane centre is inside
+/// [`ROAD_HALF`] even including the traffic collider half-width.
 fn traffic_spawn_pos_on_road(
     car_pos: Vec3,
     forward: Vec3,
     right: Vec3,
     axis: bool,
+    dir: f32,
     seed: &mut u32,
 ) -> Vec3 {
     let ahead = SPAWN_AHEAD_MIN + rand(seed) * SPAWN_AHEAD_RANGE;
     let lat = (rand(seed) * 2.0 - 1.0) * SPAWN_LATERAL;
     let mut pos = car_pos + forward * ahead + right * lat;
-    // Snap the CROSS-axis coordinate to the nearest road grid line (a multiple
-    // of the block size 40) so traffic drives ON a road instead of on the
-    // grass. axis=true => moves along X => snap Z; axis=false => snap X.
-    const BLOCK: f32 = 40.0;
+    let cross = if axis { pos.z } else { pos.x };
+    let line = nearest_road_line(axis, cross);
+    let lane = line as f32 * ROAD_GRID + lane_offset(dir);
     if axis {
-        pos.z = (pos.z / BLOCK).round() * BLOCK;
+        pos.z = lane;
     } else {
-        pos.x = (pos.x / BLOCK).round() * BLOCK;
+        pos.x = lane;
     }
     pos
 }
 
-/// Spawn one traffic car (top-level) with a body + cabin + windshield +
-/// emissive headlights, a `Collider { half_x: 0.5, half_z: 1.0 }`, and the
-/// `Traffic` tag. The root `Transform`'s rotation orients the body's front
+/// Deterministic silhouette selection from the shared traffic LCG state.
+/// This deliberately does not advance the state: adding visual variety must
+/// not change subsequent movement direction, speed, or spawn-position rolls.
+fn traffic_kind(seed: u32) -> TrafficKind {
+    let visual_hash = seed.wrapping_mul(747796405).wrapping_add(2891336453) ^ seed.rotate_left(13);
+    if visual_hash % 20 < 13 {
+        TrafficKind::Sedan
+    } else {
+        TrafficKind::Van
+    }
+}
+
+/// Spawn one traffic car (top-level) with a deterministic sedan/van shell,
+/// lights, wheels, shadow, an axis-correct `Collider`, and the `Traffic` tag.
+/// The root `Transform`'s rotation orients the body's front
 /// (-Z) toward the movement direction so the headlights lead.
 fn spawn_one_traffic(
     commands: &mut Commands,
@@ -447,51 +562,86 @@ fn spawn_one_traffic(
     let heading = (-dir_vec.x).atan2(-dir_vec.z);
     let rotation = Quat::from_rotation_y(heading);
 
-    // Pick a body color uniformly from the palette.
+    let kind = traffic_kind(*seed);
+    let kind_idx = kind.index();
     let color_idx = (rand(seed) * assets.body_mats.len() as f32) as usize % assets.body_mats.len();
-
+    // The root collider remains the original 1×2 footprint for both visual
+    // silhouettes, preserving collision behaviour and fairness.
     commands
         .spawn((
             Transform::from_translation(pos).with_rotation(rotation),
             Visibility::default(),
             Traffic { speed, axis, dir },
             Collider {
-                half_x: 0.5,
-                half_z: 1.0,
+                // Collider is an axis-aligned world box, so swap the visual
+                // local extents when the root is rotated onto world X.
+                half_x: if axis {
+                    TRAFFIC_HALF_LENGTH
+                } else {
+                    TRAFFIC_HALF_WIDTH
+                },
+                half_z: if axis {
+                    TRAFFIC_HALF_WIDTH
+                } else {
+                    TRAFFIC_HALF_LENGTH
+                },
             },
         ))
         .with_children(|root| {
-            // Painted body shell (car paint), sitting at y = BODY_H/2 + a
-            // tiny lift so it doesn't z-fight the road.
+            let (body_y, cabin_y, cabin_z, glass_y, glass_z) = match kind {
+                TrafficKind::Sedan => (0.35, 0.35, 0.2, 0.45, -0.3),
+                TrafficKind::Van => (0.41, 0.54, 0.1, 0.62, -0.64),
+            };
             root.spawn((
-                Mesh3d(assets.body_mesh.clone()),
+                Mesh3d(assets.body_meshes[kind_idx].clone()),
                 MeshMaterial3d(assets.body_mats[color_idx].clone()),
-                Transform::from_xyz(0.0, 0.35, 0.0),
+                Transform::from_xyz(0.0, body_y, 0.0),
             ))
             .with_children(|body| {
-                // Cabin on top of the body (slightly toward the rear so the
-                // windshield faces forward).
                 body.spawn((
-                    Mesh3d(assets.cabin_mesh.clone()),
+                    Mesh3d(assets.cabin_meshes[kind_idx].clone()),
                     MeshMaterial3d(assets.cabin_mat.clone()),
-                    Transform::from_xyz(0.0, 0.35, 0.2),
+                    Transform::from_xyz(0.0, cabin_y, cabin_z),
                 ));
-                // Windshield: dark glass slab on the front of the cabin
-                // (front = -Z, where the headlights are).
                 body.spawn((
-                    Mesh3d(assets.windshield_mesh.clone()),
+                    Mesh3d(assets.windshield_meshes[kind_idx].clone()),
                     MeshMaterial3d(assets.windshield_mat.clone()),
-                    Transform::from_xyz(0.0, 0.45, -0.3),
+                    Transform::from_xyz(0.0, glass_y, glass_z),
                 ));
-                // Headlights at the front bumper (-Z).
+                // Warm front lamps and red rear lamps make heading readable.
                 for &x in &[-0.3_f32, 0.3] {
                     body.spawn((
-                        Mesh3d(assets.headlight_mesh.clone()),
+                        Mesh3d(assets.light_mesh.clone()),
                         MeshMaterial3d(assets.headlight_mat.clone()),
-                        Transform::from_xyz(x, -0.1, -1.0),
+                        Transform::from_xyz(x, -0.1, -1.02),
+                    ));
+                    body.spawn((
+                        Mesh3d(assets.light_mesh.clone()),
+                        MeshMaterial3d(assets.rear_light_mat.clone()),
+                        Transform::from_xyz(x, -0.1, 1.02),
                     ));
                 }
             });
+
+            // Four cylinder tires with slightly wider metallic hubs. Axles
+            // lie along local X; all geometry/material handles are shared.
+            for &(x, z) in &[(0.58, 0.7), (-0.58, 0.7), (0.58, -0.7), (-0.58, -0.7)] {
+                root.spawn((
+                    Mesh3d(assets.wheel_mesh.clone()),
+                    MeshMaterial3d(assets.wheel_mat.clone()),
+                    Transform::from_xyz(x, 0.15, z).with_rotation(Quat::from_rotation_z(FRAC_PI_2)),
+                ))
+                .with_child((
+                    Mesh3d(assets.hub_mesh.clone()),
+                    MeshMaterial3d(assets.hub_mat.clone()),
+                    Transform::default(),
+                ));
+            }
+            root.spawn((
+                Mesh3d(assets.shadow_mesh.clone()),
+                MeshMaterial3d(assets.shadow_mat.clone()),
+                Transform::from_xyz(0.0, 0.06, 0.0),
+            ));
         });
 }
 
@@ -568,5 +718,59 @@ fn rand(seed: &mut u32) -> f32 {
 fn ensure_seeded(seed: &mut u32, initial: u32) {
     if *seed == 0 {
         *seed = initial;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn target_traffic_count_boundaries() {
+        assert_eq!(target_traffic_count(0), 1);
+        assert_eq!(target_traffic_count(1), 1);
+        assert_eq!(target_traffic_count(2), 2);
+        assert_eq!(target_traffic_count(6), 4);
+        assert_eq!(target_traffic_count(14), MAX_TRAFFIC);
+        assert_eq!(target_traffic_count(u32::MAX), MAX_TRAFFIC);
+    }
+
+    #[test]
+    fn spawn_uses_existing_road_line_and_directional_lane() {
+        let car = Vec3::new(137.0, 0.0, -93.0);
+        let forward = Vec3::new(0.8, 0.0, -0.6);
+        let right = Vec3::new(-0.6, 0.0, -0.8);
+        for axis in [false, true] {
+            for dir in [-1.0, 1.0] {
+                let mut seed = 0x1234_5678;
+                let pos = traffic_spawn_pos_on_road(car, forward, right, axis, dir, &mut seed);
+                let cross = if axis { pos.z } else { pos.x };
+                let line = ((cross - lane_offset(dir)) / ROAD_GRID).round() as i32;
+                assert!(road_exists_for_movement(axis, line));
+                let offset = cross - line as f32 * ROAD_GRID;
+                assert!((offset - lane_offset(dir)).abs() < 1e-4);
+                assert!(offset.abs() + TRAFFIC_HALF_WIDTH < ROAD_HALF);
+            }
+        }
+    }
+
+    #[test]
+    fn opposing_directions_select_separate_lanes() {
+        assert_eq!(lane_offset(1.0), LANE_OFFSET);
+        assert_eq!(lane_offset(-1.0), -LANE_OFFSET);
+        assert!(2.0 * LANE_OFFSET > 2.0 * TRAFFIC_HALF_WIDTH);
+        assert!(LANE_OFFSET + TRAFFIC_HALF_WIDTH < ROAD_HALF);
+    }
+
+    #[test]
+    fn kind_selection_is_deterministic_and_varied() {
+        let seeds: Vec<_> = (0_u32..64)
+            .map(|i| 0xCAFE_BABE_u32.wrapping_add(i.wrapping_mul(0x9E37_79B9)))
+            .collect();
+        let a: Vec<_> = seeds.iter().copied().map(traffic_kind).collect();
+        let b: Vec<_> = seeds.iter().copied().map(traffic_kind).collect();
+        assert_eq!(a, b);
+        assert!(a.contains(&TrafficKind::Sedan));
+        assert!(a.contains(&TrafficKind::Van));
     }
 }

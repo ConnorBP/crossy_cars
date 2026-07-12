@@ -94,7 +94,7 @@ fn spawn_menu(mut commands: Commands) {
         .with_children(|p| {
             // Title
             p.spawn((
-                Text::new("ISO RACER"),
+                Text::new("ROADY CAR"),
                 TextFont {
                     font_size: FontSize::Px(72.0),
                     ..default()
