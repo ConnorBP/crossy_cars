@@ -6,6 +6,7 @@ mod countdown;
 mod effects;
 mod game;
 mod health;
+mod minimap;
 mod palette;
 mod persist;
 mod shaders;
@@ -24,6 +25,7 @@ use countdown::CountdownPlugin;
 use effects::EffectsPlugin;
 use game::GamePlugin;
 use health::HealthPlugin;
+use minimap::MinimapPlugin;
 use persist::PersistPlugin;
 use shaders::ShaderPlugin;
 use textures::TexturesPlugin;
@@ -45,7 +47,10 @@ fn main() {
         .insert_resource(ClearColor(palette::SKY))
         .insert_resource(GlobalAmbientLight {
             color: Color::WHITE,
-            brightness: 150.0,
+            // Tuned down for HDR + TonyMcMapface tonemapping (T9). 150.0 was
+            // pre-HDR and washed the scene out once bloom/tonemapping landed;
+            // the directional sun + IBL now carry the lighting.
+            brightness: 40.0,
             ..default()
         })
         .add_plugins((
@@ -60,6 +65,7 @@ fn main() {
             PersistPlugin,
             ChickensPlugin,
             HealthPlugin,
+            MinimapPlugin,
             CountdownPlugin,
             EffectsPlugin,
         ))

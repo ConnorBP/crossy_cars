@@ -14,6 +14,10 @@ use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 /// Texture edge length in pixels.
 const TEX_SIZE: u32 = 64;
 
+/// Normal-map edge length (can differ from color textures; 64 is plenty for
+/// a subtle surface perturbation that tiles).
+const NORMAL_SIZE: u32 = 64;
+
 // Base sRGB values matching crate::palette constants (see palette.rs).
 const GRASS_SRGB: [f32; 3] = [0.30, 0.60, 0.30]; // palette::GRASS_LIGHT
 const ASPHALT_SRGB: [f32; 3] = [0.13, 0.13, 0.14]; // palette::ASPHALT
@@ -50,29 +54,52 @@ impl FromWorld for TextureAssets {
         world.resource_scope::<Assets<Image>, _>(|world, mut images| {
             let mut materials = world.resource_mut::<Assets<StandardMaterial>>();
 
+        // --- T9: procedural normal maps (shared generators) ---
+        // Road/asphalt gets a gravelly normal map (stronger) so the surface
+        // catches light per-pixel instead of looking like flat paint.
+        let road_normal = images.add(asphalt_normal_map());
+        // Car paint gets a very subtle orange-peel normal map (nearly flat)
+        // for a soft micro-sheen without reintroducing the crawling sparkle.
+        let car_normal = images.add(smooth_normal_map(0.25));
+        // Grass gets a gentle bumpy normal for natural light scatter.
+        let grass_normal = images.add(smooth_normal_map(0.6));
+        // Sidewalk gets a subtle bumpy normal for concrete texture.
+        let sidewalk_normal = images.add(smooth_normal_map(0.5));
+
         // GRASS — green base with subtle per-pixel noise; tile 16×.
+        // T9: tuned PBR — fully rough (matte), with a gentle bumpy normal map
+        // so the surface scatters light naturally instead of looking flat.
         let grass = materials.add(StandardMaterial {
             base_color: Color::WHITE,
             base_color_texture: Some(images.add(grass_texture())),
+            normal_map_texture: Some(grass_normal),
             perceptual_roughness: 1.0,
+            metallic: 0.0,
             uv_transform: Affine2::from_scale(Vec2::splat(16.0)),
             ..default()
         });
 
         // ROAD — dark asphalt with faint noise + gravel specks; tile 8×.
+        // T9: tuned PBR — near-fully rough with a gravelly normal map for
+        // per-pixel surface detail (the main visual win from normal mapping).
         let road = materials.add(StandardMaterial {
             base_color: Color::WHITE,
             base_color_texture: Some(images.add(road_texture())),
-            perceptual_roughness: 0.95,
+            normal_map_texture: Some(road_normal),
+            perceptual_roughness: 0.92,
+            metallic: 0.0,
             uv_transform: Affine2::from_scale(Vec2::splat(8.0)),
             ..default()
         });
 
         // SIDEWALK — concrete with a subtle checker + noise; tile 6×.
+        // T9: tuned PBR — rough concrete with a bumpy normal map.
         let sidewalk = materials.add(StandardMaterial {
             base_color: Color::WHITE,
             base_color_texture: Some(images.add(sidewalk_texture())),
-            perceptual_roughness: 0.9,
+            normal_map_texture: Some(sidewalk_normal),
+            perceptual_roughness: 0.88,
+            metallic: 0.0,
             uv_transform: Affine2::from_scale(Vec2::splat(6.0)),
             ..default()
         });
@@ -82,11 +109,15 @@ impl FromWorld for TextureAssets {
         // to the body but the eye sees the high-frequency pattern shift), so we
         // keep the texture very smooth and rely on PBR gloss + reflections for
         // the paint look instead. Tile 1× (no visible repeat).
+        // T9: tuned PBR — metallic 0.35 / roughness 0.22 for a clearcoat-ish
+        // gloss, plus a very subtle orange-peel normal map for micro-sheen.
+        // `emissive` stays off here (the body isn't a light source).
         let car_paint = materials.add(StandardMaterial {
             base_color: Color::WHITE,
             base_color_texture: Some(images.add(car_paint_texture())),
+            normal_map_texture: Some(car_normal),
             metallic: 0.35,
-            perceptual_roughness: 0.25,
+            perceptual_roughness: 0.22,
             uv_transform: Affine2::from_scale(Vec2::splat(1.0)),
             ..default()
         });
@@ -234,4 +265,102 @@ fn car_paint_texture() -> Image {
         let bl = clamp_byte(b[2] + v / 3);
         [r, g, bl, 255]
     })
+}
+
+// ---------------------------------------------------------------------------
+// T9: Procedural normal maps
+// ---------------------------------------------------------------------------
+//
+// A normal map encodes perturbed surface normals in tangent space as RGB:
+// (128, 128, 255) ≈ flat (normal pointing +Z). We derive the normal from a
+// noise height field via finite differences: n = normalize(-dh/dx, -dh/dy, 1)
+// scaled by a `strength` factor. The result is an RGBA image in **linear**
+// space (`Rgba8Unorm`, NOT sRGB) — lighting breaks if normal maps are stored
+// sRGB. Kept subtle so surfaces get per-pixel light scatter without looking
+// bumpy/low-poly.
+
+/// Build a `NORMAL_SIZE²` RGBA **normal map** image from a height-field
+/// closure. `strength` controls how much the height derivatives perturb the
+/// normal (smaller = subtler). The sampler repeats for tiling.
+fn make_normal_map<F>(height: F, strength: f32) -> Image
+where
+    F: Fn(u32, u32) -> f32,
+{
+    let size = NORMAL_SIZE;
+    // Precompute the height field so finite differences can sample neighbours.
+    let mut h = vec![0.0f32; (size * size) as usize];
+    for y in 0..size {
+        for x in 0..size {
+            h[((y * size + x)) as usize] = height(x, y);
+        }
+    }
+    let at = |x: i32, y: i32| -> f32 {
+        // Wrap (tileable) indices.
+        let x = x.rem_euclid(size as i32) as u32;
+        let y = y.rem_euclid(size as i32) as u32;
+        h[((y * size + x)) as usize]
+    };
+
+    let mut data = vec![0u8; (size * size * 4) as usize];
+    for y in 0..size {
+        for x in 0..size {
+            let xi = x as i32;
+            let yi = y as i32;
+            // Central differences (one texel in each direction).
+            let dx = (at(xi + 1, yi) - at(xi - 1, yi)) * strength;
+            let dy = (at(xi, yi + 1) - at(xi, yi - 1)) * strength;
+            // Tangent-space normal: (-dx, -dy, 1) normalized.
+            let nx = -dx;
+            let ny = -dy;
+            let nz = 1.0;
+            let len = (nx * nx + ny * ny + nz * nz).sqrt().max(1e-6);
+            let r = ((nx / len) * 0.5 + 0.5).clamp(0.0, 1.0);
+            let g = ((ny / len) * 0.5 + 0.5).clamp(0.0, 1.0);
+            let b = ((nz / len) * 0.5 + 0.5).clamp(0.0, 1.0);
+            let i = ((y * size + x) * 4) as usize;
+            data[i] = (r * 255.0).round() as u8;
+            data[i + 1] = (g * 255.0).round() as u8;
+            data[i + 2] = (b * 255.0).round() as u8;
+            data[i + 3] = 255;
+        }
+    }
+    let mut img = Image::new(
+        Extent3d {
+            width: size,
+            height: size,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        data,
+        // Linear, NOT sRGB — normal maps store vectors, not colours.
+        TextureFormat::Rgba8Unorm,
+        RenderAssetUsages::default(),
+    );
+    set_repeat(&mut img);
+    img
+}
+
+/// A smooth, low-amplitude noise normal map for surfaces that should have a
+/// gentle micro-relief (grass, concrete, car paint orange-peel). `strength`
+/// tunes the perturbation; ~0.25 is near-flat, ~0.6 is a gentle bumpy surface.
+fn smooth_normal_map(strength: f32) -> Image {
+    make_normal_map(
+        |x, y| signed_noise(x, y) as f32 / 128.0,
+        strength,
+    )
+}
+
+/// Asphalt/road normal map: a mix of low-frequency bumps + a few sharper
+/// gravel specks so the road catches light with a gravelly grain. Stronger
+/// than `smooth_normal_map` because asphalt has real surface texture.
+fn asphalt_normal_map() -> Image {
+    make_normal_map(
+        |x, y| {
+            let base = signed_noise(x, y) as f32 / 128.0;
+            // Sharper speckles at a different frequency for gravel grain.
+            let speck = signed_noise(x * 3, y * 3) as f32 / 128.0;
+            base * 0.7 + speck * 0.3
+        },
+        0.8,
+    )
 }

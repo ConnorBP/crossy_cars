@@ -22,7 +22,10 @@ impl Plugin for ShaderPlugin {
         app.add_plugins(MaterialPlugin::<SkyMaterial>::default())
             .add_plugins(MaterialPlugin::<WaterMaterial>::default())
             .add_systems(Startup, (spawn_sky, spawn_water))
-            .add_systems(Update, (update_water, update_skydome));
+            .add_systems(
+                Update,
+                (update_water, update_skydome, setup_environment_light),
+            );
     }
 }
 
@@ -131,4 +134,42 @@ fn update_water(time: Res<Time>, mut water_materials: ResMut<Assets<WaterMateria
     for (_, mat) in water_materials.iter_mut() {
         mat.time = Vec4::splat(t);
     }
+}
+
+// ---------------------------------------------------------------------------
+// T9: Static pre-baked environment map for IBL reflections
+// ---------------------------------------------------------------------------
+//
+// `EnvironmentMapGenerationPlugin` (runtime cubemap filtering) is disabled on
+// WebGL2 because it needs compute shaders. But a **pre-baked** cubemap works
+// fine — it's just a static `Image` sampled in the PBR shader, no compute.
+// Bevy 0.19 ships `EnvironmentMapLight::hemispherical_gradient` which builds a
+// tiny 1×1×6 cubemap from three colors (sky / horizon / ground) procedurally,
+// so we get IBL diffuse + specular reflections on metallic/glossy surfaces
+// (car paint, lamp poles, coins) on BOTH native and web.
+//
+// `EnvironmentMapLight` is a **view** component (read off the camera entity),
+// so we insert it onto the `Camera3d` here rather than spawning a `LightProbe`
+// entity. This runs every Update but exits early once the camera has the
+// component, so startup ordering with `spawn_camera` doesn't matter.
+fn setup_environment_light(
+    mut commands: Commands,
+    cameras: Query<Entity, (With<Camera3d>, Without<EnvironmentMapLight>)>,
+    mut images: ResMut<Assets<Image>>,
+) {
+    let Ok(cam) = cameras.single() else {
+        return;
+    };
+    // Warm sky → pale horizon → warm ground gradient, matching the existing
+    // `SkyMaterial` dome and the warm directional sun in `world.rs`. Intensity
+    // is kept modest because `main.rs` already sets a bright `GlobalAmbientLight`
+    // (150) — we only want enough IBL for specular reflections on glossy/metal
+    // surfaces, not to double-light the scene.
+    let env = EnvironmentMapLight::hemispherical_gradient(
+        &mut images,
+        Color::srgb(0.55, 0.78, 0.95), // top — sky blue (matches skydome)
+        Color::srgb(0.85, 0.90, 0.95), // mid — pale horizon haze
+        Color::srgb(0.25, 0.22, 0.18), // bottom — warm earth
+    );
+    commands.entity(cam).insert(env);
 }

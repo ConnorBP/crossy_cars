@@ -1,4 +1,11 @@
 use bevy::{camera::ScalingMode, prelude::*};
+// T9 rendering beef-up: explicit tonemapping + bloom on the 3D camera.
+// `Bloom` is a separate component in 0.19 (not a `Camera3d` field) and it
+// `#[require(Hdr)]`s the HDR render target, which is what lets bloom +
+// tonemapping work. `Tonemapping` is already a required component of `Camera3d`
+// (default `TonyMcMapface`) but we set it explicitly to make the intent clear.
+use bevy::core_pipeline::tonemapping::Tonemapping;
+use bevy::post_process::bloom::Bloom;
 
 use crate::car::Car;
 use crate::game::resources::GameConfig;
@@ -19,12 +26,32 @@ impl Plugin for CameraPlugin {
 fn spawn_camera(mut commands: Commands) {
     commands.spawn((
         Camera3d::default(),
+        // T9: MSAA 4× for edge anti-aliasing. In Bevy 0.19 `Msaa` is a camera
+        // component (not a resource). Works on both native and WebGL2
+        // (WebGL2 supports up to 4× MSAA via renderable sample counts).
+        Msaa::Sample4,
+        // T9: tonemapping — TonyMcMapface is a neutral, filmic display transform
+        // that desaturates brights cleanly. Pairs well with bloom.
+        Tonemapping::TonyMcMapface,
+        // T9: bloom — `Bloom` auto-inserts the `Hdr` component (via
+        // `#[require(Hdr)]`), switching the camera to an HDR intermediate
+        // target so emissive materials (headlights/brake lamps/coins/lamps)
+        // can glow. `NATURAL` is the energy-conserving default preset; we tune
+        // the intensity down slightly so the high ambient light (set in
+        // main.rs) doesn't over-bloom.
+        Bloom {
+            intensity: 0.1,
+            ..Bloom::NATURAL
+        },
         Projection::from(OrthographicProjection {
             scaling_mode: ScalingMode::FixedVertical {
                 viewport_height: 10.0,
             },
             ..OrthographicProjection::default_3d()
         }),
+        // T7 fix preserved: the iso rotation is set ONCE here at spawn via
+        // `looking_at(ZERO, Y)` and NEVER recomputed per frame. `follow_camera`
+        // only lerps translation + adjusts the ortho viewport_height (zoom).
         Transform::from_xyz(12.0, 12.0, 12.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));
 }

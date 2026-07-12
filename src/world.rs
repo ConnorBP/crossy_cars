@@ -327,6 +327,8 @@ pub fn populate_chunk(
             base_color: palette::COIN,
             metallic: 0.8,
             perceptual_roughness: 0.25,
+            // Emissive gold glow so coins pop with bloom (T9 rendering beef-up).
+            emissive: LinearRgba::rgb(0.9, 0.55, 0.05),
             ..default()
         });
 
