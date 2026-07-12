@@ -21,6 +21,44 @@ pub struct Car {
 #[derive(Resource, Default)]
 pub struct InputFrozen(pub bool);
 
+/// Centralized player driving intent. Keyboard input populates this resource;
+/// other input methods can write the same normalized controls later.
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Default)]
+pub struct PlayerInput {
+    /// Reverse (-1.0) through forward (1.0).
+    pub throttle: f32,
+    /// Right (-1.0) through left (1.0), matching the car's steering sign.
+    pub steer: f32,
+    /// Active braking. This takes precedence over throttle in `move_car`.
+    pub brake: bool,
+}
+
+/// Convert the keyboard's individual bindings into normalized driving intent.
+/// Opposite directions cancel, while duplicate bindings for one direction are
+/// combined and clamped to a single unit of input.
+fn map_keyboard_input(
+    w: bool,
+    up: bool,
+    s: bool,
+    down: bool,
+    a: bool,
+    left: bool,
+    d: bool,
+    right: bool,
+    space: bool,
+) -> PlayerInput {
+    let forward = w || up;
+    let reverse = s || down;
+    let steer_left = a || left;
+    let steer_right = d || right;
+
+    PlayerInput {
+        throttle: ((forward as i8 - reverse as i8) as f32).clamp(-1.0, 1.0),
+        steer: ((steer_left as i8 - steer_right as i8) as f32).clamp(-1.0, 1.0),
+        brake: space,
+    }
+}
+
 /// Tag for the car's painted body shell. Tilted by `roll_body` for a subtle
 /// weight-shift when cornering; the cabin, glass and lights are nested under
 /// it so they lean together.
@@ -58,7 +96,12 @@ pub struct CarPlugin;
 impl Plugin for CarPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<InputFrozen>()
+            .init_resource::<PlayerInput>()
             .add_systems(Startup, spawn_car)
+            // Keep this reader active in every state so menu/pause/freeze
+            // transitions immediately clear input instead of retaining a held
+            // value from the previous Playing frame.
+            .add_systems(Update, read_keyboard_input.before(move_car))
             .add_systems(
                 Update,
                 // move_car first, then resolve curb hops + obstacle collisions,
@@ -321,9 +364,33 @@ fn spawn_car(
         });
 }
 
+fn read_keyboard_input(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut input: ResMut<PlayerInput>,
+    state: Res<State<GameState>>,
+    input_frozen: Res<InputFrozen>,
+) {
+    if *state.get() != GameState::Playing || input_frozen.0 {
+        *input = PlayerInput::default();
+        return;
+    }
+
+    *input = map_keyboard_input(
+        keys.pressed(KeyCode::KeyW),
+        keys.pressed(KeyCode::ArrowUp),
+        keys.pressed(KeyCode::KeyS),
+        keys.pressed(KeyCode::ArrowDown),
+        keys.pressed(KeyCode::KeyA),
+        keys.pressed(KeyCode::ArrowLeft),
+        keys.pressed(KeyCode::KeyD),
+        keys.pressed(KeyCode::ArrowRight),
+        keys.pressed(KeyCode::Space),
+    );
+}
+
 fn move_car(
     mut car: Query<(&mut Car, &mut Transform)>,
-    keys: Res<ButtonInput<KeyCode>>,
+    input: Res<PlayerInput>,
     cfg: Res<GameConfig>,
     time: Res<Time>,
     input_frozen: Res<InputFrozen>,
@@ -338,19 +405,15 @@ fn move_car(
     };
     let dt = time.delta_secs();
 
-    let forward_in = keys.pressed(KeyCode::KeyW) || keys.pressed(KeyCode::ArrowUp);
-    let back_in = keys.pressed(KeyCode::KeyS) || keys.pressed(KeyCode::ArrowDown);
-    let brake_in = keys.pressed(KeyCode::Space);
-
     // Eased approach to a target speed. Brake dominates, then accel, then
     // capped reverse, then coast. `rate` controls how quickly `speed`
     // converges to `target`.
-    let (target, rate) = if brake_in {
+    let (target, rate) = if input.brake {
         (0.0, 14.0)
-    } else if forward_in {
-        (cfg.max_speed, 3.0)
-    } else if back_in {
-        (-cfg.max_speed * 0.5, 3.0)
+    } else if input.throttle > 0.0 {
+        (cfg.max_speed * input.throttle.clamp(0.0, 1.0), 3.0)
+    } else if input.throttle < 0.0 {
+        (cfg.max_speed * 0.5 * input.throttle.clamp(-1.0, 0.0), 3.0)
     } else {
         (0.0, 2.0)
     };
@@ -361,16 +424,8 @@ fn move_car(
         car.speed = 0.0;
     }
 
-    let steer = if keys.pressed(KeyCode::KeyA) || keys.pressed(KeyCode::ArrowLeft) {
-        1.0
-    } else if keys.pressed(KeyCode::KeyD) || keys.pressed(KeyCode::ArrowRight) {
-        -1.0
-    } else {
-        0.0
-    };
-
     // Steering scales with speed so the car can't spin in place.
-    car.heading += steer * cfg.turn_rate * dt * (car.speed / cfg.max_speed);
+    car.heading += input.steer.clamp(-1.0, 1.0) * cfg.turn_rate * dt * (car.speed / cfg.max_speed);
 
     let forward = Vec3::new(-car.heading.sin(), 0.0, -car.heading.cos());
     tf.translation += forward * car.speed * dt;
@@ -382,20 +437,14 @@ fn move_car(
 fn spin_wheels(
     cars: Query<&Car>,
     mut wheels: Query<(&mut Transform, &mut Wheel, Option<&FrontWheel>)>,
-    keys: Res<ButtonInput<KeyCode>>,
+    input: Res<PlayerInput>,
     time: Res<Time>,
 ) {
     let Ok(car) = cars.single() else {
         return;
     };
     let dt = time.delta_secs();
-    let steer_input = if keys.pressed(KeyCode::KeyA) || keys.pressed(KeyCode::ArrowLeft) {
-        1.0
-    } else if keys.pressed(KeyCode::KeyD) || keys.pressed(KeyCode::ArrowRight) {
-        -1.0
-    } else {
-        0.0
-    };
+    let steer_input = input.steer.clamp(-1.0, 1.0);
     // Rolling: distance travelled / radius => radians. Rebuild the quaternion
     // from independent yaw/base/roll terms every frame so steering cannot
     // accumulate into a tumbling wheel.
@@ -418,20 +467,14 @@ fn spin_wheels(
 fn roll_body(
     cars: Query<&Car>,
     mut bodies: Query<(&mut Transform, &mut BodyMotion), With<CarBody>>,
-    keys: Res<ButtonInput<KeyCode>>,
+    input: Res<PlayerInput>,
     cfg: Res<GameConfig>,
     time: Res<Time>,
 ) {
     let Ok(car) = cars.single() else {
         return;
     };
-    let steer = if keys.pressed(KeyCode::KeyA) || keys.pressed(KeyCode::ArrowLeft) {
-        1.0
-    } else if keys.pressed(KeyCode::KeyD) || keys.pressed(KeyCode::ArrowRight) {
-        -1.0
-    } else {
-        0.0
-    };
+    let steer = input.steer.clamp(-1.0, 1.0);
     let dt = time.delta_secs();
     let speed_frac = (car.speed / cfg.max_speed).clamp(-1.0, 1.0);
     let target_roll = -steer * speed_frac * 0.12;
@@ -452,13 +495,11 @@ fn roll_body(
 }
 
 fn brake_lights(
-    keys: Res<ButtonInput<KeyCode>>,
+    input: Res<PlayerInput>,
     brake_q: Query<&MeshMaterial3d<StandardMaterial>, With<BrakeLight>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    let braking = keys.pressed(KeyCode::KeyS)
-        || keys.pressed(KeyCode::ArrowDown)
-        || keys.pressed(KeyCode::Space);
+    let braking = input.throttle < 0.0 || input.brake;
     let intensity = if braking { 1.0 } else { 0.25 };
     for mat in &brake_q {
         if let Some(mut m) = materials.get_mut(mat) {
@@ -552,5 +593,113 @@ pub fn physics_collisions(
                 car.speed = 0.0;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mapped(keys: [bool; 9]) -> PlayerInput {
+        map_keyboard_input(
+            keys[0], keys[1], keys[2], keys[3], keys[4], keys[5], keys[6], keys[7], keys[8],
+        )
+    }
+
+    #[test]
+    fn player_input_defaults_to_zero() {
+        assert_eq!(
+            PlayerInput::default(),
+            PlayerInput {
+                throttle: 0.0,
+                steer: 0.0,
+                brake: false,
+            }
+        );
+        assert_eq!(mapped([false; 9]), PlayerInput::default());
+    }
+
+    #[test]
+    fn each_forward_and_reverse_key_has_the_expected_sign() {
+        for index in [0, 1] {
+            let mut keys = [false; 9];
+            keys[index] = true;
+            assert_eq!(mapped(keys).throttle, 1.0);
+        }
+        for index in [2, 3] {
+            let mut keys = [false; 9];
+            keys[index] = true;
+            assert_eq!(mapped(keys).throttle, -1.0);
+        }
+    }
+
+    #[test]
+    fn each_left_and_right_key_has_the_existing_steering_sign() {
+        for index in [4, 5] {
+            let mut keys = [false; 9];
+            keys[index] = true;
+            assert_eq!(mapped(keys).steer, 1.0);
+        }
+        for index in [6, 7] {
+            let mut keys = [false; 9];
+            keys[index] = true;
+            assert_eq!(mapped(keys).steer, -1.0);
+        }
+    }
+
+    #[test]
+    fn opposing_direction_keys_cancel() {
+        for forward in [0, 1] {
+            for reverse in [2, 3] {
+                let mut keys = [false; 9];
+                keys[forward] = true;
+                keys[reverse] = true;
+                assert_eq!(mapped(keys).throttle, 0.0);
+            }
+        }
+        for left in [4, 5] {
+            for right in [6, 7] {
+                let mut keys = [false; 9];
+                keys[left] = true;
+                keys[right] = true;
+                assert_eq!(mapped(keys).steer, 0.0);
+            }
+        }
+    }
+
+    #[test]
+    fn duplicate_bindings_are_clamped_not_summed() {
+        assert_eq!(
+            mapped([true, true, false, false, false, false, false, false, false]).throttle,
+            1.0
+        );
+        assert_eq!(
+            mapped([false, false, true, true, false, false, false, false, false]).throttle,
+            -1.0
+        );
+        assert_eq!(
+            mapped([false, false, false, false, true, true, false, false, false]).steer,
+            1.0
+        );
+        assert_eq!(
+            mapped([false, false, false, false, false, false, true, true, false]).steer,
+            -1.0
+        );
+    }
+
+    #[test]
+    fn space_sets_brake_without_changing_axes() {
+        assert_eq!(
+            mapped([false, false, false, false, false, false, false, false, true]),
+            PlayerInput {
+                throttle: 0.0,
+                steer: 0.0,
+                brake: true,
+            }
+        );
+        let input = mapped([true, false, false, false, true, false, false, false, true]);
+        assert_eq!(input.throttle, 1.0);
+        assert_eq!(input.steer, 1.0);
+        assert!(input.brake);
     }
 }
