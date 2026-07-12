@@ -385,6 +385,9 @@ fn format_initials_display(initials: &str) -> String {
     display
 }
 
+const SUBMISSION_CONSENT_DISCLOSURE: &str = "Submitting stores this name and auto-submits future completed rounds.\n\
+Clear Leaderboard Name in Settings to revoke consent and stop auto-submit.";
+
 /// Convert a `GameOverReason` to the backend's string literal.
 fn game_over_reason_str(reason: GameOverReason) -> &'static str {
     match reason {
@@ -1431,6 +1434,28 @@ fn spawn_touch_initials_grid(commands: &mut Commands) {
             LeaderboardTouchGrid,
         ))
         .with_children(|root| {
+            // Keep consent details in the touch-only UI's free space above
+            // the keypad so the bottom action buttons cannot obscure them.
+            root.spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: Val::Percent(5.0),
+                    top: Val::Percent(20.0),
+                    width: Val::Percent(90.0),
+                    height: Val::Percent(18.0),
+                    padding: UiRect::all(px(5.0)),
+                    align_items: AlignItems::Center,
+                    justify_content: JustifyContent::Center,
+                    ..default()
+                },
+                BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.82)),
+                Text::new(SUBMISSION_CONSENT_DISCLOSURE),
+                TextFont {
+                    font_size: FontSize::Px(12.0),
+                    ..default()
+                },
+                TextColor(palette::HUD_TEXT.into()),
+            ));
             for (index, ch) in CHARS.iter().enumerate() {
                 let col = index % 6;
                 let row = index / 6;
@@ -1564,7 +1589,9 @@ fn format_submission_text(
     match state {
         SubmissionState::Idle => String::new(),
         SubmissionState::Ready => {
-            let mut text = "SUBMIT TO LEADERBOARD\nPress L to enter initials".to_string();
+            let mut text = format!(
+                "SUBMIT TO LEADERBOARD\n{SUBMISSION_CONSENT_DISCLOSURE}\nPress L to enter initials"
+            );
             if touch_active {
                 text.push_str(" · tap SUBMIT");
             }
@@ -1573,7 +1600,7 @@ fn format_submission_text(
         SubmissionState::EnteringInitials => {
             let display = format_initials_display(initials);
             let mut text = format!(
-                "SUBMIT TO LEADERBOARD\nINITIALS: [{}]\nA-Z 0-9 type · BKSP delete · ENTER submit · ESC skip",
+                "SUBMIT TO LEADERBOARD\nINITIALS: [{}]\n{SUBMISSION_CONSENT_DISCLOSURE}\nA-Z 0-9 type · BKSP delete · ENTER submit · ESC skip",
                 display
             );
             if touch_active {
@@ -1597,7 +1624,15 @@ fn format_submission_text(
         },
         SubmissionState::Failed => {
             let msg = error.unwrap_or("Unknown error");
-            format!("SUBMISSION FAILED\n{msg}\nENTER retry · ESC skip")
+            let mut text = format!(
+                "SUBMISSION FAILED\n{msg}\nENTER/SPACE/R: edit initials, then submit again · ESC/Q: skip this round\nSaved name remains active; clear it in Settings to stop future auto-submit."
+            );
+            if touch_active {
+                text.push_str(
+                    "\nTouch: bottom-center edits initials; submit again after editing · bottom-right skips",
+                );
+            }
+            text
         }
         SubmissionState::Skipped => String::new(),
         SubmissionState::Unavailable => "Online leaderboard submission unavailable".to_string(),
@@ -2144,6 +2179,37 @@ mod tests {
         );
         assert!(text.contains("GLOBAL #17"));
         assert!(text.contains("CONDITION #4"));
+    }
+
+    #[test]
+    fn opt_in_ui_discloses_name_storage_auto_submit_and_revocation() {
+        for state in [SubmissionState::Ready, SubmissionState::EnteringInitials] {
+            let text = format_submission_text(state, "ABC", None, None, false);
+            assert!(text.contains("stores this name"), "{state:?}: {text}");
+            assert!(
+                text.contains("auto-submits future completed rounds"),
+                "{state:?}: {text}"
+            );
+            assert!(
+                text.contains("Clear Leaderboard Name in Settings to revoke consent"),
+                "{state:?}: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn failure_text_explains_retry_and_saved_name_status() {
+        let text = format_submission_text(
+            SubmissionState::Failed,
+            "ABC",
+            None,
+            Some("Network offline"),
+            false,
+        );
+        assert!(text.contains("edit initials, then submit again"));
+        assert!(text.contains("skip this round"));
+        assert!(text.contains("Saved name remains active"));
+        assert!(text.contains("clear it in Settings"));
     }
 
     // ── Touch grid mapping ───────────────────────────────────────────────

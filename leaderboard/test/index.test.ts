@@ -23,6 +23,7 @@ import {
   validateScoreBody,
   validateSessionBody,
 } from "../src/validation";
+import { escapeXml } from "../src/svg";
 import {
   FakeD1,
   SCORE_CAPS,
@@ -201,6 +202,20 @@ describe("HMAC round-trip", () => {
     // Different condition → different proof.
     const other = await signSession(TEST_SESSION_KEY, { ...input, condition: 2 });
     expect(other).not.toBe(proof);
+  });
+});
+
+// ─── SVG XML escaping ───────────────────────────────────────────────────────
+
+describe("SVG XML escaping", () => {
+  it("escapes every XML-significant character defensively", () => {
+    expect(escapeXml(`A&B<C>D\"E'F`)).toBe(
+      "A&amp;B&lt;C&gt;D&quot;E&apos;F",
+    );
+  });
+
+  it("stringifies non-string values before escaping", () => {
+    expect(escapeXml(42)).toBe("42");
   });
 });
 

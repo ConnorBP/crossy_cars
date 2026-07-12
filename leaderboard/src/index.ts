@@ -37,6 +37,7 @@ import {
   MAX_REQUEST_BODY_BYTES,
   type ValidatedScore,
 } from "./validation";
+import { renderLeaderboardSvg } from "./svg";
 
 // ─── Bindings ────────────────────────────────────────────────────────────────
 
@@ -71,6 +72,8 @@ const SESSION_ID_BYTES = 18; // 144 bits of entropy, base64url.
 const CHALLENGE_BYTES = 18;
 const TOP_BOARD_DEFAULT_LIMIT = 25;
 const TOP_BOARD_MAX_LIMIT = 100;
+const SVG_BOARD_DEFAULT_LIMIT = 10;
+const SVG_BOARD_MAX_LIMIT = 25;
 const TURNSTILE_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverify";
 /** Fixed Turnstile action bound to session issuance (architecture §10). */
 const TURNSTILE_ACTION = "roady_score_session";
@@ -181,6 +184,14 @@ export default {
         return getLeaderboard(request, env, ctx, cors, requestId);
       }
 
+      // /api is the public custom-domain route; /v1 is the canonical API path.
+      if (
+        (pathname === "/v1/leaderboard.svg" || pathname === "/api/leaderboard.svg") &&
+        method === "GET"
+      ) {
+        return getLeaderboardSvg(request, env, ctx, cors, requestId);
+      }
+
       // ── session creation ──────────────────────────────────────────────
       if (pathname === "/v1/session" && method === "POST") {
         return createSession(request, env, cors, requestId);
@@ -249,11 +260,13 @@ function clientIp(request: Request): string {
 async function rateLimit(
   binding: RateLimit | undefined,
   key: string,
+  category: "read" | "session" | "submit" | "rank",
   failClosed = false,
 ): Promise<boolean> {
   if (!binding) {
     if (failClosed) {
-      console.error("rate_limit_missing", { key, failClosed });
+      // Never log `key`: it contains the raw client IP.
+      console.error("rate_limit_missing", { category, failClosed });
       return false;
     }
     return true; // absent in tests / unsupported runtimes
@@ -261,8 +274,9 @@ async function rateLimit(
   try {
     const res = await binding.limit({ key });
     return res.success;
-  } catch (err) {
-    console.error("rate_limit_error", { key, failClosed, message: String(err) });
+  } catch {
+    // Binding errors may echo their input, so log only a safe endpoint label.
+    console.error("rate_limit_error", { category, failClosed });
     return !failClosed;
   }
 }
@@ -297,7 +311,7 @@ async function getLeaderboard(
   requestId: string,
 ): Promise<Response> {
   const ip = clientIp(request);
-  if (!(await rateLimit(env.RATE_LIMIT_READ, `read:${ip}`))) {
+  if (!(await rateLimit(env.RATE_LIMIT_READ, `read:${ip}`, "read"))) {
     return errorResponse("rate_limited", "Too many requests", 429, requestId, cors);
   }
 
@@ -341,32 +355,7 @@ async function getLeaderboard(
     return applyCors(cached, cors);
   }
 
-  // Query live scores. The composite indexes idx_scores_global and
-  // idx_scores_condition back these ORDER BY clauses.
-  let rows: LeaderboardRow[];
-  if (condition === null) {
-    const res = await env.DB.prepare(
-      `SELECT name, condition, terminal_total AS total, submitted_at
-         FROM scores
-        WHERE status = 'live'
-        ORDER BY terminal_total DESC, submitted_at ASC
-        LIMIT ? OFFSET ?`,
-    )
-      .bind(limit, offset)
-      .all<LeaderboardRow>();
-    rows = res.results;
-  } else {
-    const res = await env.DB.prepare(
-      `SELECT name, condition, terminal_total AS total, submitted_at
-         FROM scores
-        WHERE status = 'live' AND condition = ?
-        ORDER BY terminal_total DESC, submitted_at ASC
-        LIMIT ? OFFSET ?`,
-    )
-      .bind(condition, limit, offset)
-      .all<LeaderboardRow>();
-    rows = res.results;
-  }
+  const rows = await queryLiveLeaderboard(env, condition, limit, offset);
 
   const entries = rows.map((r, i) => ({
     rank: offset + i + 1,
@@ -402,10 +391,120 @@ async function getLeaderboard(
 }
 
 interface LeaderboardRow {
+  id: number;
   name: string;
   condition: number;
   total: number;
   submitted_at: number;
+}
+
+/**
+ * Shared live-board query for JSON and SVG. Keep ordering here so both
+ * representations rank ties identically: higher score first, then earlier
+ * submission, then lower immutable score id. The composite D1 indexes back
+ * these clauses.
+ */
+async function queryLiveLeaderboard(
+  env: Env,
+  condition: number | null,
+  limit: number,
+  offset = 0,
+): Promise<LeaderboardRow[]> {
+  if (condition === null) {
+    const result = await env.DB.prepare(
+      `SELECT id, name, condition, terminal_total AS total, submitted_at
+         FROM scores
+        WHERE status = 'live'
+        ORDER BY terminal_total DESC, submitted_at ASC, id ASC
+        LIMIT ? OFFSET ?`,
+    )
+      .bind(limit, offset)
+      .all<LeaderboardRow>();
+    return result.results;
+  }
+
+  const result = await env.DB.prepare(
+    `SELECT id, name, condition, terminal_total AS total, submitted_at
+       FROM scores
+      WHERE status = 'live' AND condition = ?
+      ORDER BY terminal_total DESC, submitted_at ASC, id ASC
+      LIMIT ? OFFSET ?`,
+  )
+    .bind(condition, limit, offset)
+    .all<LeaderboardRow>();
+  return result.results;
+}
+
+// ─── GET /v1/leaderboard.svg ────────────────────────────────────────────────
+
+async function getLeaderboardSvg(
+  request: Request,
+  env: Env,
+  ctx: ExecutionContext,
+  cors: Record<string, string> | null,
+  requestId: string,
+): Promise<Response> {
+  const ip = clientIp(request);
+  if (!(await rateLimit(env.RATE_LIMIT_READ, `read:${ip}`, "read"))) {
+    return errorResponse("rate_limited", "Too many requests", 429, requestId, cors);
+  }
+
+  const url = new URL(request.url);
+  const conditionParam = url.searchParams.get("condition");
+  let condition: number | null = null;
+  if (conditionParam !== null) {
+    condition = Number(conditionParam);
+    if (!/^[0-4]$/.test(conditionParam) || !Number.isInteger(condition)) {
+      return errorResponse(
+        "invalid_condition",
+        "condition must be 0–4 or omitted",
+        422,
+        requestId,
+        cors,
+      );
+    }
+  }
+
+  const limitParam = url.searchParams.get("limit");
+  let limit = SVG_BOARD_DEFAULT_LIMIT;
+  if (limitParam !== null) {
+    limit = Number(limitParam);
+    if (
+      !/^\d+$/.test(limitParam) ||
+      !Number.isInteger(limit) ||
+      limit < 1 ||
+      limit > SVG_BOARD_MAX_LIMIT
+    ) {
+      return errorResponse("invalid_limit", "limit must be 1–25", 422, requestId, cors);
+    }
+  }
+
+  // Use a synthetic, origin-independent cache URL. The cached response has no
+  // CORS headers; the current request's allowed Origin is reapplied below.
+  const cacheKey = `v1|leaderboard.svg|${condition ?? "global"}|${limit}`;
+  const cacheUrl = `https://roady-leaderboard.cache/${cacheKey}`;
+  const cache = caches.default;
+  const cached = await cache.match(new Request(cacheUrl));
+  if (cached) return applyCors(cached, cors);
+
+  const rows = await queryLiveLeaderboard(env, condition, limit);
+  const entries = rows.map((row, index) => ({
+    rank: index + 1,
+    name: row.name,
+    score: row.total,
+    condition: row.condition,
+  }));
+  const svg = renderLeaderboardSvg(entries, condition, nowMs());
+  const cachedResponse = new Response(svg, {
+    status: 200,
+    headers: {
+      "Content-Type": "image/svg+xml",
+      "Cache-Control": "public, max-age=60, s-maxage=300, stale-while-revalidate=600",
+    },
+  });
+
+  await ctx.waitUntil(cache.put(new Request(cacheUrl), cachedResponse.clone()));
+  return applyCors(cachedResponse, cors);
 }
 
 // ─── POST /v1/session ────────────────────────────────────────────────────────
@@ -417,7 +516,7 @@ async function createSession(
   requestId: string,
 ): Promise<Response> {
   const ip = clientIp(request);
-  if (!(await rateLimit(env.RATE_LIMIT_SESSION, `session:${ip}`, true))) {
+  if (!(await rateLimit(env.RATE_LIMIT_SESSION, `session:${ip}`, "session", true))) {
     return errorResponse("rate_limited", "Too many requests", 429, requestId, cors);
   }
 
@@ -557,7 +656,7 @@ async function submitScore(
   requestId: string,
 ): Promise<Response> {
   const ip = clientIp(request);
-  if (!(await rateLimit(env.RATE_LIMIT_SUBMIT, `submit:${ip}`, true))) {
+  if (!(await rateLimit(env.RATE_LIMIT_SUBMIT, `submit:${ip}`, "submit", true))) {
     return errorResponse("rate_limited", "Too many requests", 429, requestId, cors);
   }
 
@@ -674,8 +773,9 @@ async function submitScore(
   const hash = await ipHash(ip, env.LB_IP_HASH_PEPPER);
   const flagForModeration = shouldFlagForModeration(v.terminalTotal, v.condition, caps);
 
+  let insertedId: number;
   try {
-    await env.DB.prepare(
+    const insert = await env.DB.prepare(
       `INSERT INTO scores
          (name, condition, terminal_total, chickens, coins, objective_completed,
           max_combo, round_duration_ms, time_left_ms, game_over_reason, build,
@@ -702,6 +802,10 @@ async function submitScore(
         flagForModeration ? "near-cap: review" : null,
       )
       .run();
+    insertedId = Number(insert.meta?.last_row_id);
+    if (!Number.isSafeInteger(insertedId) || insertedId <= 0) {
+      throw new Error("score insert did not return a valid id");
+    }
   } catch (err) {
     console.error("score insert failed", { requestId, message: String(err) });
     // Unique constraint on session_id also surfaces here as a 409.
@@ -715,17 +819,27 @@ async function submitScore(
   }
 
   // Compute condition and global rank from the same live-score ordering used
-  // by both leaderboard views: score descending, then earlier submission.
-  // A single query keeps both ranks on the same database snapshot.
+  // by both leaderboard views: score descending, then earlier submission,
+  // then lower immutable id. A single query keeps both ranks on the same
+  // database snapshot.
   const rankRow = await env.DB.prepare(
     `SELECT COUNT(CASE WHEN condition = ? THEN 1 END) AS condition_ahead,
             COUNT(*) AS global_ahead
        FROM scores
       WHERE status = 'live'
         AND (terminal_total > ? OR
-             (terminal_total = ? AND submitted_at < ?))`,
+             (terminal_total = ? AND submitted_at < ?) OR
+             (terminal_total = ? AND submitted_at = ? AND id < ?))`,
   )
-    .bind(v.condition, v.terminalTotal, v.terminalTotal, submittedAt)
+    .bind(
+      v.condition,
+      v.terminalTotal,
+      v.terminalTotal,
+      submittedAt,
+      v.terminalTotal,
+      submittedAt,
+      insertedId,
+    )
     .first<{ condition_ahead: number; global_ahead: number }>();
   const rank = (rankRow?.condition_ahead ?? 0) + 1;
   const globalRank = (rankRow?.global_ahead ?? 0) + 1;
@@ -754,7 +868,7 @@ async function getMyRank(
   requestId: string,
 ): Promise<Response> {
   const ip = clientIp(request);
-  if (!(await rateLimit(env.RATE_LIMIT_RANK, `rank:${ip}`))) {
+  if (!(await rateLimit(env.RATE_LIMIT_RANK, `rank:${ip}`, "rank"))) {
     return errorResponse("rate_limited", "Too many requests", 429, requestId, cors);
   }
 
@@ -786,26 +900,35 @@ async function getMyRank(
        FROM scores
       WHERE condition = ? AND status = 'live'
         AND (terminal_total > ? OR
-             (terminal_total = ? AND submitted_at < ?))`,
+             (terminal_total = ? AND submitted_at < ?) OR
+             (terminal_total = ? AND submitted_at = ? AND id < ?))`,
   )
-    .bind(session.condition, session.terminal_total, session.terminal_total, session.submitted_at)
+    .bind(
+      session.condition,
+      session.terminal_total,
+      session.terminal_total,
+      session.submitted_at,
+      session.terminal_total,
+      session.submitted_at,
+      session.id,
+    )
     .first<{ ahead: number }>();
 
   const rank = (ahead?.ahead ?? 0) + 1;
 
   // Nearby ranks (10 above and 10 below by score ordering).
   const nearby = await env.DB.prepare(
-    `SELECT name, terminal_total AS total, submitted_at
+    `SELECT id, name, terminal_total AS total, submitted_at
        FROM scores
       WHERE condition = ? AND status = 'live'
-      ORDER BY terminal_total DESC, submitted_at ASC
+      ORDER BY terminal_total DESC, submitted_at ASC, id ASC
       LIMIT 21 OFFSET ?`,
   )
     .bind(
       session.condition,
       Math.max(0, rank - 11),
     )
-    .all<{ name: string; total: number; submitted_at: number }>();
+    .all<{ id: number; name: string; total: number; submitted_at: number }>();
 
   const entries = nearby.results.map((r, i) => ({
     rank: Math.max(0, rank - 11) + i + 1,
@@ -947,7 +1070,7 @@ export async function scheduledCleanup(env: Env): Promise<void> {
           AND id NOT IN (
             SELECT id FROM scores
              WHERE condition = ? AND status = 'live'
-             ORDER BY terminal_total DESC, submitted_at ASC
+             ORDER BY terminal_total DESC, submitted_at ASC, id ASC
              LIMIT 1000
           )`,
     )
@@ -974,6 +1097,7 @@ export {
   validateSessionBody,
   shouldFlagForModeration,
 };
+export { escapeXml, renderLeaderboardSvg } from "./svg";
 export {
   applyCors,
   corsHeaders,

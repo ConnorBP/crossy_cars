@@ -219,11 +219,15 @@ class FakeStmt {
       const total = this.params[1] as number;
       const total2 = this.params[2] as number;
       const submittedAt = this.params[3] as number;
+      const tiedTotal = this.params[4] as number;
+      const tiedAt = this.params[5] as number;
+      const insertedId = this.params[6] as number;
       const ahead = this.db.scores.filter(
         (s) =>
           s.status === "live" &&
           (s.terminal_total > total ||
-            (s.terminal_total === total2 && s.submitted_at < submittedAt)),
+            (s.terminal_total === total2 && s.submitted_at < submittedAt) ||
+            (s.terminal_total === tiedTotal && s.submitted_at === tiedAt && s.id < insertedId)),
       );
       return {
         condition_ahead: ahead.filter((s) => s.condition === condition).length,
@@ -236,12 +240,16 @@ class FakeStmt {
       const total = this.params[1] as number;
       const total2 = this.params[2] as number;
       const submittedAt = this.params[3] as number;
+      const tiedTotal = this.params[4] as number;
+      const tiedAt = this.params[5] as number;
+      const scoreId = this.params[6] as number;
       const ahead = this.db.scores.filter(
         (s) =>
           s.condition === condition &&
           s.status === "live" &&
           (s.terminal_total > total ||
-            (s.terminal_total === total2 && s.submitted_at < submittedAt)),
+            (s.terminal_total === total2 && s.submitted_at < submittedAt) ||
+            (s.terminal_total === tiedTotal && s.submitted_at === tiedAt && s.id < scoreId)),
       ).length;
       return { ahead } as unknown as T;
     }
@@ -266,28 +274,6 @@ class FakeStmt {
 
   async all<T>(): Promise<{ results: T[] }> {
     const sql = this.sql;
-    // Leaderboard global query.
-    if (sql.includes("FROM scores") && sql.includes("ORDER BY terminal_total")) {
-      const condition = this.params[0];
-      const limit = this.params.length === 3 ? (this.params[1] as number) : (this.params[0] as number);
-      const offset = this.params.length === 3 ? (this.params[2] as number) : (this.params[1] as number);
-      let rows = this.db.scores.filter((s) => s.status === "live");
-      if (typeof condition === "number" && sql.includes("AND condition = ?")) {
-        rows = rows.filter((s) => s.condition === condition);
-      }
-      rows = [...rows].sort((a, b) =>
-        b.terminal_total - a.terminal_total || a.submitted_at - b.submitted_at,
-      );
-      const sliced = rows.slice(offset, offset + limit);
-      return {
-        results: sliced.map((r) => ({
-          name: r.name,
-          condition: r.condition,
-          total: r.terminal_total,
-          submitted_at: r.submitted_at,
-        })) as unknown as T[],
-      } as unknown as { results: T[] };
-    }
     // getMyRank nearby.
     if (sql.includes("FROM scores") && sql.includes("LIMIT 21")) {
       const condition = this.params[0] as number;
@@ -295,12 +281,39 @@ class FakeStmt {
       const rows = this.db.scores
         .filter((s) => s.condition === condition && s.status === "live")
         .sort((a, b) =>
-          b.terminal_total - a.terminal_total || a.submitted_at - b.submitted_at,
+          b.terminal_total - a.terminal_total ||
+          a.submitted_at - b.submitted_at ||
+          a.id - b.id,
         );
       const sliced = rows.slice(offset, offset + 21);
       return {
         results: sliced.map((r) => ({
+          id: r.id,
           name: r.name,
+          total: r.terminal_total,
+          submitted_at: r.submitted_at,
+        })) as unknown as T[],
+      } as unknown as { results: T[] };
+    }
+    // Global or condition leaderboard query.
+    if (sql.includes("FROM scores") && sql.includes("ORDER BY terminal_total")) {
+      const hasCondition = sql.includes("AND condition = ?");
+      const condition = hasCondition ? (this.params[0] as number) : null;
+      const limit = this.params[hasCondition ? 1 : 0] as number;
+      const offset = this.params[hasCondition ? 2 : 1] as number;
+      let rows = this.db.scores.filter((s) => s.status === "live");
+      if (condition !== null) rows = rows.filter((s) => s.condition === condition);
+      rows = [...rows].sort((a, b) =>
+        b.terminal_total - a.terminal_total ||
+        a.submitted_at - b.submitted_at ||
+        a.id - b.id,
+      );
+      const sliced = rows.slice(offset, offset + limit);
+      return {
+        results: sliced.map((r) => ({
+          id: r.id,
+          name: r.name,
+          condition: r.condition,
           total: r.terminal_total,
           submitted_at: r.submitted_at,
         })) as unknown as T[],
@@ -341,8 +354,13 @@ class FakeStmt {
     // Score insert (submitScore).
     if (sql.startsWith("INSERT INTO scores")) {
       const p = this.params;
+      const id = Math.max(
+        this.db.nextId,
+        ...this.db.scores.map((score) => score.id + 1),
+      );
+      this.db.nextId = id + 1;
       const row: FakeScore = {
-        id: this.db.nextId++,
+        id,
         name: p[0] as string,
         condition: p[1] as number,
         terminal_total: p[2] as number,
@@ -372,7 +390,9 @@ class FakeStmt {
       const live = this.db.scores
         .filter((s) => s.condition === condition && s.status === "live")
         .sort((a, b) =>
-          b.terminal_total - a.terminal_total || a.submitted_at - b.submitted_at,
+          b.terminal_total - a.terminal_total ||
+          a.submitted_at - b.submitted_at ||
+          a.id - b.id,
         );
       const topIds = new Set(live.slice(0, 1000).map((s) => s.id));
       let changes = 0;

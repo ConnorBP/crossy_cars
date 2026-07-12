@@ -59,13 +59,28 @@ fails with actionable diagnostics if anything is missing.
    production. The Worker rejects session creation with `422 turnstile_failed`
    when verification fails or the secret is missing/placeholder.
 
-3. **Create the Workers subdomain or a custom route** so the Worker is
-   reachable at a stable URL. A `*.workers.dev` subdomain is created the first
-   time you enable it for the account; a custom domain or Workers route can be
-   configured under **Workers & Pages → the Worker → Triggers**. Put the
-   resulting base URL (e.g. `https://roady-leaderboard.<subdomain>.workers.dev`
-   or `https://leaderboard.example.com`) into GitHub variable
-   `LEADERBOARD_BASE_URL` — the workflow uses it for the post-deploy smoke test.
+3. **Create the Workers subdomain and production routes** so the Worker is
+   reachable at stable URLs. A `*.workers.dev` subdomain is created the first
+   time you enable it for the account; custom routes are configured under
+   **Workers & Pages → roady-leaderboard → Settings → Domains & Routes**.
+
+   For the public embeddable board, add this required Worker route mapping on
+   the `segfault.site` zone (the zone must be active on Cloudflare DNS):
+
+   | Public URL | Required Worker route | Worker handler |
+   | --- | --- | --- |
+   | `https://car.segfault.site/api/leaderboard.svg` | `car.segfault.site/api/leaderboard.svg` | `/api/leaderboard.svg` alias of `/v1/leaderboard.svg` |
+
+   Select the `roady-leaderboard` Worker for that route. Use the exact path
+   (no trailing `*` is needed for this endpoint); query strings such as
+   `?condition=2&limit=10` still match. Ensure `car.segfault.site` has a proxied
+   DNS record so the route can execute. Do not configure an origin redirect:
+   the Worker should directly return the cacheable SVG bytes.
+
+   Put the Worker's API base URL (for example
+   `https://roady-leaderboard.<subdomain>.workers.dev`) into GitHub variable
+   `LEADERBOARD_BASE_URL`; the workflow uses it for health and JSON API smoke
+   tests. The route above separately provides the public SVG URL.
 
 ### A.2 API token for the leaderboard workflow
 
@@ -162,7 +177,22 @@ workflow**. Watch the **Verify deployment prerequisites** step first — if any
 variable/secret is missing it stops the run with a complete checklist before
 touching Cloudflare.
 
-### A.8 Local leaderboard development
+### A.8 Public SVG route verification
+
+After configuring the route, verify both the direct Worker handler and public
+mapping. The response must be SVG and advertise the long edge-cache policy:
+
+```sh
+curl -sS -D - -o /dev/null 'https://car.segfault.site/api/leaderboard.svg?limit=10'
+# Content-Type: image/svg+xml
+# Cache-Control: public, max-age=60, s-maxage=300, stale-while-revalidate=600
+```
+
+Supported parameters are optional `condition=0..4` and `limit=1..25` (default
+10). It uses the same `status='live'`, score-descending, earliest-tie ordering
+as the JSON leaderboard and the same public-read rate-limit binding.
+
+### A.9 Local leaderboard development
 
 ```sh
 cd leaderboard
@@ -177,7 +207,7 @@ npm run typecheck                # tsc --noEmit
 `.dev.vars` holds local-only secrets; the committed `.dev.vars.example` uses
 the Turnstile always-pass test key. Never put production secrets in `.dev.vars`.
 
-### A.9 Troubleshooting
+### A.10 Troubleshooting
 
 | Symptom | Likely cause / fix |
 | --- | --- |
@@ -186,6 +216,7 @@ the Turnstile always-pass test key. Never put production secrets in `.dev.vars`.
 | `wrangler deploy` fails on `unsafe.bindings` rate-limit bindings | The account may not have Cloudflare Rate Limiting enabled for the binding type. Confirm the bindings in `wrangler.toml` and that rate limiting is available on the account. |
 | `/healthz` smoke test fails | The Worker did not deploy, `LEADERBOARD_BASE_URL` is wrong, or the Worker threw on startup. Check `wrangler tail`. |
 | `/v1/leaderboard` smoke test fails (non-200) | The D1 binding is missing, migrations did not apply, or the `DB` binding name in `wrangler.toml` is wrong. Check `wrangler d1 list`, the migrations step, and `wrangler tail`. |
+| `https://car.segfault.site/api/leaderboard.svg` returns the site/404 | The required exact Worker route `car.segfault.site/api/leaderboard.svg` is absent, assigned to the wrong Worker, or the hostname's DNS record is not proxied. Check **Domains & Routes** and Cloudflare DNS. |
 | `turnstile_failed` on session creation | `LB_TURNSTILE_SECRET` is missing, still a placeholder, or the wrong widget secret. |
 | Score submission `401 invalid_signature` | `ROADY_LEADERBOARD_CLIENT_HMAC_KEY` (installed as Worker `LB_CLIENT_HMAC_KEY`) does not match the key embedded in the deployed WASM. Rebuild the site and re-run the leaderboard workflow so both use the same GitHub secret. |
 
@@ -257,7 +288,8 @@ artifact, then runs:
 npx wrangler@4 pages deploy dist --project-name "$PROJECT_NAME" --branch main
 ```
 
-The site is live at **https://roady-car.pages.dev**; each deployment also gets
+The canonical game URL is **https://car.segfault.site** (with the Pages default
+URL available as a fallback); each deployment also gets
 an immutable preview URL in the workflow log.
 
 ### B.5 Local production build

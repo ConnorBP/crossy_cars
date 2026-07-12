@@ -32,9 +32,11 @@ leaderboard/
     security.ts          # HMAC, canonical bytes, IP hash, constant-time compare
     validation.ts        # name normalization, score invariants, plausibility caps
     responses.ts         # JSON/CORS/error helpers, base64url
+    svg.ts               # accessible dark/gold SVG renderer + XML escaping
   test/
-    index.test.ts        # 41 tests: canonical bytes, HMAC, names, caps, replay
-    helpers.ts           # signers + in-memory D1 fake for replay ordering
+    index.test.ts        # pure helpers: canonical bytes, HMAC, XML escape, replay
+    routes.test.ts       # fetch-route integration tests, including SVG/cache/CORS
+    helpers.ts           # signers + in-memory D1 fake for endpoint ordering
 ```
 
 ## Prerequisites
@@ -72,6 +74,7 @@ npm run dev              # wrangler dev, default http://localhost:8787
 # 4. Smoke test.
 curl http://localhost:8787/healthz
 curl 'http://localhost:8787/v1/leaderboard?condition=0&limit=10'
+curl 'http://localhost:8787/v1/leaderboard.svg?condition=0&limit=10'
 ```
 
 ## Tests
@@ -144,7 +147,7 @@ npm run deploy           # wrangler deploy
 
 | Var | Example |
 |---|---|
-| `ALLOWED_ORIGINS` | `https://roady-car.pages.dev,http://localhost:8080` |
+| `ALLOWED_ORIGINS` | `https://car.segfault.site,https://roady-car.pages.dev,http://localhost:8080` |
 | `BUILD` | `0.1.0` |
 | `SCORE_CAPS_JSON` | `{"0":3000,"1":3000,"2":4000,"3":3000,"4":6000}` |
 
@@ -156,11 +159,33 @@ See `../LEADERBOARD_ARCHITECTURE.md §4` for the authoritative spec.
 |---|---|---|
 | `GET` | `/healthz` | `{ ok, build, time }`. |
 | `GET` | `/v1/leaderboard` | `condition`, `limit` (1–100, default 25), `offset`. Cached (`public, max-age=30, s-maxage=60, stale-while-revalidate=120`). Only `status='live'`. 30/min/IP. |
+| `GET` | `/v1/leaderboard.svg` | Generated accessible fixed-width SVG. Optional `condition` (0–4) and `limit` (1–25, default 10). Same live-score ordering as JSON; variable height and an empty state. Cached (`public, max-age=60, s-maxage=300, stale-while-revalidate=600`). Uses the read rate limit. |
 | `POST` | `/v1/session` | `{ condition, turnstileToken }` → `{ sessionId, challenge, condition, expiresAt, proof }`. 5-minute TTL. Turnstile required. 3/min/IP. |
 | `POST` | `/v1/scores` | Requires session `proof` + `X-Roady-Client-Signature` (unpadded base64url HMAC-SHA-256 over canonical bytes). One-time session claim; replay → `409`. 5/min/IP. |
 | `GET` | `/v1/me/rank?sessionId=` | Requires a *used* session. `private, no-store`. 60/min/IP. |
 | `POST` | `/v1/admin/scores/:id/hide` | `Authorization: Bearer <LB_ADMIN_TOKEN>`. Writes `moderation_log`. |
 | `DELETE` | `/v1/admin/scores/:id` | `Authorization: Bearer <LB_ADMIN_TOKEN>`. Writes `moderation_log`. |
+
+### Embeddable SVG leaderboard
+
+The Worker endpoint is `/v1/leaderboard.svg`. Production exposes it at:
+
+```text
+https://car.segfault.site/api/leaderboard.svg
+https://car.segfault.site/api/leaderboard.svg?condition=2&limit=10
+```
+
+The production hostname must attach the `roady-leaderboard` Worker to the exact
+public route `car.segfault.site/api/leaderboard.svg` (see
+[`../DEPLOYMENT.md`](../DEPLOYMENT.md)). The Worker accepts that public path as
+an alias of its canonical `/v1/leaderboard.svg` route without redirecting, so
+image bytes remain cacheable and independent of the request Origin. Cache
+entries contain no CORS headers; allowed-origin CORS is reapplied separately on
+every response, including cache hits.
+
+Names and all other interpolated values are XML-escaped. The SVG includes
+`role="img"`, a `<title>`, a `<desc>`, a generated timestamp, and explicit
+empty-board messaging.
 
 ### Canonical client HMAC bytes (`§5`)
 
@@ -246,7 +271,7 @@ but not existing leaderboard rows.
    (`roady-car` Pages) and this Worker should use least-privilege, separate
    tokens/workflows. Configure routes/custom domains once in the dashboard.
 6. **`ALLOWED_ORIGINS` must list your production origin.** The default
-   (`https://roady-car.pages.dev,http://localhost:8080`) is a starting point;
+   (`https://car.segfault.site,https://roady-car.pages.dev,http://localhost:8080`) is a starting point;
    update it to the real production site origin so CORS allows submissions.
 7. **Rate limit bindings use the `unsafe.bindings` form.** Confirm your
    Wrangler version / account supports anonymous rate-limit namespaces, or

@@ -2,11 +2,20 @@
 
 Roady Car is an isometric arcade driving game built with [Bevy 0.19](https://bevyengine.org/). It runs as a native desktop application or in a WebGL2 browser through WebAssembly.
 
-**Play online:** https://roady-car.pages.dev
+**Play online:** https://car.segfault.site
+
+![Roady Car gameplay](docs/images/roady-car-gameplay.png)
 
 The chicken-crossing riddle is reversed: **you are the traffic**. Race through a continuously recycled city, hit wandering chickens for points, collect coins, avoid innocent critters and oncoming cars, and keep the car alive until the clock expires.
 
 > **Controls:** the game supports a desktop keyboard and on-screen touch controls. Touch controls appear after the first touch and are intended for landscape orientation.
+
+## Live leaderboard
+
+![Roady Car live leaderboard](https://car.segfault.site/api/leaderboard.svg)
+
+The image above is generated from live scores and cached at the edge so README
+views do not query the database on every load.
 
 ## Gameplay
 

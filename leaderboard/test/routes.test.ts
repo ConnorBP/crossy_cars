@@ -7,7 +7,7 @@
 // score submission (error + success orchestration), personal rank, and
 // moderation (error + success). No Miniflare runtime is required.
 
-import { describe, expect, it, beforeAll, afterAll, vi } from "vitest";
+import { describe, expect, it, beforeAll, afterAll, beforeEach, vi } from "vitest";
 import worker from "../src/index";
 import type { Env } from "../src/index";
 import {
@@ -45,11 +45,16 @@ class FakeCache {
     const url = typeof request === "string" ? request : request.url;
     return this.store.delete(url);
   }
+  clear(): void {
+    this.store.clear();
+  }
 }
 
 const fakeCaches = { default: new FakeCache() };
 // Inject into the global scope so `caches.default` works in tests.
 (globalThis as unknown as { caches: unknown }).caches = fakeCaches;
+
+beforeEach(() => fakeCaches.default.clear());
 
 /** A minimal ExecutionContext that collects waitUntil promises. */
 class FakeCtx {
@@ -269,6 +274,136 @@ describe("fetch-route: leaderboard", () => {
     const env = makeEnv() as unknown as Env;
     const { response } = await fetchRoute(env, "GET", "/nope");
     expect(response.status).toBe(404);
+  });
+});
+
+// ─── SVG leaderboard ────────────────────────────────────────────────────────
+
+describe("fetch-route: SVG leaderboard", () => {
+  it("returns accessible SVG with the live-score ordering and row-based height", async () => {
+    const db = new FakeD1();
+    db.scores.push(
+      { id: 1, name: "EARLY", condition: 2, terminal_total: 200, chickens: 100, coins: 100, objective_completed: 1, max_combo: 4, round_duration_ms: 60000, time_left_ms: 0, game_over_reason: "time_up", build: "0.1.0", platform: "web", session_id: "svg1", submitted_at: 1000, ip_hash: "h", status: "live", moderation_note: null },
+      { id: 2, name: "LOW", condition: 2, terminal_total: 100, chickens: 50, coins: 50, objective_completed: 1, max_combo: 3, round_duration_ms: 60000, time_left_ms: 0, game_over_reason: "time_up", build: "0.1.0", platform: "web", session_id: "svg2", submitted_at: 500, ip_hash: "h", status: "live", moderation_note: null },
+      { id: 3, name: "LATER", condition: 2, terminal_total: 200, chickens: 100, coins: 100, objective_completed: 1, max_combo: 4, round_duration_ms: 60000, time_left_ms: 0, game_over_reason: "time_up", build: "0.1.0", platform: "web", session_id: "svg3", submitted_at: 2000, ip_hash: "h", status: "live", moderation_note: null },
+      { id: 4, name: "HIDDEN", condition: 2, terminal_total: 999, chickens: 500, coins: 499, objective_completed: 1, max_combo: 5, round_duration_ms: 60000, time_left_ms: 0, game_over_reason: "time_up", build: "0.1.0", platform: "web", session_id: "svg4", submitted_at: 1, ip_hash: "h", status: "hidden", moderation_note: null },
+    );
+    const env = makeEnv({ DB: db }) as unknown as Env;
+    const { response } = await fetchRoute(env, "GET", "/v1/leaderboard.svg?condition=2&limit=3");
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Content-Type")).toBe("image/svg+xml");
+    expect(response.headers.get("Cache-Control")).toBe(
+      "public, max-age=60, s-maxage=300, stale-while-revalidate=600",
+    );
+    const svg = await response.text();
+    expect(svg).toContain('width="720" height="356"');
+    expect(svg).toContain('role="img" aria-labelledby="leaderboard-title leaderboard-description"');
+    expect(svg).toContain("<title id=\"leaderboard-title\">");
+    expect(svg).toContain("GENERATED ");
+    expect(svg.indexOf(">EARLY<")).toBeLessThan(svg.indexOf(">LATER<"));
+    expect(svg.indexOf(">LATER<")).toBeLessThan(svg.indexOf(">LOW<"));
+    expect(svg).not.toContain("HIDDEN");
+  });
+
+  it("renders an explicit empty-board state with the default ten-row request", async () => {
+    const env = makeEnv() as unknown as Env;
+    const { response } = await fetchRoute(env, "GET", "/v1/leaderboard.svg");
+    const svg = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(svg).toContain('height="300"');
+    expect(svg).toContain("NO LIVE SCORES YET");
+    expect(svg).toContain("BE THE FIRST TO HIT THE ROAD");
+  });
+
+  it("defaults to ten rows", async () => {
+    const db = new FakeD1();
+    for (let i = 1; i <= 11; i++) {
+      db.scores.push({
+        id: i, name: `D${i.toString().padStart(2, "0")}`, condition: 0,
+        terminal_total: i, chickens: i, coins: 0, objective_completed: 0,
+        max_combo: 1, round_duration_ms: 60000, time_left_ms: 0,
+        game_over_reason: "time_up", build: "0.1.0", platform: "web",
+        session_id: `default${i}`, submitted_at: i, ip_hash: "h", status: "live",
+        moderation_note: null,
+      });
+    }
+    const env = makeEnv({ DB: db }) as unknown as Env;
+    const { response } = await fetchRoute(env, "GET", "/v1/leaderboard.svg");
+    const svg = await response.text();
+
+    expect(svg).toContain(">D11<");
+    expect(svg).toContain(">D02<");
+    expect(svg).not.toContain(">D01<");
+    expect(svg).toContain('height="650"');
+  });
+
+  it("XML-escapes untrusted score names before rendering", async () => {
+    const db = new FakeD1();
+    db.scores.push(
+      { id: 1, name: `<A&B\"'>`, condition: 0, terminal_total: 10, chickens: 5, coins: 5, objective_completed: 0, max_combo: 1, round_duration_ms: 60000, time_left_ms: 0, game_over_reason: "time_up", build: "0.1.0", platform: "web", session_id: "xml1", submitted_at: 1000, ip_hash: "h", status: "live", moderation_note: null },
+    );
+    const env = makeEnv({ DB: db }) as unknown as Env;
+    const { response } = await fetchRoute(env, "GET", "/v1/leaderboard.svg?condition=0&limit=1");
+    const svg = await response.text();
+
+    expect(svg).toContain("&lt;A&amp;B&quot;&apos;&gt;");
+    expect(svg).not.toContain(`<A&B\"'>`);
+  });
+
+  it.each([
+    ["condition=", "invalid_condition"],
+    ["condition=5", "invalid_condition"],
+    ["condition=1.5", "invalid_condition"],
+    ["limit=0", "invalid_limit"],
+    ["limit=26", "invalid_limit"],
+    ["limit=2.5", "invalid_limit"],
+  ])("rejects invalid SVG query %s", async (query, code) => {
+    const env = makeEnv() as unknown as Env;
+    const { response } = await fetchRoute(env, "GET", `/v1/leaderboard.svg?${query}`);
+    expect(response.status).toBe(422);
+    expect(response.headers.get("Content-Type")).toContain("application/json");
+    const body = await readJson<{ error: { code: string } }>(response);
+    expect(body.error.code).toBe(code);
+  });
+
+  it("uses the public read rate limiter before serving cache hits", async () => {
+    const env = makeEnv({ RATE_LIMIT_READ: new FakeRateLimit(1) }) as unknown as Env;
+    const first = await fetchRoute(env, "GET", "/v1/leaderboard.svg");
+    expect(first.response.status).toBe(200);
+
+    const second = await fetchRoute(env, "GET", "/v1/leaderboard.svg");
+    expect(second.response.status).toBe(429);
+    const body = await readJson<{ error: { code: string } }>(second.response);
+    expect(body.error.code).toBe("rate_limited");
+  });
+
+  it("caches origin-agnostic SVG bytes and reapplies CORS for each origin", async () => {
+    const db = new FakeD1();
+    db.scores.push(
+      { id: 1, name: "CACHED", condition: 1, terminal_total: 99, chickens: 50, coins: 49, objective_completed: 1, max_combo: 3, round_duration_ms: 60000, time_left_ms: 0, game_over_reason: "time_up", build: "0.1.0", platform: "web", session_id: "cache1", submitted_at: 1000, ip_hash: "h", status: "live", moderation_note: null },
+    );
+    const secondOrigin = "https://car.segfault.site";
+    const env = makeEnv({
+      DB: db,
+      ALLOWED_ORIGINS: `${ORIGIN},${secondOrigin}`,
+    }) as unknown as Env;
+
+    const first = await fetchRoute(env, "GET", "/v1/leaderboard.svg?condition=1&limit=1", {
+      origin: ORIGIN,
+    });
+    const firstBytes = await first.response.text();
+    db.scores[0]!.name = "CHANGED";
+    const second = await fetchRoute(env, "GET", "/api/leaderboard.svg?condition=1&limit=1", {
+      origin: secondOrigin,
+    });
+    const secondBytes = await second.response.text();
+
+    expect(secondBytes).toBe(firstBytes);
+    expect(first.response.headers.get("Access-Control-Allow-Origin")).toBe(ORIGIN);
+    expect(second.response.headers.get("Access-Control-Allow-Origin")).toBe(secondOrigin);
+    expect(second.response.headers.get("Vary")).toBe("Origin");
   });
 });
 
@@ -519,6 +654,78 @@ describe("fetch-route: score submission", () => {
     expect(rbody.globalRank).toBe(3);
   });
 
+  it("uses id to deterministically rank equal scores submitted in the same millisecond", async () => {
+    const now = 1_750_000_000_000;
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(now);
+    try {
+      const db = new FakeD1();
+      db.scores.push(
+        { id: 1, name: "ONE", condition: 1, terminal_total: 42, chickens: 30, coins: 12, objective_completed: 1, max_combo: 4, round_duration_ms: 60000, time_left_ms: 0, game_over_reason: "time_up", build: "0.1.0", platform: "web", session_id: "old-global", submitted_at: now, ip_hash: "h", status: "live", moderation_note: null },
+        { id: 2, name: "TWO", condition: 0, terminal_total: 42, chickens: 30, coins: 12, objective_completed: 1, max_combo: 4, round_duration_ms: 60000, time_left_ms: 0, game_over_reason: "time_up", build: "0.1.0", platform: "web", session_id: "old-condition", submitted_at: now, ip_hash: "h", status: "live", moderation_note: null },
+      );
+      const seeded = await seedSession(db, { condition: 0 });
+      const env = makeEnv({ DB: db }) as unknown as Env;
+      const fields = {
+        sessionId: seeded.sessionId,
+        proof: seeded.proof,
+        condition: 0,
+      };
+      const sig = await signScore(TEST_CLIENT_KEY, validateOk(sampleScoreBody(fields)));
+      const submitted = await fetchRoute(env, "POST", "/v1/scores", {
+        body: sampleScoreBody(fields),
+        headers: { "X-Roady-Client-Signature": sig },
+      });
+
+      expect(submitted.response.status).toBe(201);
+      const submission = await readJson<{ rank: number; globalRank: number }>(submitted.response);
+      expect(submission.rank).toBe(2);
+      expect(submission.globalRank).toBe(3);
+
+      const conditionBoard = await fetchRoute(
+        env,
+        "GET",
+        "/v1/leaderboard?condition=0&limit=10",
+      );
+      const conditionBody = await readJson<{
+        entries: { rank: number; name: string }[];
+      }>(conditionBoard.response);
+      expect(conditionBody.entries.map((entry) => [entry.rank, entry.name])).toEqual([
+        [1, "TWO"],
+        [2, "AAA"],
+      ]);
+
+      const globalPage = await fetchRoute(
+        env,
+        "GET",
+        "/v1/leaderboard?limit=2&offset=1",
+      );
+      const globalBody = await readJson<{
+        entries: { rank: number; name: string }[];
+      }>(globalPage.response);
+      expect(globalBody.entries.map((entry) => [entry.rank, entry.name])).toEqual([
+        [2, "TWO"],
+        [3, "AAA"],
+      ]);
+
+      const mine = await fetchRoute(
+        env,
+        "GET",
+        `/v1/me/rank?sessionId=${encodeURIComponent(seeded.sessionId)}`,
+      );
+      const mineBody = await readJson<{
+        rank: number;
+        nearby: { rank: number; name: string }[];
+      }>(mine.response);
+      expect(mineBody.rank).toBe(2);
+      expect(mineBody.nearby.map((entry) => [entry.rank, entry.name])).toEqual([
+        [1, "TWO"],
+        [2, "AAA"],
+      ]);
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
   it("returns condition rank 1 but a lower global rank across conditions", async () => {
     const db = new FakeD1();
     db.scores.push(
@@ -722,6 +929,34 @@ describe("fetch-route: rate limiting", () => {
     // Should be 429 (fail closed) not 401 (missing signature) — rate limit fires first.
     expect(response.status).toBe(429);
   });
+
+  it.each(["missing", "error"])(
+    "does not log the raw rate-limit key when a write binding is %s",
+    async (failure) => {
+      const rawIp = "203.0.113.77";
+      const env = makeEnv({
+        RATE_LIMIT_SESSION: new FakeRateLimit(3, failure === "error"),
+      }) as unknown as Env;
+      if (failure === "missing") {
+        delete (env as unknown as Record<string, unknown>).RATE_LIMIT_SESSION;
+      }
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      try {
+        const { response } = await fetchRoute(env, "POST", "/v1/session", {
+          body: { condition: 0, turnstileToken: "tok" },
+          headers: { "CF-Connecting-IP": rawIp },
+        });
+        expect(response.status).toBe(429);
+        expect(errorSpy).toHaveBeenCalled();
+        const logged = JSON.stringify(errorSpy.mock.calls);
+        expect(logged).not.toContain(rawIp);
+        expect(logged).not.toContain(`session:${rawIp}`);
+        expect(logged).toContain("session");
+      } finally {
+        errorSpy.mockRestore();
+      }
+    },
+  );
 });
 
 // ─── Turnstile hostname/action validation ────────────────────────────────────

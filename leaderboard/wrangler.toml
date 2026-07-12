@@ -67,7 +67,7 @@ simple = { limit = 60, period = 60 }
 # dev/test/local BUILD. Set BUILD=dev for local development.
 # ────────────────────────────────────────────────────────────────────────────
 [vars]
-ALLOWED_ORIGINS = "https://roady-car.pages.dev,http://localhost:8080,http://127.0.0.1:8080"
+ALLOWED_ORIGINS = "https://car.segfault.site,https://roady-car.pages.dev,http://localhost:8080,http://127.0.0.1:8080"
 # Local default; deployment workflow replaces this with the production commit SHA.
 BUILD = "dev"
 # Per-condition plausibility caps as JSON: { "0": cap, ... }. Conservative,

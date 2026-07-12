@@ -21,6 +21,8 @@ const OPENER_LEFT: f32 = 0.67;
 const OPENER_TOP: f32 = 0.03;
 const OPENER_RIGHT: f32 = 0.97;
 const OPENER_BOTTOM: f32 = 0.18;
+const SETTINGS_PANEL_WIDTH_RATIO: f32 = 0.88;
+const SETTINGS_PANEL_MAX_WIDTH: f32 = 760.0;
 const MAX_INITIALS: usize = 5;
 
 const INITIAL_KEYS: [(KeyCode, char); 36] = [
@@ -69,7 +71,8 @@ pub struct Settings {
     pub muted: bool,
     pub reduced_motion: bool,
     /// Empty means that the leaderboard should ask for a name. Persisted names
-    /// are three to five ASCII letters/digits.
+    /// are three to five ASCII letters/digits and represent explicit consent
+    /// to automatic future score submissions; clearing the name revokes it.
     pub leaderboard_initials: String,
 }
 
@@ -315,7 +318,22 @@ fn opener_hit(position: Vec2) -> bool {
         && (OPENER_TOP..=OPENER_BOTTOM).contains(&position.y)
 }
 
-fn touch_row(position: Vec2) -> Option<SettingRow> {
+/// Horizontal bounds of the centered settings panel in normalized window
+/// coordinates. The UI panel is `min(88vw, 760px)` wide.
+fn settings_panel_x_bounds(window_width: f32) -> Option<(f32, f32)> {
+    if !window_width.is_finite() || window_width <= 0.0 {
+        return None;
+    }
+    let panel_width = (window_width * SETTINGS_PANEL_WIDTH_RATIO).min(SETTINGS_PANEL_MAX_WIDTH);
+    let half_normalized_width = panel_width / window_width / 2.0;
+    Some((0.5 - half_normalized_width, 0.5 + half_normalized_width))
+}
+
+fn touch_row(position: Vec2, window_width: f32) -> Option<SettingRow> {
+    let (left, right) = settings_panel_x_bounds(window_width)?;
+    if !(left..=right).contains(&position.x) {
+        return None;
+    }
     match position.y {
         y if (0.20..0.33).contains(&y) => Some(SettingRow::Volume),
         y if (0.33..0.45).contains(&y) => Some(SettingRow::Mute),
@@ -328,10 +346,11 @@ fn touch_row(position: Vec2) -> Option<SettingRow> {
 
 fn apply_touch_row(
     position: Vec2,
+    window_width: f32,
     selection: &mut SettingsSelection,
     settings: &mut Settings,
 ) -> Activation {
-    let Some(row) = touch_row(position) else {
+    let Some(row) = touch_row(position, window_width) else {
         return Activation::None;
     };
     selection.0 = row;
@@ -484,7 +503,9 @@ fn settings_input(
                 continue;
             };
             handled_pointer = true;
-            if apply_touch_row(position, &mut *selection, &mut *settings) == Activation::Close {
+            if apply_touch_row(position, window.width(), &mut *selection, &mut *settings)
+                == Activation::Close
+            {
                 open.0 = false;
                 break;
             }
@@ -494,9 +515,9 @@ fn settings_input(
                 .cursor_position()
                 .and_then(|position| normalized_touch(position, window))
             {
-                if touch_row(position).is_some() {
+                if touch_row(position, window.width()).is_some() {
                     handled_pointer = true;
-                    if apply_touch_row(position, &mut *selection, &mut *settings)
+                    if apply_touch_row(position, window.width(), &mut *selection, &mut *settings)
                         == Activation::Close
                     {
                         open.0 = false;
@@ -585,9 +606,9 @@ fn spawn_overlay(commands: &mut Commands) {
         .with_children(|root| {
             root.spawn((
                 Node {
-                    width: Val::Percent(88.0),
+                    width: Val::Percent(SETTINGS_PANEL_WIDTH_RATIO * 100.0),
                     height: Val::Percent(88.0),
-                    max_width: px(760.0),
+                    max_width: px(SETTINGS_PANEL_MAX_WIDTH),
                     padding: UiRect::all(px(14.0)),
                     flex_direction: FlexDirection::Column,
                     align_items: AlignItems::Stretch,
@@ -688,7 +709,7 @@ fn update_settings_rows(
     }
     for mut text in &mut footer {
         **text = if selection.0 == SettingRow::LeaderboardName {
-            "Type A-Z/0-9 (3-5) • Backspace delete • ← clear\nTouch/click: center adds A • right cycles • left clears"
+            "Type A-Z/0-9 (3-5) • Backspace delete • ← clear\nTouch: center adds A • right cycles • left clears\nClearing revokes consent and stops future automatic submissions"
         } else {
             "↑/↓ select • ←/→ change • Enter toggle • Esc/O back\nTouch/click: row center toggles; sides change"
         }
@@ -951,6 +972,53 @@ mod tests {
     }
 
     #[test]
+    fn centered_panel_bounds_match_desktop_and_mobile_layouts() {
+        let (desktop_left, desktop_right) = settings_panel_x_bounds(1600.0).unwrap();
+        assert!((desktop_left - 0.2625).abs() < 0.000_001);
+        assert!((desktop_right - 0.7375).abs() < 0.000_001);
+
+        let (mobile_left, mobile_right) = settings_panel_x_bounds(390.0).unwrap();
+        assert!((mobile_left - 0.06).abs() < 0.000_001);
+        assert!((mobile_right - 0.94).abs() < 0.000_001);
+
+        assert_eq!(settings_panel_x_bounds(0.0), None);
+        assert_eq!(settings_panel_x_bounds(f32::NAN), None);
+    }
+
+    #[test]
+    fn settings_rows_reject_clicks_outside_centered_panel() {
+        // Desktop width is capped at 760px, leaving broad side gutters.
+        assert_eq!(touch_row(Vec2::new(0.25, 0.38), 1600.0), None);
+        assert_eq!(touch_row(Vec2::new(0.75, 0.38), 1600.0), None);
+        assert_eq!(
+            touch_row(Vec2::new(0.5, 0.38), 1600.0),
+            Some(SettingRow::Mute)
+        );
+
+        // Mobile uses 88vw, leaving 6% gutters on each side.
+        assert_eq!(touch_row(Vec2::new(0.059, 0.50), 390.0), None);
+        assert_eq!(touch_row(Vec2::new(0.941, 0.50), 390.0), None);
+        assert_eq!(
+            touch_row(Vec2::new(0.061, 0.50), 390.0),
+            Some(SettingRow::ReducedMotion)
+        );
+
+        let mut settings = Settings::default();
+        let mut selection = SettingsSelection::default();
+        assert_eq!(
+            apply_touch_row(Vec2::new(0.1, 0.38), 1600.0, &mut selection, &mut settings,),
+            Activation::None
+        );
+        assert_eq!(selection.0, SettingRow::Volume);
+        assert!(!settings.muted);
+        assert_eq!(
+            apply_touch_row(Vec2::new(0.95, 0.76), 390.0, &mut selection, &mut settings,),
+            Activation::None
+        );
+        assert_eq!(selection.0, SettingRow::Volume);
+    }
+
+    #[test]
     fn legacy_mute_migrates_only_when_schema_is_absent() {
         let (migrated, did_migrate) = decode_or_migrate(None, Some("true"));
         assert!(did_migrate);
@@ -982,7 +1050,7 @@ mod tests {
             SettingRow::LeaderboardName
         );
         assert_eq!(
-            touch_row(Vec2::new(0.5, 0.60)),
+            touch_row(Vec2::new(0.5, 0.60), 1200.0),
             Some(SettingRow::LeaderboardName)
         );
 
@@ -991,6 +1059,7 @@ mod tests {
         assert_eq!(
             apply_touch_row(
                 Vec2::new(0.5, 0.60),
+                1200.0,
                 &mut touch_selection,
                 &mut touch_settings,
             ),
@@ -1001,6 +1070,7 @@ mod tests {
         assert_eq!(
             apply_touch_row(
                 Vec2::new(0.8, 0.60),
+                1200.0,
                 &mut touch_selection,
                 &mut touch_settings,
             ),
