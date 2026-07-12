@@ -18,6 +18,44 @@
         height: 100vh;
       }
     </style>
+    <!--
+      Web-audio gesture unlock (must run BEFORE the wasm-bindgen module).
+      Chrome blocks AudioContext.resume() until a user gesture happens on the
+      page. bevy_audio -> rodio -> cpal constructs the AudioContext and calls
+      resume() at startup (no gesture yet), so the context is left suspended
+      and ALL game audio stays silent for the session, even after pressing keys.
+      The wasm-bindgen JS captures `window.AudioContext` once, at module-eval
+      time, into a const. This classic (non-module) script runs before that
+      module evaluates, so wrapping the global constructor here lets us record
+      every context cpal creates and resume them synchronously inside the first
+      keydown/pointerdown handler (a real user-gesture call stack).
+    -->
+    <script>
+      (function () {
+        if (typeof window === "undefined") return;
+        var NativeAC = window.AudioContext || window.webkitAudioContext;
+        if (!NativeAC) return;
+        var contexts = [];
+        function PatchedAC(opts) {
+          var ctx = new NativeAC(opts);
+          try { contexts.push(ctx); } catch (e) {}
+          return ctx; // an explicitly-returned object replaces `this` under `new`
+        }
+        PatchedAC.prototype = NativeAC.prototype;
+        window.AudioContext = PatchedAC;
+        if (window.webkitAudioContext) window.webkitAudioContext = PatchedAC;
+        function resumeAll() {
+          for (var i = 0; i < contexts.length; i++) {
+            try {
+              if (contexts[i].state !== "running") contexts[i].resume();
+            } catch (e) {}
+          }
+        }
+        ["keydown", "pointerdown", "mousedown", "touchstart", "click"].forEach(function (ev) {
+          window.addEventListener(ev, resumeAll, { capture: true });
+        });
+      })();
+    </script>
   </head>
   <body>
     <link data-trunk rel="rust" data-bin="car_game_ai" />
