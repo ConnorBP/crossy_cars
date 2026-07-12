@@ -32,9 +32,9 @@
 //! circle-vs-AABB loop. Curbs keep their own `Curb` component for the
 //! hop-up behaviour.
 
+use bevy::color::LinearRgba;
 use bevy::math::primitives::Circle;
 use bevy::prelude::*;
-use bevy::color::LinearRgba;
 
 use crate::car::Car;
 use crate::game::SpawnSet;
@@ -230,7 +230,10 @@ const LINE_ROAD_DENSITY: f32 = 0.7;
 
 /// Tiny hash -> 0..1 for deterministic line-road decisions.
 fn line_hash(idx: i32) -> f32 {
-    let mut s = (idx as u32).wrapping_mul(2654435761).wrapping_add(0x9E3779B9) ^ 0xA5A5A5A5;
+    let mut s = (idx as u32)
+        .wrapping_mul(2654435761)
+        .wrapping_add(0x9E3779B9)
+        ^ 0xA5A5A5A5;
     s = s.wrapping_mul(1664525).wrapping_add(1013904223);
     (s >> 8) as f32 / ((1u32 << 24) as f32)
 }
@@ -245,6 +248,23 @@ fn vertical_line_road(ex: i32) -> bool {
 /// always a road (spawn intersection guarantee).
 fn horizontal_line_road(ez: i32) -> bool {
     ez == 0 || line_hash(ez.wrapping_mul(31)) < LINE_ROAD_DENSITY
+}
+
+/// Public road-line query used by other modules (e.g. the traffic wave) to
+/// ask "is there a road running along world line `idx * block`?" without
+/// reaching into the private vertical/horizontal helpers.
+///
+/// `axis = true`  -> vertical line at `x = idx * block` (runs along Z).
+/// `axis = false` -> horizontal line at `z = idx * block` (runs along X).
+///
+/// This is a thin wrapper over `vertical_line_road` / `horizontal_line_road`
+/// so behaviour stays identical to the in-block tile derivation.
+pub(crate) fn is_road_line(axis: bool, idx: i32) -> bool {
+    if axis {
+        vertical_line_road(idx)
+    } else {
+        horizontal_line_road(idx)
+    }
 }
 
 /// Derive a block's 4 edge sockets (W, E, S, N) from the road lines it sits
@@ -336,17 +356,11 @@ impl Plugin for WorldPlugin {
             // fresh round (skips on resume from Paused via RoundActive). Runs
             // in SpawnSet so it's before reset_run, which zeroes the car to
             // origin.
-            .add_systems(
-                OnEnter(GameState::Playing),
-                reset_grid.in_set(SpawnSet),
-            )
+            .add_systems(OnEnter(GameState::Playing), reset_grid.in_set(SpawnSet))
             // Recycle blocks that fall off any edge of the grid to the
             // opposite side, keeping a continuous count×count window around
             // the car in BOTH X and Z.
-            .add_systems(
-                Update,
-                recycle_grid.run_if(in_state(GameState::Playing)),
-            );
+            .add_systems(Update, recycle_grid.run_if(in_state(GameState::Playing)));
     }
 }
 
@@ -425,11 +439,7 @@ fn spawn_grid_window(
 /// this same seed, so the whole block layout (tile + decorations) is a pure
 /// function of (gx, gz).
 fn seed_for(gx: i32, gz: i32) -> u32 {
-    (gx as u32)
-        .wrapping_mul(1664525)
-        ^ (gz as u32)
-            .wrapping_mul(22695477)
-            .wrapping_add(0x9e3779b9)
+    (gx as u32).wrapping_mul(1664525) ^ (gz as u32).wrapping_mul(22695477).wrapping_add(0x9e3779b9)
 }
 
 /// Build all of one block's contents as children of `root`, per the chosen
@@ -456,7 +466,7 @@ pub fn populate_block(
     kind: TileKind,
 ) {
     let block = 40.0_f32; // matches GridConfig default; decorations are laid
-                          // out relative to this.
+    // out relative to this.
     let half = block / 2.0;
 
     let sock = sockets(kind);
@@ -1191,12 +1201,13 @@ pub fn populate_block(
                         Mesh3d(arm_mesh.clone()),
                         MeshMaterial3d(metal_mat.clone()),
                         // Orient the arm along the chosen axis.
-                        Transform::from_xyz(dir_x * 0.4, 3.1, dir_z * 0.4)
-                            .with_rotation(Quat::from_rotation_y(if dir_x != 0.0 {
+                        Transform::from_xyz(dir_x * 0.4, 3.1, dir_z * 0.4).with_rotation(
+                            Quat::from_rotation_y(if dir_x != 0.0 {
                                 std::f32::consts::FRAC_PI_2
                             } else {
                                 0.0
-                            })),
+                            }),
+                        ),
                     ));
                     lp.spawn((
                         Mesh3d(lamp_mesh.clone()),
@@ -1291,18 +1302,16 @@ pub fn populate_block(
                             hp.spawn((
                                 Mesh3d(hydrant_nub_mesh.clone()),
                                 MeshMaterial3d(hydrant_mat.clone()),
-                                Transform::from_xyz(0.15, 0.18, 0.0)
-                                    .with_rotation(Quat::from_rotation_z(
-                                        std::f32::consts::FRAC_PI_2,
-                                    )),
+                                Transform::from_xyz(0.15, 0.18, 0.0).with_rotation(
+                                    Quat::from_rotation_z(std::f32::consts::FRAC_PI_2),
+                                ),
                             ));
                             hp.spawn((
                                 Mesh3d(hydrant_nub_mesh.clone()),
                                 MeshMaterial3d(hydrant_mat.clone()),
-                                Transform::from_xyz(-0.15, 0.18, 0.0)
-                                    .with_rotation(Quat::from_rotation_z(
-                                        std::f32::consts::FRAC_PI_2,
-                                    )),
+                                Transform::from_xyz(-0.15, 0.18, 0.0).with_rotation(
+                                    Quat::from_rotation_z(std::f32::consts::FRAC_PI_2),
+                                ),
                             ));
                             hp.spawn((
                                 Mesh3d(hydrant_shadow_mesh.clone()),
@@ -1471,7 +1480,9 @@ fn recycle_grid(
     let (min_gx, max_gx) = block_list
         .iter()
         .map(|(_, gx, _)| *gx)
-        .fold((i32::MAX, i32::MIN), |(mn, mx), gx| (mn.min(gx), mx.max(gx)));
+        .fold((i32::MAX, i32::MIN), |(mn, mx), gx| {
+            (mn.min(gx), mx.max(gx))
+        });
     let x_edge_hi = (max_gx as f32 + 0.5) * block + VIEW_MARGIN;
     let x_edge_lo = (min_gx as f32 + 0.5) * block - VIEW_MARGIN;
     if car_x > x_edge_hi {
@@ -1486,7 +1497,15 @@ fn recycle_grid(
         }
         let new_gx = max_gx + 1;
         for gz in gz_values {
-            spawn_block_at(&mut commands, &mut meshes, &mut materials, &textures, block, new_gx, gz);
+            spawn_block_at(
+                &mut commands,
+                &mut meshes,
+                &mut materials,
+                &textures,
+                block,
+                new_gx,
+                gz,
+            );
         }
     } else if car_x < x_edge_lo {
         // Retire the +X (max_gx) column; regenerate it on the -X side at min_gx-1.
@@ -1500,7 +1519,15 @@ fn recycle_grid(
         }
         let new_gx = min_gx - 1;
         for gz in gz_values {
-            spawn_block_at(&mut commands, &mut meshes, &mut materials, &textures, block, new_gx, gz);
+            spawn_block_at(
+                &mut commands,
+                &mut meshes,
+                &mut materials,
+                &textures,
+                block,
+                new_gx,
+                gz,
+            );
         }
     }
 
@@ -1511,7 +1538,9 @@ fn recycle_grid(
     let (min_gz, max_gz) = block_list_z
         .iter()
         .map(|(_, _, gz)| *gz)
-        .fold((i32::MAX, i32::MIN), |(mn, mx), gz| (mn.min(gz), mx.max(gz)));
+        .fold((i32::MAX, i32::MIN), |(mn, mx), gz| {
+            (mn.min(gz), mx.max(gz))
+        });
     let z_edge_hi = (max_gz as f32 + 0.5) * block + VIEW_MARGIN;
     let z_edge_lo = (min_gz as f32 + 0.5) * block - VIEW_MARGIN;
     if car_z > z_edge_hi {
@@ -1525,7 +1554,15 @@ fn recycle_grid(
         }
         let new_gz = max_gz + 1;
         for gx in gx_values {
-            spawn_block_at(&mut commands, &mut meshes, &mut materials, &textures, block, gx, new_gz);
+            spawn_block_at(
+                &mut commands,
+                &mut meshes,
+                &mut materials,
+                &textures,
+                block,
+                gx,
+                new_gz,
+            );
         }
     } else if car_z < z_edge_lo {
         let gx_values: Vec<i32> = block_list_z
@@ -1538,7 +1575,15 @@ fn recycle_grid(
         }
         let new_gz = min_gz - 1;
         for gx in gx_values {
-            spawn_block_at(&mut commands, &mut meshes, &mut materials, &textures, block, gx, new_gz);
+            spawn_block_at(
+                &mut commands,
+                &mut meshes,
+                &mut materials,
+                &textures,
+                block,
+                gx,
+                new_gz,
+            );
         }
     }
 }
@@ -1564,7 +1609,17 @@ fn spawn_block_at(
             Block { gx, gz, kind },
         ))
         .id();
-    populate_block(commands, meshes, materials, textures, root, gx, gz, seed_for(gx, gz), kind);
+    populate_block(
+        commands,
+        meshes,
+        materials,
+        textures,
+        root,
+        gx,
+        gz,
+        seed_for(gx, gz),
+        kind,
+    );
 }
 
 /// On a fresh round, re-center the grid on the car's spawn (origin): despawn
@@ -1622,5 +1677,374 @@ fn collect_coins(
             timeleft.0 += 3.0; // time bonus!
             coin_events.write(CoinCollected);
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests: deterministic road-line + tile generation (Wave A world-gen seam)
+// ---------------------------------------------------------------------------
+//
+// Pure, allocation-free tests covering the road-line seam contract that the
+// traffic wave (and the rest of the world) rely on:
+//   * line 0 is always a road on both axes (spawn intersection guarantee),
+//   * road-line decisions are deterministic across negative/positive indices,
+//   * `tile_from_edges` derives its four sockets from exactly the same four
+//     shared line decisions (so blocks never disagree with the seam),
+//   * adjacent blocks agree on their shared east/west and north/south edges
+//     across a broad coordinate range (the actual seam-correctness property),
+//   * `seed_for` is deterministic and distinguishes representative coords,
+//   * `try_place` never returns a footprint overlapping an accepted one and
+//     always lands inside the requested interior bounds.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Line 0 is forced to be a road on BOTH axes — this is the
+    /// spawn-intersection guarantee (the car spawns at the origin and must
+    /// sit on a drivable road line in both X and Z).
+    #[test]
+    fn line_zero_is_road_both_axes() {
+        assert!(is_road_line(true, 0), "vertical line 0 must be a road");
+        assert!(is_road_line(false, 0), "horizontal line 0 must be a road");
+        // And the private helpers agree with the public wrapper.
+        assert!(vertical_line_road(0));
+        assert!(horizontal_line_road(0));
+    }
+
+    /// Repeated calls with the same index MUST return the same answer —
+    /// there is no time/state dependence, only a pure hash of the index.
+    /// Covers a broad spread of negative and positive indices on both axes
+    /// so the contract holds across the whole infinite grid (including the
+    /// recycling region far from the origin).
+    #[test]
+    fn road_line_decisions_are_deterministic() {
+        for idx in -500..=500 {
+            let v1 = is_road_line(true, idx);
+            let v2 = is_road_line(true, idx);
+            assert_eq!(v1, v2, "vertical idx={idx} not stable across calls");
+
+            let h1 = is_road_line(false, idx);
+            let h2 = is_road_line(false, idx);
+            assert_eq!(h1, h2, "horizontal idx={idx} not stable across calls");
+
+            // The private helpers must agree with the public wrapper for
+            // every index (not just line 0).
+            assert_eq!(v1, vertical_line_road(idx), "vertical mismatch idx={idx}");
+            assert_eq!(
+                h1,
+                horizontal_line_road(idx),
+                "horizontal mismatch idx={idx}"
+            );
+        }
+    }
+
+    /// The line-road density is ~0.7, so across a wide range of indices we
+    /// expect a healthy mix of road and non-road lines (not all-one-value,
+    /// which would indicate the hash collapsed). This guards against a
+    /// regression that makes every line a road (or no line a road) and
+    /// silently breaks the seam contract in a different way.
+    #[test]
+    fn road_lines_have_mixture_of_road_and_non_road() {
+        let mut v_roads = 0u32;
+        let mut h_roads = 0u32;
+        let total = 1000i32;
+        for idx in -500..500 {
+            if is_road_line(true, idx) {
+                v_roads += 1;
+            }
+            if is_road_line(false, idx) {
+                h_roads += 1;
+            }
+        }
+        // Both axes should have at least one road and at least one non-road
+        // in this range (line 0 alone guarantees >=1 road; the density
+        // guarantees some non-roads too).
+        assert!(
+            v_roads > 0 && v_roads < total as u32,
+            "vertical collapsed: {v_roads}/{total}"
+        );
+        assert!(
+            h_roads > 0 && h_roads < total as u32,
+            "horizontal collapsed: {h_roads}/{total}"
+        );
+    }
+
+    /// `tile_from_edges(gx, gz)` must produce a tile whose four sockets are
+    /// EXACTLY the four shared line decisions for that block:
+    ///   W = vertical_line_road(gx),     E = vertical_line_road(gx+1)
+    ///   S = horizontal_line_road(gz),   N = horizontal_line_road(gz+1)
+    /// This is the invariant that makes the seam work: the block's tile is a
+    /// pure function of the same line indices its neighbours use.
+    #[test]
+    fn tile_from_edges_sockets_match_four_line_decisions() {
+        for gx in -20..=20 {
+            for gz in -20..=20 {
+                let kind = tile_from_edges(gx, gz);
+                let sock = sockets(kind);
+                let w = matches!(sock[W], Edge::Road);
+                let e = matches!(sock[E], Edge::Road);
+                let s = matches!(sock[S], Edge::Road);
+                let n = matches!(sock[N], Edge::Road);
+                assert_eq!(
+                    w,
+                    vertical_line_road(gx),
+                    "W socket mismatch at ({gx},{gz})"
+                );
+                assert_eq!(
+                    e,
+                    vertical_line_road(gx + 1),
+                    "E socket mismatch at ({gx},{gz})"
+                );
+                assert_eq!(
+                    s,
+                    horizontal_line_road(gz),
+                    "S socket mismatch at ({gx},{gz})"
+                );
+                assert_eq!(
+                    n,
+                    horizontal_line_road(gz + 1),
+                    "N socket mismatch at ({gx},{gz})"
+                );
+            }
+        }
+    }
+
+    /// The seam-correctness property: two horizontally-adjacent blocks
+    /// (gx, gz) and (gx+1, gz) share an edge — block A's east edge and
+    /// block B's west edge are the SAME world line `x = (gx+1) * block`.
+    /// Their road/not-road decision must agree, otherwise the road would
+    /// start/stop mid-block. Same for vertically-adjacent blocks sharing a
+    /// north/south edge. Checked across a broad coordinate range spanning
+    /// negative and positive indices (including the recycling frontier).
+    #[test]
+    fn adjacent_blocks_agree_on_shared_edges() {
+        let lo = -40i32;
+        let hi = 40i32;
+        for gx in lo..=hi {
+            for gz in lo..=hi {
+                let a = sockets(tile_from_edges(gx, gz));
+                // East neighbour (gx+1, gz): A's E edge == B's W edge.
+                let b = sockets(tile_from_edges(gx + 1, gz));
+                assert_eq!(
+                    a[E],
+                    b[W],
+                    "E/W seam mismatch at ({gx},{gz}) vs ({},{gz})",
+                    gx + 1,
+                );
+                // North neighbour (gx, gz+1): A's N edge == B's S edge.
+                let c = sockets(tile_from_edges(gx, gz + 1));
+                assert_eq!(
+                    a[N],
+                    c[S],
+                    "N/S seam mismatch at ({gx},{gz}) vs ({gx},{})",
+                    gz + 1,
+                );
+            }
+        }
+    }
+
+    /// Equivalent seam check expressed through the public `is_road_line` API
+    /// (the one the traffic wave calls): a block's east edge at line index
+    /// `gx+1` must equal both `is_road_line(true, gx+1)` AND the west edge of
+    /// the east-neighbour block (which is also `is_road_line(true, gx+1)`).
+    /// This is the exact contract the traffic wave relies on, exercised via
+    /// the public surface only.
+    #[test]
+    fn is_road_line_matches_block_edges_across_range() {
+        for gx in -30..=30 {
+            for gz in -30..=30 {
+                let sock = sockets(tile_from_edges(gx, gz));
+                assert_eq!(
+                    matches!(sock[W], Edge::Road),
+                    is_road_line(true, gx),
+                    "W != is_road_line at ({gx},{gz})"
+                );
+                assert_eq!(
+                    matches!(sock[E], Edge::Road),
+                    is_road_line(true, gx + 1),
+                    "E != is_road_line at ({gx},{gz})"
+                );
+                assert_eq!(
+                    matches!(sock[S], Edge::Road),
+                    is_road_line(false, gz),
+                    "S != is_road_line at ({gx},{gz})"
+                );
+                assert_eq!(
+                    matches!(sock[N], Edge::Road),
+                    is_road_line(false, gz + 1),
+                    "N != is_road_line at ({gx},{gz})"
+                );
+            }
+        }
+    }
+
+    /// `seed_for` is deterministic: the same (gx, gz) always yields the same
+    /// seed (stable across recycles — a block re-spawned at the same coords
+    /// reproduces its layout). Pure function of (gx, gz).
+    #[test]
+    fn seed_for_is_deterministic() {
+        for gx in -50..=50 {
+            for gz in -50..=50 {
+                let s1 = seed_for(gx, gz);
+                let s2 = seed_for(gx, gz);
+                assert_eq!(s1, s2, "seed_for({gx},{gz}) not stable");
+            }
+        }
+    }
+
+    /// `seed_for` should distinguish representative coordinates — different
+    /// (gx, gz) pairs should (almost always) produce different seeds. We
+    /// don't require injectivity over all i32² (collisions are statistically
+    /// possible with a 32-bit output), but a handful of representative
+    // distinct coords must all differ; otherwise the layout would be uniform.
+    #[test]
+    fn seed_for_distinguishes_representative_coords() {
+        let coords = [
+            (0, 0),
+            (1, 0),
+            (0, 1),
+            (-1, 0),
+            (0, -1),
+            (1, 1),
+            (-1, -1),
+            (7, -3),
+            (-3, 7),
+            (100, 100),
+            (-100, -100),
+            (12345, -67890),
+        ];
+        let mut seen = std::collections::HashSet::new();
+        for &(gx, gz) in &coords {
+            let s = seed_for(gx, gz);
+            assert!(seen.insert(s), "seed_for collision at ({gx},{gz}): {s}");
+        }
+    }
+
+    /// `seed_for` should vary with EACH axis independently — moving one step
+    /// along X or Z should (almost always) change the seed, so neighbouring
+    /// blocks get different layouts.
+    #[test]
+    fn seed_for_varies_along_each_axis() {
+        let base = seed_for(5, 5);
+        assert_ne!(base, seed_for(6, 5), "seed unchanged moving +X");
+        assert_ne!(base, seed_for(4, 5), "seed unchanged moving -X");
+        assert_ne!(base, seed_for(5, 6), "seed unchanged moving +Z");
+        assert_ne!(base, seed_for(5, 4), "seed unchanged moving -Z");
+    }
+
+    /// `try_place` must NEVER return a footprint that overlaps an already-
+    /// accepted placement. We exercise it by hammering it with many requests
+    /// in a small interior and checking every accepted footprint against
+    /// every other accepted footprint (AABB-overlap with the same margin the
+    /// function uses).
+    #[test]
+    fn try_place_never_overlaps_accepted() {
+        let mut placed: Vec<[f32; 4]> = Vec::new();
+        let mut s = seed_for(3, 7);
+        let half_x = 1.0_f32;
+        let half_z = 1.0_f32;
+        let margin = 0.5_f32;
+        for _ in 0..200 {
+            if try_place(
+                &mut placed,
+                &mut s,
+                half_x,
+                half_z,
+                -10.0,
+                10.0,
+                -10.0,
+                10.0,
+                margin,
+                12,
+            )
+            .is_some()
+            {
+                // Every accepted footprint must not overlap any previously
+                // accepted one (using the same margin-expanded AABB test).
+                let last = *placed.last().unwrap();
+                for (i, r) in placed[..placed.len() - 1].iter().enumerate() {
+                    let overlaps =
+                        !(last[1] <= r[0] || last[0] >= r[1] || last[3] <= r[2] || last[2] >= r[3]);
+                    assert!(
+                        !overlaps,
+                        "accepted footprint overlaps #{i}: {last:?} vs {r:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Every `try_place` success must place its center inside the supplied
+    /// bounds. Callers that require the full footprint inside an area pass
+    /// bounds already shrunk by the half-extents.
+    #[test]
+    fn try_place_returns_within_interior() {
+        let mut placed: Vec<[f32; 4]> = Vec::new();
+        let mut s = seed_for(-2, 11);
+        let half_x = 0.5_f32;
+        let half_z = 0.5_f32;
+        let margin = 0.25_f32;
+        let x_lo = -8.0_f32;
+        let x_hi = 8.0_f32;
+        let z_lo = -8.0_f32;
+        let z_hi = 8.0_f32;
+        for _ in 0..100 {
+            if let Some((x, z)) = try_place(
+                &mut placed,
+                &mut s,
+                half_x,
+                half_z,
+                x_lo,
+                x_hi,
+                z_lo,
+                z_hi,
+                margin,
+                8,
+            ) {
+                assert!(
+                    (x_lo..=x_hi).contains(&x),
+                    "x={x} outside center bounds [{x_lo},{x_hi}]"
+                );
+                assert!(
+                    (z_lo..=z_hi).contains(&z),
+                    "z={z} outside center bounds [{z_lo},{z_hi}]"
+                );
+            }
+        }
+    }
+
+    /// `try_place` must eventually give up (return None) when the interior is
+    /// saturated — it should not loop forever, and once it returns None the
+    /// `placed` list must be unchanged.
+    #[test]
+    fn try_place_returns_none_when_saturated() {
+        let mut placed: Vec<[f32; 4]> = Vec::new();
+        let mut s = seed_for(9, 9);
+        // Pre-fill the interior with one big footprint covering everything,
+        // so no further placement can fit.
+        placed.push([-10.0, 10.0, -10.0, 10.0]);
+        let before = placed.len();
+        let r = try_place(&mut placed, &mut s, 0.5, 0.5, -8.0, 8.0, -8.0, 8.0, 0.5, 8);
+        assert!(r.is_none(), "expected None in a saturated interior");
+        assert_eq!(placed.len(), before, "placed grew on a failed try_place");
+    }
+
+    /// `rand` (the LCG used by `populate_block`) is deterministic: the same
+    /// seed produces the same sequence, so a recycled block reproduces its
+    /// layout exactly.
+    #[test]
+    fn rand_lcg_is_deterministic() {
+        let mut a = seed_for(4, 4);
+        let mut b = seed_for(4, 4);
+        for _ in 0..64 {
+            assert_eq!(rand(&mut a), rand(&mut b));
+        }
+        // And a different seed produces a different first value (almost
+        // surely).
+        let mut c = seed_for(4, 5);
+        assert_ne!(rand(&mut c), {
+            let mut d = seed_for(4, 4);
+            rand(&mut d)
+        });
     }
 }
