@@ -38,7 +38,7 @@ use bevy::color::LinearRgba;
 use bevy::math::primitives::Circle;
 use bevy::prelude::*;
 
-use crate::car::{Car, InputFrozen};
+use crate::car::{Car, DrivingSet, InputFrozen};
 use crate::game::SpawnSet;
 use crate::game::events::CoinCollected;
 use crate::game::resources::{RoundActive, Score, TimeLeft};
@@ -83,6 +83,44 @@ pub struct LampPost;
 /// Tag for a traffic-cone obstacle (collidable, T12 variety).
 #[derive(Component)]
 pub struct Cone;
+
+/// Ground shadow hidden as soon as its parent cone becomes airborne.
+#[derive(Component)]
+struct ConeShadow;
+
+/// Deterministic knockable-cone lifecycle. An `Idle` cone is a solid contact
+/// the car can knock flying; once `Flying` it cannot re-hit the car, integrates
+/// bounded projectile motion + tumble on its LOCAL transform, and despawns on
+/// ground impact or after a short lifetime. The cone keeps its existing
+/// `Collider`/`Cone` entity — no debris or physics crate is spawned.
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
+pub enum ConeState {
+    /// Resting on the ground; the car collides and launches it.
+    #[default]
+    Idle,
+    /// Airborne; cannot re-hit the car, integrates flight, despawns on land.
+    Flying,
+}
+
+/// Per-cone motion state, added to every spawned cone root. Velocity and spin
+/// axis are stored in WORLD space and integrated into the LOCAL `Transform`:
+/// cone roots are parented under block roots that carry only translation
+/// (identity rotation/scale), so local-space deltas equal world-space deltas.
+/// This keeps flight deterministic and free of the one-frame `GlobalTransform`
+/// propagation lag.
+#[derive(Component, Default)]
+pub struct ConeMotion {
+    /// Current lifecycle state.
+    pub state: ConeState,
+    /// World-space velocity (m/s). Gravity acts on `.y`.
+    pub vel: Vec3,
+    /// World-space unit tumble axis (horizontal, perpendicular to launch).
+    pub spin_axis: Vec3,
+    /// Tumble rate (rad/s) about `spin_axis`.
+    pub spin: f32,
+    /// Remaining airborne lifetime (s); caps flight at <= 2s.
+    pub lifetime: f32,
+}
 /// Tag for a fire-hydrant obstacle (collidable, T12 variety).
 #[derive(Component)]
 pub struct Hydrant;
@@ -692,6 +730,14 @@ impl Plugin for WorldPlugin {
                 (spin_coins, collect_coins)
                     .chain()
                     .run_if(in_state(GameState::Playing)),
+            )
+            // Knockable cones: integrate bounded flight for airborne cones
+            // after the driving chain has launched them, only while playing.
+            .add_systems(
+                Update,
+                update_cone_motion
+                    .run_if(in_state(GameState::Playing))
+                    .after(DrivingSet),
             )
             // Re-center the grid on the car's spawn at the start of each
             // fresh round (skips on resume from Paused via RoundActive). Runs
@@ -1685,6 +1731,7 @@ pub fn populate_block(
                                 half_z: 0.2,
                             },
                             Cone,
+                            ConeMotion::default(),
                         ))
                         .with_children(|cp| {
                             // Cone is centered on its midpoint (base at y=0, tip at
@@ -1703,6 +1750,7 @@ pub fn populate_block(
                                 Mesh3d(cone_shadow_mesh.clone()),
                                 MeshMaterial3d(shadow_mat.clone()),
                                 Transform::from_xyz(0.0, 0.05, 0.0),
+                                ConeShadow,
                             ));
                         });
                     }
@@ -2054,6 +2102,152 @@ fn collect_coins(
             score.coins += 1;
             timeleft.0 = coin_time_after_collect(timeleft.0);
             coin_events.write(CoinCollected);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Knockable cones (T12): bounded deterministic launch + flight
+// ---------------------------------------------------------------------------
+//
+// Cones are spawned as `Cone` + `Collider` + `ConeMotion` children of
+// recyclable block roots. The car knocks an idle cone flying in
+// `car.rs::cone_collisions` (a modest speed bleed, never a concrete stop or
+// pushout, and never a damaging `ObstacleHit`). Flight is integrated here on
+// the cone's LOCAL transform by `update_cone_motion`, which runs only while
+// `GameState::Playing` and after the driving chain so a cone launched this
+// frame begins moving this frame. All launch/flight helpers are pure and
+// deterministic (no randomness, no per-frame allocation/assets), so the
+// bounded-launch, nonzero-post-hit-speed, lifetime/termination and
+// determinism contracts are unit-testable without an ECS world.
+
+/// World-space gravity accelerating airborne cones downward (m/s²). Tuned
+/// with `CONE_LAUNCH_POP` so a cone always lands well inside the lifetime cap.
+const CONE_GRAVITY: f32 = 14.0;
+/// Upward pop imparted on launch (m/s). Fixed so every cone arcs predictably
+/// and lands within the lifetime cap regardless of car speed.
+const CONE_LAUNCH_POP: f32 = 5.0;
+/// Fraction of the player's speed transferred to the cone's horizontal launch.
+const CONE_LAUNCH_TRANSFER: f32 = 0.5;
+/// Cap on the cone's horizontal launch speed (m/s) so even a very fast car
+/// produces a bounded, readable knock.
+const CONE_MAX_LAUNCH_SPEED: f32 = 6.0;
+/// Max airborne lifetime (s). A cone always despawns by this even if it
+/// somehow stayed airborne; combined with gravity the real flight is ~0.7s,
+/// so this is well under the <= 2s requirement.
+const CONE_MAX_LIFETIME: f32 = 1.8;
+/// Tumble rate per unit of player speed (rad/s), capped by `CONE_MAX_SPIN`.
+const CONE_SPIN_PER_SPEED: f32 = 3.0;
+/// Cap on cone tumble rate (rad/s).
+const CONE_MAX_SPIN: f32 = 14.0;
+/// Speed bleed applied to the car on a cone hit: the car keeps most of its
+/// speed (cones are harmless) but loses a modest fraction. A fractional bleed
+/// can never flip the sign of or zero a nonzero speed, so there is no concrete
+/// stop.
+const CONE_SPEED_BLEED: f32 = 0.8;
+
+/// World-space launch velocity for a cone struck by the car. `player_vel` is
+/// the car's XZ velocity; `normal` is the unit contact normal pointing from the
+/// car toward the cone (the direction the cone flies). The horizontal speed is
+/// the player's speed times a transfer fraction, capped to
+/// `CONE_MAX_LAUNCH_SPEED`; a fixed upward pop is added so every cone arcs
+/// predictably. Pure; deterministic; bounded.
+pub(crate) fn cone_launch_velocity(player_vel: Vec2, normal: Vec2) -> Vec3 {
+    let speed = (player_vel.length() * CONE_LAUNCH_TRANSFER).min(CONE_MAX_LAUNCH_SPEED);
+    let dir = normal.normalize_or_zero();
+    Vec3::new(dir.x * speed, CONE_LAUNCH_POP, dir.y * speed)
+}
+
+/// World-space unit tumble axis for a cone launched along `normal`: the
+/// horizontal axis perpendicular to the launch direction, so the cone tips
+/// forward. Returns `Vec3::ZERO` for a degenerate normal (no spin). Pure;
+/// deterministic.
+pub(crate) fn cone_spin_axis(normal: Vec2) -> Vec3 {
+    let dir = Vec3::new(normal.x, 0.0, normal.y);
+    Vec3::Y.cross(dir).normalize_or_zero()
+}
+
+/// Tumble rate (rad/s) about `cone_spin_axis`, scaled by the player's speed
+/// and capped. Pure; deterministic.
+pub(crate) fn cone_spin_rate(player_vel: Vec2) -> f32 {
+    (player_vel.length() * CONE_SPIN_PER_SPEED).min(CONE_MAX_SPIN)
+}
+
+/// Car speed after a cone hit: a modest fractional bleed. Never zeroes a
+/// nonzero speed and never flips its sign (cones are harmless — no concrete
+/// stop). Pure; deterministic.
+pub(crate) fn cone_hit_speed(speed: f32) -> f32 {
+    speed * CONE_SPEED_BLEED
+}
+
+/// Initial airborne lifetime assigned on launch (s). Bounded by
+/// `CONE_MAX_LIFETIME` (<= 2s). Pure; deterministic.
+pub(crate) fn cone_initial_lifetime() -> f32 {
+    CONE_MAX_LIFETIME
+}
+
+/// One deterministic projectile integration step for an airborne cone
+/// (semi-Euler): gravity acts on `vel.y`, then the position advances by
+/// `vel * dt`. The ECS motion system is a thin wrapper over this. Pure;
+/// deterministic; no allocation.
+pub(crate) fn step_cone_flight(vel: Vec3, pos: Vec3, dt: f32) -> (Vec3, Vec3) {
+    let mut new_vel = vel;
+    new_vel.y -= CONE_GRAVITY * dt;
+    (new_vel, pos + new_vel * dt)
+}
+
+/// Whether an airborne cone should despawn this step: it has returned to
+/// ground (local `y <= 0`) or its lifetime has expired. Pure; deterministic.
+pub(crate) fn cone_should_despawn(pos_y: f32, lifetime: f32) -> bool {
+    pos_y <= 0.0 || lifetime <= 0.0
+}
+
+/// Integrate airborne cones and despawn on ground impact or lifetime expiry.
+/// Idle cones are left untouched (they are static contacts). Runs only while
+/// `GameState::Playing` and after the driving chain, so cones launched this
+/// frame begin moving this frame. No per-frame allocation or asset cloning:
+/// flight is a pure function of each cone's stored state + `dt`, and the only
+/// commands issued are occasional despawns on termination.
+fn update_cone_motion(
+    mut commands: Commands,
+    mut cones: Query<(Entity, &mut ConeMotion, &mut Transform, &Children), With<Cone>>,
+    mut shadows: Query<&mut Visibility, With<ConeShadow>>,
+    time: Res<Time>,
+) {
+    let dt = time.delta_secs();
+    if dt <= 0.0 {
+        return;
+    }
+    for (entity, mut motion, mut tf, children) in &mut cones {
+        if motion.state != ConeState::Flying {
+            continue;
+        }
+        // The ground shadow is a child, so hide it before it can inherit the
+        // parent's airborne translation and tumble. The cone despawns on land.
+        for child in children.iter() {
+            if let Ok(mut visibility) = shadows.get_mut(child) {
+                *visibility = Visibility::Hidden;
+            }
+        }
+        // Bounded projectile integration on the LOCAL transform. Block roots
+        // are pure-translation (identity rotation/scale), so local-space deltas
+        // equal world-space deltas — no GlobalTransform read is needed, which
+        // keeps flight deterministic and free of propagation lag.
+        let (new_vel, new_pos) = step_cone_flight(motion.vel, tf.translation, dt);
+        motion.vel = new_vel;
+        tf.translation = new_pos;
+        // Deterministic tumble about the stored world-space axis (a child of
+        // an identity-rotation parent tumbles the same in local and world).
+        let spin_delta = motion.spin * dt;
+        if spin_delta != 0.0 {
+            let axis = motion.spin_axis.normalize_or_zero();
+            if axis.length_squared() > 1e-8 {
+                tf.rotation = Quat::from_axis_angle(axis, spin_delta) * tf.rotation;
+            }
+        }
+        motion.lifetime -= dt;
+        if cone_should_despawn(tf.translation.y, motion.lifetime) {
+            commands.entity(entity).despawn();
         }
     }
 }
@@ -2892,5 +3086,186 @@ mod tests {
             arm.translation.y > pole.translation.y,
             "arm above pole center"
         );
+    }
+
+    // --- Knockable cones: bounded launch, nonzero post-hit speed,
+    // lifetime/termination, determinism ---
+
+    #[test]
+    fn cone_launch_velocity_is_bounded_and_directed() {
+        // Fast car: horizontal speed capped at CONE_MAX_LAUNCH_SPEED.
+        let v = cone_launch_velocity(Vec2::new(0.0, 30.0), Vec2::new(0.0, 1.0));
+        let h = Vec2::new(v.x, v.z).length();
+        assert!(
+            h <= CONE_MAX_LAUNCH_SPEED + 1e-5,
+            "horizontal {h} exceeds cap"
+        );
+        assert!((v.y - CONE_LAUNCH_POP).abs() < 1e-5, "upward pop");
+        // Direction follows the normal (cone flies away from the car).
+        assert!(v.z > 0.0 && v.x.abs() < 1e-5, "flies along +Z normal");
+
+        // Slow car: horizontal speed is transfer * speed (below the cap).
+        let v2 = cone_launch_velocity(Vec2::new(0.0, 4.0), Vec2::new(1.0, 0.0));
+        let h2 = Vec2::new(v2.x, v2.z).length();
+        assert!((h2 - 4.0 * CONE_LAUNCH_TRANSFER).abs() < 1e-5, "h2={h2}");
+        assert!(v2.x > 0.0 && v2.z.abs() < 1e-5, "flies along +X normal");
+        assert!((v2.y - CONE_LAUNCH_POP).abs() < 1e-5);
+
+        // Stationary car: no horizontal launch, just the upward pop.
+        let v3 = cone_launch_velocity(Vec2::ZERO, Vec2::new(1.0, 0.0));
+        assert!(
+            Vec2::new(v3.x, v3.z).length() < 1e-5,
+            "no horizontal when parked"
+        );
+        assert!((v3.y - CONE_LAUNCH_POP).abs() < 1e-5);
+    }
+
+    #[test]
+    fn cone_launch_velocity_is_deterministic() {
+        let pv = Vec2::new(3.0, -7.0);
+        let n = Vec2::new(-1.0, 2.0).normalize();
+        let a = cone_launch_velocity(pv, n);
+        let b = cone_launch_velocity(pv, n);
+        assert_eq!(a, b);
+        // A different input (almost surely) yields a different output.
+        assert_ne!(a, cone_launch_velocity(pv * 2.0, n));
+    }
+
+    #[test]
+    fn cone_hit_speed_is_nonzero_and_modest() {
+        let pre = 10.0_f32;
+        let post = cone_hit_speed(pre);
+        assert!(post > 0.0, "post-hit speed must stay nonzero");
+        assert!(post < pre, "post-hit speed must bleed");
+
+        // Reverse speed: sign preserved, magnitude reduced (no sign flip).
+        let post_rev = cone_hit_speed(-8.0);
+        assert!(post_rev < 0.0, "reverse sign preserved");
+        assert!(post_rev.abs() < 8.0, "reverse magnitude reduced");
+
+        // Zero stays zero (you don't knock a cone while parked on it).
+        assert_eq!(cone_hit_speed(0.0), 0.0);
+
+        // Repeated bleeds monotonically shrink magnitude without flipping.
+        let mut s = 12.0_f32;
+        for _ in 0..20 {
+            let prev = s;
+            s = cone_hit_speed(s);
+            assert!(s > 0.0 && s < prev, "bleed must shrink: {s} vs {prev}");
+        }
+    }
+
+    #[test]
+    fn cone_spin_axis_is_horizontal_perpendicular_and_unit() {
+        let ax = cone_spin_axis(Vec2::new(1.0, 0.0));
+        assert!(ax.y.abs() < 1e-6, "spin axis must be horizontal");
+        assert!((ax.length() - 1.0).abs() < 1e-5, "spin axis must be unit");
+        // The signed axis must lean the upright tip toward the launch rather
+        // than making the cone tumble backward.
+        assert!(ax.z < -1e-5 && ax.x.abs() < 1e-5, "-Z for +X normal");
+        let tipped_x = Quat::from_axis_angle(ax, 0.1) * Vec3::Y;
+        assert!(tipped_x.x > 0.0, "tip must lean toward +X launch");
+
+        let az = cone_spin_axis(Vec2::new(0.0, 1.0));
+        assert!(az.x > 1e-5 && az.z.abs() < 1e-5, "+X for +Z normal");
+        let tipped_z = Quat::from_axis_angle(az, 0.1) * Vec3::Y;
+        assert!(tipped_z.z > 0.0, "tip must lean toward +Z launch");
+
+        // Degenerate normal -> zero axis (no spin).
+        assert_eq!(cone_spin_axis(Vec2::ZERO), Vec3::ZERO);
+    }
+
+    #[test]
+    fn cone_spin_rate_is_bounded_and_scales_with_speed() {
+        assert!(cone_spin_rate(Vec2::new(0.0, 100.0)) <= CONE_MAX_SPIN + 1e-5);
+        assert!((cone_spin_rate(Vec2::new(0.0, 2.0)) - 2.0 * CONE_SPIN_PER_SPEED).abs() < 1e-5);
+        assert_eq!(cone_spin_rate(Vec2::ZERO), 0.0);
+    }
+
+    #[test]
+    fn cone_initial_lifetime_is_under_two_seconds() {
+        assert!(cone_initial_lifetime() > 0.0);
+        assert!(cone_initial_lifetime() <= 2.0);
+    }
+
+    #[test]
+    fn cone_flight_lands_within_lifetime_and_under_two_seconds() {
+        let mut vel = cone_launch_velocity(Vec2::new(0.0, 12.0), Vec2::new(0.0, 1.0));
+        let mut pos = Vec3::ZERO;
+        let mut lifetime = cone_initial_lifetime();
+        let dt = 1.0 / 60.0;
+        let mut elapsed = 0.0;
+        let mut despawned = false;
+        while elapsed < 3.0 {
+            let (nv, np) = step_cone_flight(vel, pos, dt);
+            vel = nv;
+            pos = np;
+            lifetime -= dt;
+            elapsed += dt;
+            if cone_should_despawn(pos.y, lifetime) {
+                despawned = true;
+                break;
+            }
+        }
+        assert!(despawned, "cone never despawned");
+        assert!(elapsed <= 2.0, "despawned at {elapsed}s, must be <= 2s");
+        assert!(
+            pos.y <= 0.0 || lifetime <= 0.0,
+            "must terminate via ground or lifetime"
+        );
+    }
+
+    #[test]
+    fn cone_flight_is_deterministic() {
+        fn simulate() -> (Vec3, Vec3, f32) {
+            let mut vel =
+                cone_launch_velocity(Vec2::new(5.0, -3.0), Vec2::new(1.0, 1.0).normalize());
+            let mut pos = Vec3::ZERO;
+            let mut lifetime = cone_initial_lifetime();
+            let dt = 1.0 / 60.0;
+            for _ in 0..30 {
+                let (nv, np) = step_cone_flight(vel, pos, dt);
+                vel = nv;
+                pos = np;
+                lifetime -= dt;
+            }
+            (vel, pos, lifetime)
+        }
+        assert_eq!(simulate(), simulate());
+    }
+
+    #[test]
+    fn cone_flight_always_terminates_under_two_seconds_across_launches() {
+        let cases = [
+            (Vec2::new(0.0, 30.0), Vec2::new(0.0, 1.0)),
+            (Vec2::new(20.0, 0.0), Vec2::new(1.0, 0.0)),
+            (Vec2::new(1.0, 0.0), Vec2::new(-1.0, 0.0)),
+            (Vec2::new(0.0, 0.0), Vec2::new(1.0, 0.0)),
+            (Vec2::new(-9.0, 9.0), Vec2::new(-1.0, 1.0).normalize()),
+        ];
+        let dt = 1.0 / 60.0;
+        for (pv, n) in cases {
+            let mut vel = cone_launch_velocity(pv, n);
+            let mut pos = Vec3::ZERO;
+            let mut lifetime = cone_initial_lifetime();
+            let mut elapsed = 0.0;
+            let mut ok = false;
+            while elapsed < 3.0 {
+                let (nv, np) = step_cone_flight(vel, pos, dt);
+                vel = nv;
+                pos = np;
+                lifetime -= dt;
+                elapsed += dt;
+                if cone_should_despawn(pos.y, lifetime) {
+                    ok = true;
+                    break;
+                }
+            }
+            assert!(ok, "cone never despawned for pv={pv} n={n}");
+            assert!(
+                elapsed <= 2.0 + 1e-5,
+                "despawned at {elapsed}s > 2s for pv={pv} n={n}"
+            );
+        }
     }
 }

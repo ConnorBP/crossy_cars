@@ -9,7 +9,10 @@ use crate::game::resources::GameConfig;
 use crate::game::state::GameState;
 use crate::palette;
 use crate::textures::TextureAssets;
-use crate::world::{Collider, Curb};
+use crate::world::{
+    Collider, Cone, ConeMotion, ConeState, Curb, cone_hit_speed, cone_initial_lifetime,
+    cone_launch_velocity, cone_spin_axis, cone_spin_rate,
+};
 
 #[derive(Component)]
 pub struct Car {
@@ -220,10 +223,12 @@ impl Plugin for CarPlugin {
             .add_systems(
                 Update,
                 // move_car first, then resolve curb hops + obstacle collisions,
-                // then the juice systems read the fresh speed.
+                // then knock cones flying, then the juice systems read the
+                // fresh speed.
                 (
                     move_car,
                     physics_collisions,
+                    cone_collisions,
                     spin_wheels,
                     roll_body,
                     brake_lights,
@@ -697,7 +702,7 @@ pub fn physics_collisions(
     curbs: Query<(&Curb, &GlobalTransform), (With<Curb>, Without<Car>, Without<Collider>)>,
     obstacles: Query<
         (&Collider, &GlobalTransform, Option<&Traffic>),
-        (With<Collider>, Without<Car>, Without<Curb>),
+        (With<Collider>, Without<Car>, Without<Curb>, Without<Cone>),
     >,
     time: Res<Time>,
     mut obstacle_hits: MessageWriter<ObstacleHit>,
@@ -774,6 +779,73 @@ pub fn physics_collisions(
                 car.speed = 0.0;
             }
         }
+    }
+}
+
+/// Car-vs-traffic-cone collisions. An idle cone is knocked flying on its
+/// existing entity (launch + tip + spin) with a modest car speed bleed —
+/// never a concrete stop, never a pushout, and never a damaging `ObstacleHit`
+/// (cones are harmless). Flying cones are skipped so they cannot re-hit the
+/// car. Cones are excluded from `physics_collisions`' generic obstacle loop
+/// (`Without<Cone>`), so this is the sole cone contact path. Runs in the
+/// driving chain right after `physics_collisions` so it uses the post-pushout
+/// car position.
+fn cone_collisions(
+    mut car: Query<(&mut Car, &Transform), (With<Car>, Without<Cone>)>,
+    mut cones: Query<(&Collider, &GlobalTransform, &mut ConeMotion), (With<Cone>, Without<Car>)>,
+) {
+    let Ok((mut car, car_t)) = car.single_mut() else {
+        return;
+    };
+    // Snapshot the player velocity once so every cone launched this frame
+    // uses the same pre-bleed speed — launch results are then independent of
+    // query iteration order (fully deterministic). The speed bleed is a
+    // multiplicative scalar accumulated in `bled_speed` and written back once,
+    // which is also order-independent.
+    let player_vel = player_velocity(car.heading, car.speed);
+    let mut bled_speed = car.speed;
+    for (collider, ct, mut motion) in &mut cones {
+        if motion.state != ConeState::Idle {
+            continue; // flying cones cannot re-hit the car
+        }
+        // Cones are block-root children -> use GlobalTransform for the world
+        // position (the local Transform is relative to the block root). Skip
+        // the one-frame stale IDENTITY right after spawn/recycle.
+        if *ct == GlobalTransform::IDENTITY {
+            continue;
+        }
+        let cpos = ct.translation();
+        let dx = car_t.translation.x - cpos.x;
+        let dz = car_t.translation.z - cpos.z;
+        let closest_x = dx.clamp(-collider.half_x, collider.half_x);
+        let closest_z = dz.clamp(-collider.half_z, collider.half_z);
+        let px = dx - closest_x;
+        let pz = dz - closest_z;
+        let dist2 = px * px + pz * pz;
+        if dist2 < CAR_RADIUS * CAR_RADIUS {
+            // Contact normal pointing from the car toward the cone (the
+            // direction the cone flies away). For a head-on hit this is the
+            // car's forward direction; for a side clip it points outward.
+            let normal = if dist2 > 1e-6 {
+                let dist = dist2.sqrt();
+                Vec2::new(-px / dist, -pz / dist)
+            } else {
+                // Centers coincide: launch along the car's heading.
+                player_velocity(car.heading, 1.0).normalize_or_zero()
+            };
+            // Launch the cone (bounded, deterministic) on its existing entity.
+            motion.vel = cone_launch_velocity(player_vel, normal);
+            motion.spin_axis = cone_spin_axis(normal);
+            motion.spin = cone_spin_rate(player_vel);
+            motion.lifetime = cone_initial_lifetime();
+            motion.state = ConeState::Flying;
+            // Modest speed bleed — cones are harmless: no stop, no pushout,
+            // no ObstacleHit. Accumulated order-independently below.
+            bled_speed = cone_hit_speed(bled_speed);
+        }
+    }
+    if bled_speed != car.speed {
+        car.speed = bled_speed;
     }
 }
 
