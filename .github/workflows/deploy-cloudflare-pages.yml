@@ -62,5 +62,5 @@ jobs:
       - name: Deploy to Cloudflare Pages
         run: npx wrangler@4 pages deploy dist --project-name "$PROJECT_NAME" --branch main
         env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PAGES_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
