@@ -40,6 +40,7 @@ use bevy::color::LinearRgba;
 use bevy::prelude::*;
 use bevy::text::FontSize;
 
+use crate::audio::AudioBaseGain;
 use crate::car::Car;
 use crate::game::SpawnSet;
 use crate::game::events::CoinCollected;
@@ -515,10 +516,13 @@ fn collect_pickup(
             // children; safe, risk E2).
             commands.entity(e).despawn();
             // Pickup chime (reuses coin.wav; DESPAWN reclaims the audio entity
-            // once the clip finishes).
+            // once the clip finishes). Carries its authored gain as
+            // `AudioBaseGain` so the live master bridge scales it without
+            // compounding (mirrors `audio.rs` one-shots).
             commands.spawn((
                 AudioPlayer::new(audio.sfx.clone()),
                 PlaybackSettings::DESPAWN.with_volume(Volume::Linear(0.8)),
+                AudioBaseGain(0.8),
             ));
         }
     }

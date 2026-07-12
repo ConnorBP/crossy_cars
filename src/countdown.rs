@@ -13,6 +13,7 @@ use bevy::{
     text::FontSize,
 };
 
+use crate::audio::AudioBaseGain;
 use crate::car::InputFrozen;
 use crate::game::SpawnSet;
 use crate::game::resources::RoundActive;
@@ -368,6 +369,7 @@ fn tick_countdown(
             PlaybackSettings::DESPAWN
                 .with_speed(cue.speed())
                 .with_volume(Volume::Linear(BEEP_VOLUME)),
+            AudioBaseGain(BEEP_VOLUME),
         ));
 
         countdown.last_cue = Some(cue);

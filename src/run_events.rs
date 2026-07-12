@@ -9,6 +9,7 @@ use bevy::audio::{AudioPlayer, AudioSource, PlaybackSettings, Volume};
 use bevy::prelude::*;
 use bevy::text::FontSize;
 
+use crate::audio::AudioBaseGain;
 use crate::difficulty::Difficulty;
 use crate::game::SpawnSet;
 use crate::game::resources::RoundActive;
@@ -341,6 +342,7 @@ fn play_event_sting(
             PlaybackSettings::DESPAWN
                 .with_speed(1.15)
                 .with_volume(Volume::Linear(EVENT_STING_VOLUME)),
+            AudioBaseGain(EVENT_STING_VOLUME),
         ));
     }
 }

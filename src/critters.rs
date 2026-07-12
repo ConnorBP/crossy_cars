@@ -23,7 +23,6 @@
 //!   fresh-round latch, so pause/resume skips spawning regardless of reset order.
 //! - Critter entities have **no** `Collider` component.
 
-use bevy::audio::{AudioPlayer, AudioSource, PlaybackSettings, Volume};
 use bevy::prelude::*;
 use std::f32::consts::TAU;
 
@@ -183,17 +182,15 @@ impl Default for CritterSpawnPending {
 }
 
 // ---------------------------------------------------------------------------
-// Asset resource (FromWorld — meshes + materials + audio built via scope)
+// Asset resource (FromWorld — meshes + materials built via scope)
 // ---------------------------------------------------------------------------
 
-/// Pre-built mesh + material handles for the three critter models, the hit
-/// particle burst, and the bad-thud SFX. Built once via `FromWorld` so the
-/// handles exist before any `OnEnter(Playing)` / `Update` system spawns a
-/// critter or plays the hit sound.
+/// Pre-built mesh + material handles for the three critter models and the
+/// hit particle burst. Built once via `FromWorld` so the handles exist
+/// before any `OnEnter(Playing)` / `Update` system spawns a critter. The
+/// penalty-hit thud SFX is owned and played by the audio core, not here.
 #[derive(Resource)]
 pub struct CritterAssets {
-    // --- Audio (bad-thud on penalty hit) ---
-    thud: Handle<AudioSource>,
     // --- Pedestrian parts ---
     ped_body_mesh: Handle<Mesh>,
     ped_head_mesh: Handle<Mesh>,
@@ -231,10 +228,6 @@ pub struct CritterAssets {
 
 impl FromWorld for CritterAssets {
     fn from_world(world: &mut World) -> Self {
-        // Load the hit SFX eagerly so the handle exists before `hit_critters`
-        // tries to play it.
-        let thud = world.resource::<AssetServer>().load("audio/hit.wav");
-
         // Build meshes + materials together inside a `resource_scope` so we
         // never hold `&mut Assets<Mesh>` and `&mut Assets<StandardMaterial>`
         // without scoping (mirrors `chickens.rs::ChickenAssets`).
@@ -354,7 +347,6 @@ impl FromWorld for CritterAssets {
             });
 
             CritterAssets {
-                thud,
                 ped_body_mesh,
                 ped_head_mesh,
                 cow_body_mesh,
@@ -838,9 +830,11 @@ fn wander_critters(
 /// On car-to-critter contact (XZ distance < `HIT_RADIUS`): despawn the
 /// critter, apply a cooldown-gated **PENALTY** (25 base health scaled by the
 /// active modifier, score -2),
-/// write a `CritterHit` message, spawn a **red** particle burst, play a
-/// bad-thud SFX, and respawn ahead. Visual/message handling is retained for
-/// every clustered contact; lethal admitted damage ends the round as Wrecked.
+/// write a `CritterHit` message, spawn a **red** particle burst, and respawn
+/// ahead. The penalty-hit thud SFX is owned and played by the audio core in
+/// reaction to the `CritterHit` message. Visual/message handling is retained
+/// for every clustered contact; lethal admitted damage ends the round as
+/// Wrecked.
 fn hit_critters(
     mut commands: Commands,
     assets: Res<CritterAssets>,
@@ -895,12 +889,6 @@ fn hit_critters(
 
             // --- Red particle burst ---
             spawn_particle_burst(&mut commands, &assets, critter_t.translation, &mut seed);
-
-            // --- Bad-thud SFX: hit.wav at low volume, auto-despawn sink ---
-            commands.spawn((
-                AudioPlayer::new(assets.thud.clone()),
-                PlaybackSettings::DESPAWN.with_volume(Volume::Linear(0.5)),
-            ));
 
             // --- Respawn a critter ahead so there's always something to avoid ---
             let new_pos = respawn_ahead_pos(car_pos, car_forward, &mut seed);

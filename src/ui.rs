@@ -10,6 +10,7 @@ use crate::palette;
 use crate::persist::{
     BestAtRoundStart, ConditionBests, ConditionBestsAtRoundStart, Medal, medal_for,
 };
+use crate::settings::Settings;
 use crate::touch::TouchControlsActive;
 
 const ALL_CONDITIONS: [ModifierKind; 5] = [
@@ -33,9 +34,22 @@ struct TimerStyle {
     alpha: f32,
 }
 
-/// Pure countdown styling: the last ten seconds pulse red, with the final
-/// five pulsing twice as fast. No entities or effects are spawned.
-fn timer_style(remaining: f32, elapsed: f32) -> TimerStyle {
+/// Presentation policy derived from the live accessibility preference.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TimerMotionFlags {
+    alpha_pulse: bool,
+}
+
+fn timer_motion_flags(reduced_motion: bool) -> TimerMotionFlags {
+    TimerMotionFlags {
+        alpha_pulse: !reduced_motion,
+    }
+}
+
+/// Pure timer styling: the last ten seconds pulse red, with the final five
+/// pulsing twice as fast. Under reduced motion the alpha stays static while
+/// urgency and color still escalate. No entities or effects are spawned.
+fn timer_style(remaining: f32, elapsed: f32, flags: TimerMotionFlags) -> TimerStyle {
     let (urgency, pulse_hz) = if remaining > 10.0 {
         (TimerUrgency::Normal, 0.0)
     } else if remaining > 5.0 {
@@ -45,9 +59,13 @@ fn timer_style(remaining: f32, elapsed: f32) -> TimerStyle {
     };
     let alpha = if urgency == TimerUrgency::Normal {
         1.0
-    } else {
+    } else if flags.alpha_pulse {
         let wave = (elapsed * pulse_hz * std::f32::consts::TAU).sin();
         0.725 + 0.275 * wave
+    } else {
+        // Reduced motion: hold the alpha steady. Urgency/color still convey
+        // the escalation without the pulsing animation.
+        1.0
     };
     TimerStyle { urgency, alpha }
 }
@@ -525,12 +543,16 @@ fn spawn_hint(mut commands: Commands, touch_active: Res<TouchControlsActive>) {
     if touch_active.0 {
         return;
     }
-    // Lower-center transient hint, auto-dismissed after ~3.5s by `update_hint`.
+    // Top-center transient hint, auto-dismissed after ~3.5s by `update_hint`.
+    // Sits above the countdown content and between the top-left cockpit panel
+    // and top-right timer at both 844x390 and 1440x900, clear of the bottom
+    // health/power-up/touch zones. The 16px size keeps the pill inside the
+    // narrow top-center band on short landscape viewports.
     commands
         .spawn((
             Node {
                 position_type: PositionType::Absolute,
-                bottom: px(28.0),
+                top: px(12.0),
                 left: px(0.0),
                 width: Val::Percent(100.0),
                 align_items: AlignItems::Center,
@@ -552,7 +574,7 @@ fn spawn_hint(mut commands: Commands, touch_active: Res<TouchControlsActive>) {
             .with_child((
                 Text::new("WASD to drive  •  Space to brake  •  Esc to pause"),
                 TextFont {
-                    font_size: FontSize::Px(20.0),
+                    font_size: FontSize::Px(16.0),
                     ..default()
                 },
                 TextColor(Color::srgba(0.92, 0.92, 0.96, 1.0).into()),
@@ -863,12 +885,17 @@ fn update_coins_text(score: Res<Score>, mut query: Query<&mut TextSpan, With<Coi
 fn update_timer_text(
     timeleft: Res<TimeLeft>,
     time: Res<Time>,
+    settings: Res<Settings>,
     mut query: Query<(&mut TextSpan, &mut TextColor), With<TimerText>>,
 ) {
     let t = timeleft.0.max(0.0);
     let mins = (t / 60.0).floor() as u32;
     let secs = (t % 60.0).floor() as u32;
-    let style = timer_style(t, time.elapsed_secs());
+    let style = timer_style(
+        t,
+        time.elapsed_secs(),
+        timer_motion_flags(settings.reduced_motion),
+    );
     let color = match style.urgency {
         TimerUrgency::Normal => palette::HUD_ACCENT.into(),
         TimerUrgency::Urgent | TimerUrgency::Critical => Color::srgba(1.0, 0.08, 0.08, style.alpha),
@@ -892,16 +919,17 @@ fn update_hint(mut commands: Commands, time: Res<Time>, mut q: Query<(Entity, &m
 mod tests {
     use super::{
         TimerUrgency, condition_summary, is_medal_upgrade, is_new_best, medal_points,
-        terminal_condition_result, timer_style,
+        terminal_condition_result, timer_motion_flags, timer_style,
     };
     use crate::modifiers::ModifierKind;
     use crate::persist::Medal;
 
     #[test]
     fn timer_urgency_has_inclusive_thresholds_and_faster_final_pulse() {
-        let normal = timer_style(10.01, 0.0);
-        let urgent = timer_style(10.0, 0.0625);
-        let critical = timer_style(5.0, 0.0625);
+        let flags = timer_motion_flags(false);
+        let normal = timer_style(10.01, 0.0, flags);
+        let urgent = timer_style(10.0, 0.0625, flags);
+        let critical = timer_style(5.0, 0.0625, flags);
 
         assert_eq!(normal.urgency, TimerUrgency::Normal);
         assert_eq!(normal.alpha, 1.0);
@@ -910,6 +938,33 @@ mod tests {
         // At the same early instant the 4 Hz critical wave is further
         // through its cycle than the 2 Hz urgent wave.
         assert!(critical.alpha > urgent.alpha);
+    }
+
+    #[test]
+    fn timer_reduced_motion_keeps_alpha_static_while_urgency_remains() {
+        let flags = timer_motion_flags(true);
+        assert!(!flags.alpha_pulse);
+
+        // Urgency and color escalation are preserved...
+        let normal = timer_style(10.01, 0.0, flags);
+        let urgent = timer_style(10.0, 0.0625, flags);
+        let critical = timer_style(5.0, 0.0625, flags);
+        assert_eq!(normal.urgency, TimerUrgency::Normal);
+        assert_eq!(urgent.urgency, TimerUrgency::Urgent);
+        assert_eq!(critical.urgency, TimerUrgency::Critical);
+
+        // ...but the alpha no longer pulses: it holds steady at full opacity
+        // for every non-normal urgency, regardless of elapsed time.
+        assert_eq!(normal.alpha, 1.0);
+        assert_eq!(urgent.alpha, 1.0);
+        assert_eq!(critical.alpha, 1.0);
+        assert_eq!(timer_style(10.0, 1.3, flags).alpha, urgent.alpha);
+        assert_eq!(timer_style(5.0, 1.3, flags).alpha, critical.alpha);
+
+        // Under normal motion the same elapsed time pulses away from the
+        // static value, confirming the gating actually changes alpha.
+        let moving = timer_motion_flags(false);
+        assert_ne!(timer_style(10.0, 1.3, moving).alpha, urgent.alpha);
     }
 
     #[test]

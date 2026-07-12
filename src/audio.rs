@@ -5,9 +5,11 @@ use bevy::audio::{
 use bevy::prelude::*;
 
 use crate::car::Car;
+use crate::critters::CritterHit;
 use crate::game::events::{ChickenHit, CoinCollected};
 use crate::game::resources::GameConfig;
 use crate::game::state::GameState;
+use crate::objectives::ObjectiveCompleted;
 use crate::settings::Settings;
 
 /// Handles for every sound effect plus the looping engine + ambient sources.
@@ -20,6 +22,8 @@ struct AudioHandles {
     click: Handle<AudioSource>,
     engine: Handle<AudioSource>,
     ambient: Handle<AudioSource>,
+    positive: Handle<AudioSource>,
+    penalty: Handle<AudioSource>,
 }
 
 /// Marker + smoothed state for the single looping engine audio entity, so we
@@ -40,8 +44,11 @@ struct EngineSound {
 struct AmbientSound;
 
 /// Unscaled local gain retained so live master changes do not compound.
+/// Constructible crate-wide so any audio-emitting module can attach it to a
+/// spawned one-shot and have the live master bridge scale it without
+/// compounding.
 #[derive(Component, Clone, Copy)]
-struct AudioBaseGain(f32);
+pub(crate) struct AudioBaseGain(pub(crate) f32);
 
 pub struct AudioPlugin;
 
@@ -53,6 +60,8 @@ impl Plugin for AudioPlugin {
                 (
                     play_hit,
                     play_coin,
+                    play_positive,
+                    play_penalty,
                     // Settings is the single source of truth. M writes it and
                     // this bridge applies it before dynamic engine updates.
                     (toggle_mute, apply_audio_settings, sync_new_audio_sinks)
@@ -152,24 +161,56 @@ impl FromWorld for AudioHandles {
             click: asset_server.load("audio/click.wav"),
             engine: asset_server.load("audio/engine.wav"),
             ambient: asset_server.load("audio/ambient.wav"),
+            positive: asset_server.load("audio/positive.wav"),
+            penalty: asset_server.load("audio/penalty.wav"),
         }
+    }
+}
+
+// --- One-shot cue gain + pitch constants --------------------------------
+//
+// Authored linear gains for the gameplay SFX one-shots. Each is routed
+// through `bounded_cue_gain` so a mistuned constant can never blow past unity
+// or emit non-finite volume, and each spawned entity carries the same value
+// as its `AudioBaseGain` so the live master bridge scales it without
+// compounding. The chicken strike is pitched slightly upward (`with_speed`
+// > 1) to read as a positive, rewarding hit — the same pitch API the engine
+// loop uses via `AudioSink::set_speed`.
+const CHICKEN_HIT_VOLUME: f32 = 0.6;
+const CHICKEN_HIT_PITCH: f32 = 1.1;
+const POSITIVE_CUE_VOLUME: f32 = 0.55;
+const PENALTY_CUE_VOLUME: f32 = 0.5;
+
+/// Clamp an authored cue gain to the safe linear range [0, 1] and replace
+/// non-finite values with silence. Bounds every one-shot cue so the master
+/// bus is protected even if a constant is mistuned.
+fn bounded_cue_gain(raw: f32) -> f32 {
+    if raw.is_finite() {
+        raw.clamp(0.0, 1.0)
+    } else {
+        0.0
     }
 }
 
 /// One-shot hit SFX for every chicken strike. `PlaybackSettings::DESPAWN`
 /// reclaims the spawned audio entity automatically once the clip finishes.
 /// Kept below unity so repeated strikes aren't jarring next to the coin/click
-/// SFX and the thud (health.rs, 0.5).
+/// SFX and the thud (health.rs, 0.5). Pitched slightly upward (`with_speed`
+/// > 1) so the strike reads as a positive, rewarding hit — the same pitch API
+/// the engine loop uses via `AudioSink::set_speed`.
 fn play_hit(
     mut events: MessageReader<ChickenHit>,
     mut commands: Commands,
     handles: Res<AudioHandles>,
 ) {
     for _ in events.read() {
+        let gain = bounded_cue_gain(CHICKEN_HIT_VOLUME);
         commands.spawn((
             AudioPlayer::new(handles.hit.clone()),
-            PlaybackSettings::DESPAWN.with_volume(Volume::Linear(0.6)),
-            AudioBaseGain(0.6),
+            PlaybackSettings::DESPAWN
+                .with_volume(Volume::Linear(gain))
+                .with_speed(CHICKEN_HIT_PITCH),
+            AudioBaseGain(gain),
         ));
     }
 }
@@ -187,6 +228,48 @@ fn play_coin(
             AudioPlayer::new(handles.coin.clone()),
             PlaybackSettings::DESPAWN.with_volume(Volume::Linear(0.5)),
             AudioBaseGain(0.5),
+        ));
+    }
+}
+
+/// One-shot positive cue for every `ObjectiveCompleted` event — a brief
+/// rewarding sting when the round's bonus objective is fulfilled. Like the
+/// other gameplay SFX this is a bounded `DESPAWN` one-shot carrying its
+/// authored `AudioBaseGain` so the live master bridge scales it without
+/// compounding. Sits just above the coin pickup so completion feels earned.
+/// This `MessageReader` is independent; consuming the message here does not
+/// affect the objectives system's own completion reader.
+fn play_positive(
+    mut events: MessageReader<ObjectiveCompleted>,
+    mut commands: Commands,
+    handles: Res<AudioHandles>,
+) {
+    for _ in events.read() {
+        let gain = bounded_cue_gain(POSITIVE_CUE_VOLUME);
+        commands.spawn((
+            AudioPlayer::new(handles.positive.clone()),
+            PlaybackSettings::DESPAWN.with_volume(Volume::Linear(gain)),
+            AudioBaseGain(gain),
+        ));
+    }
+}
+
+/// One-shot penalty cue for every `CritterHit` event — a negative sting
+/// layered over the physical impact thud (critters.rs). Bounded `DESPAWN`
+/// one-shot with `AudioBaseGain` so master volume changes apply cleanly.
+/// This `MessageReader` is independent; consuming the message here does not
+/// affect any other `CritterHit` reader.
+fn play_penalty(
+    mut events: MessageReader<CritterHit>,
+    mut commands: Commands,
+    handles: Res<AudioHandles>,
+) {
+    for _ in events.read() {
+        let gain = bounded_cue_gain(PENALTY_CUE_VOLUME);
+        commands.spawn((
+            AudioPlayer::new(handles.penalty.clone()),
+            PlaybackSettings::DESPAWN.with_volume(Volume::Linear(gain)),
+            AudioBaseGain(gain),
         ));
     }
 }
@@ -306,5 +389,25 @@ fn update_engine(
         // volume is rewritten each frame. Include master here so the dynamic
         // engine loop continues to respect the configured master gain.
         sink.set_volume(Volume::Linear(eng.smooth_vol * settings.master_gain()));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bounded_cue_gain_clamps_to_unit_and_silences_nonfinite() {
+        assert_eq!(bounded_cue_gain(0.0), 0.0);
+        assert_eq!(bounded_cue_gain(0.55), 0.55);
+        assert_eq!(bounded_cue_gain(1.0), 1.0);
+        // Out-of-range authored gains are clamped to the safe bus range.
+        assert_eq!(bounded_cue_gain(1.5), 1.0);
+        assert_eq!(bounded_cue_gain(-0.3), 0.0);
+        // Non-finite constants collapse to silence rather than poisoning the
+        // master bus.
+        assert_eq!(bounded_cue_gain(f32::NAN), 0.0);
+        assert_eq!(bounded_cue_gain(f32::INFINITY), 0.0);
+        assert_eq!(bounded_cue_gain(f32::NEG_INFINITY), 0.0);
     }
 }

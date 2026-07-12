@@ -15,6 +15,7 @@ use bevy::audio::{AudioPlayer, AudioSource, PlaybackSettings, Volume};
 use bevy::prelude::*;
 use bevy::text::FontSize;
 
+use crate::audio::AudioBaseGain;
 use crate::car::Car;
 use crate::game::SpawnSet;
 use crate::game::events::ObstacleHit;
@@ -59,8 +60,10 @@ impl Default for Health {
 /// before any `Update` system fires them.
 #[derive(Resource)]
 struct DamageAudioHandles {
-    /// Reused `hit.wav` played at reduced volume on every damaging hit.
-    thud: Handle<AudioSource>,
+    /// `penalty.wav` played at reduced volume on every damaging (non-terminal)
+    /// hit. Shares the same sample as `audio.rs::play_penalty` so obstacle
+    /// scrapes layer consistently with critter strikes.
+    penalty: Handle<AudioSource>,
     /// Distinct `crash.wav` played once when the car is wrecked.
     crash: Handle<AudioSource>,
 }
@@ -69,7 +72,7 @@ impl FromWorld for DamageAudioHandles {
     fn from_world(world: &mut World) -> Self {
         let asset_server = world.resource::<AssetServer>();
         DamageAudioHandles {
-            thud: asset_server.load("audio/hit.wav"),
+            penalty: asset_server.load("audio/penalty.wav"),
             crash: asset_server.load("audio/crash.wav"),
         }
     }
@@ -180,9 +183,13 @@ fn apply_damage(
             if let Ok(mut c) = car.single_mut() {
                 c.speed = 0.0;
             }
+            // Authored crash gain (0.9). Carrying the matching `AudioBaseGain`
+            // lets the live master bridge in `audio.rs` rescale this DESPAWN
+            // one-shot without compounding, just like the other gameplay SFX.
             commands.spawn((
                 AudioPlayer::new(audio.crash.clone()),
                 PlaybackSettings::DESPAWN.with_volume(Volume::Linear(0.9)),
+                AudioBaseGain(0.9),
             ));
             *reason = crate::game::resources::GameOverReason::Wrecked;
             next.set(GameState::GameOver);
@@ -192,11 +199,15 @@ fn apply_damage(
     }
 
     if damaged_this_frame {
-        // Thud: reuse hit.wav at a lower volume so repeated scrapes aren't
-        // louder than the chicken/coin SFX.
+        // Penalty thud: `penalty.wav` at a lower volume (0.5) so repeated
+        // scrapes aren't louder than the chicken/coin SFX. Carrying the
+        // matching `AudioBaseGain` lets the live master bridge in `audio.rs`
+        // rescale this DESPAWN one-shot without compounding, just like the
+        // other gameplay SFX.
         commands.spawn((
-            AudioPlayer::new(audio.thud.clone()),
+            AudioPlayer::new(audio.penalty.clone()),
             PlaybackSettings::DESPAWN.with_volume(Volume::Linear(0.5)),
+            AudioBaseGain(0.5),
         ));
         if should_spawn_damage_flash(settings.reduced_motion) {
             spawn_damage_flash(&mut commands);
