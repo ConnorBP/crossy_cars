@@ -176,8 +176,9 @@ fn setup_environment_light(
         diffuse_map: cubemap.clone(),
         specular_map: cubemap,
         // Bright so reflections are obvious (GlobalAmbientLight was lowered to
-        // 40 in Wave 3; the IBL carries the metallic look).
-        intensity: 6.0,
+        // 40 in Wave 3; the IBL carries the metallic look). High intensity so
+        // the near-full-metal car body clearly reflects the sun disc + sky.
+        intensity: 10.0,
         ..default()
     };
     commands.entity(cam).insert(env);

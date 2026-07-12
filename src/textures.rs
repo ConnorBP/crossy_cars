@@ -127,14 +127,14 @@ impl FromWorld for TextureAssets {
             base_color: Color::WHITE,
             base_color_texture: Some(images.add(car_paint_texture())),
             normal_map_texture: Some(car_normal),
-            // Car-paint metallic: 0.85 (mostly metal) + very low roughness
-            // (0.12) so the procedural sun-disc env map + directional sun
-            // produce a sharp bright reflection/glint — the metallic cue.
-            // The sun-disc cubemap (shaders.rs) gives metal something bright
-            // to reflect; without a detailed env map a high-metallic surface
-            // just looks dark/flat.
-            metallic: 0.85,
-            perceptual_roughness: 0.12,
+            // Car-paint metallic: near-full metal (0.9) + mirror-low roughness
+            // (0.05) + the procedural sun-disc HDR env map (shaders.rs, IBL
+            // intensity 10) -> the car is essentially a red-tinted mirror that
+            // reflects a sharp bright sun streak + sky/ground. This is the
+            // most unmistakably-metallic setup; if it still reads flat, the env
+            // map isn't reflecting and the cubemap/application needs debugging.
+            metallic: 0.9,
+            perceptual_roughness: 0.05,
             uv_transform: Affine2::from_scale(Vec2::splat(1.0)),
             ..default()
         });

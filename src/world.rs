@@ -206,139 +206,81 @@ const ALL_TILES: [TileKind; 17] = [
     TileKind::StubN,
 ];
 
-/// Weighting for the weighted-random tile choice. Through-roads and
-/// intersections get high weights so the road network stays connected and
-/// drivable; corners (dead-end-ish turns) get medium weight; Empty/Park get
-/// weight 1 and are only realistically chosen when all four edges are free
-/// or fixed to None (so a road never gets silently dropped where a neighbour
-/// expected one).
-fn tile_weight(kind: TileKind) -> u32 {
-    match kind {
-        TileKind::Cross => 10,
-        TileKind::RoadNS | TileKind::RoadEW => 8,
-        TileKind::TN | TileKind::TE | TileKind::TS | TileKind::TW => 5,
-        TileKind::CornerWN | TileKind::CornerNE | TileKind::CornerES | TileKind::CornerSW => 3,
-        // Stubs are dead-end spurs — low weight so they only appear when a
-        // neighbour forces a single Road edge and the free edges roll None.
-        TileKind::StubW | TileKind::StubE | TileKind::StubS | TileKind::StubN => 2,
-        TileKind::Empty | TileKind::Park => 1,
-    }
+// ---------------------------------------------------------------------------
+// Deterministic road-line generation (retire-and-regenerate model)
+// ---------------------------------------------------------------------------
+//
+// Roads are full-length LINES, not per-block tiles. A vertical road line at
+// `x = ex * block` is either a road or not (deterministic hash of `ex`), for
+// its entire length; same for horizontal lines at `z = ez * block`. Each block
+// derives its 4 edge sockets from the two lines it sits between:
+//   W = vertical_line_road(gx),  E = vertical_line_road(gx+1)
+//   S = horizontal_line_road(gz), N = horizontal_line_road(gz+1)
+// Because a shared edge is computed from the SAME line index by both adjacent
+// blocks, they always agree — no neighbour querying, no edge-matching, no
+// mismatch bugs. Roads always connect (full-length lines cross at
+// intersections), so no dead-ends into fields. Recycling just retires
+// out-of-range blocks and regenerates new ones from their (gx,gz) seed.
+
+/// Fraction of lines that are roads. ~0.7 keeps the grid dense + connected
+/// (full-length lines always cross) while leaving ~30% out for variety
+/// (bigger blocks, parks). Line 0 is forced to be a road so the car spawn
+/// at the origin sits on a road intersection.
+const LINE_ROAD_DENSITY: f32 = 0.7;
+
+/// Tiny hash -> 0..1 for deterministic line-road decisions.
+fn line_hash(idx: i32) -> f32 {
+    let mut s = (idx as u32).wrapping_mul(2654435761).wrapping_add(0x9E3779B9) ^ 0xA5A5A5A5;
+    s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+    (s >> 8) as f32 / ((1u32 << 24) as f32)
 }
 
-/// Pick a `TileKind` whose sockets match every `Some` entry in `fixed`
-/// (`fixed = [W, E, S, N]`; `None` = free edge, `Some(e)` = fixed by an
-/// already-placed neighbour's matching edge). Among matching tiles, choose
-/// one by weighted random (bias toward through-roads/intersections) using
-/// the provided LCG seed so the choice is deterministic per `(gx, gz, seed)`.
-///
-/// The tile set is COMPLETE: for any fixed-edge combination there is always
-/// at least one matching tile (the `Cross` tile matches any all-`Road`
-/// constraints; `Empty`/`Park` match any all-`None` constraints; and every
-/// partial constraint is satisfied by at least one of the
-/// Road/Corner/T/Cross tiles). So this never returns `None`.
-fn pick_tile(fixed: [Option<Edge>; 4], seed: &mut u32) -> TileKind {
-    // Collect all tiles whose sockets match every fixed entry.
-    let candidates: Vec<TileKind> = ALL_TILES
+/// Whether the vertical road line at `x = ex * block` is a road. Line 0 is
+/// always a road (spawn intersection guarantee).
+fn vertical_line_road(ex: i32) -> bool {
+    ex == 0 || line_hash(ex) < LINE_ROAD_DENSITY
+}
+
+/// Whether the horizontal road line at `z = ez * block` is a road. Line 0 is
+/// always a road (spawn intersection guarantee).
+fn horizontal_line_road(ez: i32) -> bool {
+    ez == 0 || line_hash(ez.wrapping_mul(31)) < LINE_ROAD_DENSITY
+}
+
+/// Derive a block's 4 edge sockets (W, E, S, N) from the road lines it sits
+/// between, then return the unique `TileKind` matching those edges. The tile
+/// set covers all 16 edge combinations, so this always finds exactly one
+/// (all-None maps to Empty or Park — pick Park ~half the time for variety via
+/// a deterministic hash of (gx,gz)).
+fn tile_from_edges(gx: i32, gz: i32) -> TileKind {
+    let w = vertical_line_road(gx);
+    let e = vertical_line_road(gx + 1);
+    let s = horizontal_line_road(gz);
+    let n = horizontal_line_road(gz + 1);
+    // all-None block -> Park vs Empty for variety.
+    if !w && !e && !s && !n {
+        // Deterministic ~50/50 park vs empty-block-of-buildings.
+        return if line_hash(gx.wrapping_add(gz.wrapping_mul(7))) < 0.5 {
+            TileKind::Park
+        } else {
+            TileKind::Empty
+        };
+    }
+    // Find the tile whose sockets match (W,E,S,N) exactly. There is exactly
+    // one for every non-all-None combo (the set is complete + each non-empty
+    // combo has a unique tile).
+    ALL_TILES
         .iter()
         .copied()
-        .filter(|&k| {
-            let s = sockets(k);
-            (fixed[W].is_none() || fixed[W] == Some(s[W]))
-                && (fixed[E].is_none() || fixed[E] == Some(s[E]))
-                && (fixed[S].is_none() || fixed[S] == Some(s[S]))
-                && (fixed[N].is_none() || fixed[N] == Some(s[N]))
+        .find(|&k| {
+            let st = sockets(k);
+            let rw = matches!(st[W], Edge::Road);
+            let re = matches!(st[E], Edge::Road);
+            let rs = matches!(st[S], Edge::Road);
+            let rn = matches!(st[N], Edge::Road);
+            rw == w && re == e && rs == s && rn == n
         })
-        .collect();
-    // Completeness guard: the tile set is complete (including the four
-    // single-edge Stub tiles) so this is never empty. If a bug ever makes
-    // it empty, fall back to Cross (all-Road) which matches any all-Road
-    // constraint and otherwise at least keeps roads connected.
-    if candidates.is_empty() {
-        return TileKind::Cross;
-    }
-
-    let n_free = fixed.iter().filter(|e| e.is_none()).count();
-    let n_fixed_road = fixed.iter().filter(|e| matches!(e, Some(Edge::Road))).count();
-    let n_fixed_none = fixed.iter().filter(|e| matches!(e, Some(Edge::None))).count();
-    debug_assert_eq!(n_free + n_fixed_road + n_fixed_none, 4);
-
-    // Case 1: ALL four edges free (no neighbour constraints — e.g. a fresh
-    // interior block on the very first spawn, or a recycled block with no
-    // inward neighbours yet). Bias strongly toward roads so the network
-    // stays connected; a small chance of Park for visual variety. Empty is
-    // excluded (an all-None block would be a dead, roadless patch).
-    if n_free == 4 {
-        let r = rand(seed);
-        if r < 0.10 {
-            return TileKind::Park;
-        }
-        let road_candidates: Vec<TileKind> = candidates
-            .iter()
-            .copied()
-            .filter(|&k| k != TileKind::Empty && k != TileKind::Park)
-            .collect();
-        return weighted_pick(&road_candidates, seed);
-    }
-
-    // Case 2: ALL four edges fixed to None (every neighbour says "no road on
-    // our shared edge" and there are no free edges to extend a road into).
-    // The block is enclosed by non-road neighbours -> Park vs Empty (both
-    // all-None match). Bias toward Park for visual variety.
-    if n_fixed_none == 4 {
-        let r = rand(seed);
-        if r < 0.6 {
-            return TileKind::Park;
-        }
-        return TileKind::Empty;
-    }
-
-    // Case 3: at least one fixed-Road edge, or a mix of fixed-None and free
-    // edges. If a road enters this block (a fixed-Road edge), REQUIRE the tile
-    // to have >=2 Road edges so the road always continues or turns (never
-    // dead-ends into an open field) — this excludes Stub tiles (single Road
-    // edge = spur) when a road is present. Empty/Park are already ruled out by
-    // a fixed-Road edge. If the >=2 filter empties (only when all non-fixed
-    // edges are fixed-None, i.e. a road genuinely can't continue), fall back
-    // to all matching candidates.
-    let _ = (n_fixed_road, n_fixed_none);
-    let pool: Vec<TileKind> = if n_fixed_road >= 1 {
-        let continuing: Vec<TileKind> = candidates
-            .iter()
-            .copied()
-            .filter(|&k| road_count(k) >= 2)
-            .collect();
-        if continuing.is_empty() {
-            candidates
-        } else {
-            continuing
-        }
-    } else {
-        candidates
-    };
-    weighted_pick(&pool, seed)
-}
-
-/// Number of `Road` edges on a tile.
-fn road_count(kind: TileKind) -> usize {
-    sockets(kind).iter().filter(|e| matches!(e, Edge::Road)).count()
-}
-
-/// Weighted random pick from `candidates` using `tile_weight` and the LCG
-/// `seed`. Returns the first candidate if the total weight is somehow zero.
-fn weighted_pick(candidates: &[TileKind], seed: &mut u32) -> TileKind {
-    let total: u32 = candidates.iter().map(|&k| tile_weight(k)).sum();
-    if total == 0 || candidates.is_empty() {
-        return candidates[0];
-    }
-    let mut r = rand(seed) * (total as f32);
-    for &k in candidates {
-        let w = tile_weight(k) as f32;
-        if r < w {
-            return k;
-        }
-        r -= w;
-    }
-    candidates[candidates.len() - 1]
+        .unwrap_or(TileKind::Cross)
 }
 
 // ---------------------------------------------------------------------------
@@ -435,14 +377,12 @@ fn spawn_initial_grid(
 /// Spawn the count×count grid of blocks centered on the origin: gx,gz in
 /// `-count/2 .. count/2 - 1`. Each block root at `((gx+0.5)*block, 0,
 /// (gz+0.5)*block)` with `Block { gx, gz, kind }`, then `populate_block`.
-/// Used by both `spawn_initial_grid` (Startup) and `reset_grid` (round
-/// start).
+/// Used by both `spawn_initial_grid` (Startup) and `reset_grid` (round start).
 ///
-/// Blocks are spawned in ascending (gx, gz) order so that the W (gx-1, gz)
-/// and S (gx, gz-1) neighbours are already placed when a block is spawned;
-/// their E / N sockets fix this block's W / S edges (E and N stay free).
-/// This is the Wang-tile edge-continuity guarantee for the initial grid
-/// (T19).
+/// Each block's tile is derived deterministically from its (gx,gz) via the
+/// road-line functions (see `tile_from_edges`) — no neighbour querying or
+/// ordering needed, because shared edges are computed from the same line
+/// index by both adjacent blocks. Order-independent + mismatch-proof.
 fn spawn_grid_window(
     commands: &mut Commands,
     cfg: &GridConfig,
@@ -454,26 +394,9 @@ fn spawn_grid_window(
     let count = cfg.count;
     let lo = -count / 2;
     let hi = count / 2 - 1; // inclusive
-    // Track the chosen kind of each placed block so later blocks can read
-    // their W/S neighbours' E/N sockets. Keyed by (gx, gz).
-    let mut placed: std::collections::HashMap<(i32, i32), TileKind> =
-        std::collections::HashMap::new();
     for gx in lo..=hi {
         for gz in lo..=hi {
-            // W neighbour (gx-1, gz): its E socket fixes our W edge.
-            // S neighbour (gx, gz-1): its N socket fixes our S edge.
-            let fixed_w = placed
-                .get(&(gx - 1, gz))
-                .map(|k| sockets(*k)[E]);
-            let fixed_s = placed
-                .get(&(gx, gz - 1))
-                .map(|k| sockets(*k)[N]);
-            let fixed = [fixed_w, None, fixed_s, None];
-            // Deterministic per-block seed; the tile choice is folded into
-            // the same seed so a given (gx,gz,seed) always picks the same
-            // tile when free edges are randomized.
-            let mut s = seed_for(gx, gz);
-            let kind = pick_tile(fixed, &mut s);
+            let kind = tile_from_edges(gx, gz);
             let root = commands
                 .spawn((
                     Transform::from_xyz((gx as f32 + 0.5) * block, 0.0, (gz as f32 + 0.5) * block),
@@ -492,7 +415,6 @@ fn spawn_grid_window(
                 seed_for(gx, gz),
                 kind,
             );
-            placed.insert((gx, gz), kind);
         }
     }
 }
@@ -1532,262 +1454,117 @@ fn recycle_grid(
     };
     let block = cfg.block;
     // Don't recycle a block until it's fully off-screen beyond the grid edge.
-    // The ortho viewport is ~12u; add look-ahead + padding so blocks never
-    // vanish while still visible.
     const VIEW_MARGIN: f32 = 16.0;
     let car_x = car_t.translation.x;
     let car_z = car_t.translation.z;
 
-    // Snapshot the blocks so we can compute the despawn set + new (gx,gz)
-    // BEFORE despawning (don't mutate the query mid-iteration). Includes the
-    // tile kind so recycled blocks can read inward neighbours' sockets.
-    let block_list: Vec<(Entity, i32, i32, TileKind, f32, f32)> = blocks
-        .iter()
-        .map(|(e, b, tf)| (e, b.gx, b.gz, b.kind, tf.translation.x, tf.translation.z))
-        .collect();
+    // Snapshot (entity, gx, gz) so we can compute despawn sets + new positions
+    // before mutating. We do NOT need neighbour tiles anymore — each block's
+    // tile is derived deterministically from its (gx,gz) via `tile_from_edges`
+    // (road-line model), so shared edges always agree. Recycling just retires
+    // the out-of-range column/row and regenerates new blocks at the opposite
+    // edge from their (gx,gz) seed.
+    let block_list: Vec<(Entity, i32, i32)> =
+        blocks.iter().map(|(e, b, _)| (e, b.gx, b.gz)).collect();
 
-    // Helper: look up a neighbour's tile kind by (gx, gz) in the snapshot.
-    let kind_at = |gx: i32, gz: i32| -> Option<TileKind> {
-        block_list
-            .iter()
-            .find(|(_, bgx, bgz, _, _, _)| *bgx == gx && *bgz == gz)
-            .map(|(_, _, _, k, _, _)| *k)
-    };
-
-    // --- X axis: recycle a column if the car is past the +X or -X grid edge ---
+    // --- X axis ---
     let (min_gx, max_gx) = block_list
         .iter()
-        .map(|(_, gx, _, _, _, _)| *gx)
+        .map(|(_, gx, _)| *gx)
         .fold((i32::MAX, i32::MIN), |(mn, mx), gx| (mn.min(gx), mx.max(gx)));
-    let x_edge_hi = (max_gx as f32 + 0.5) * block + VIEW_MARGIN; // past +X edge
-    let x_edge_lo = (min_gx as f32 + 0.5) * block - VIEW_MARGIN; // past -X edge
+    let x_edge_hi = (max_gx as f32 + 0.5) * block + VIEW_MARGIN;
+    let x_edge_lo = (min_gx as f32 + 0.5) * block - VIEW_MARGIN;
     if car_x > x_edge_hi {
-        // Recycle the min_gx column to gx = max_gx + 1.
-        let to_despawn: Vec<Entity> = block_list
+        // Retire the -X (min_gx) column; regenerate it on the +X side at max_gx+1.
+        let gz_values: Vec<i32> = block_list
             .iter()
-            .filter(|(_, gx, _, _, _, _)| *gx == min_gx)
-            .map(|(e, _, _, _, _, _)| *e)
+            .filter(|(_, gx, _)| *gx == min_gx)
+            .map(|(_, _, gz)| *gz)
             .collect();
-        for e in to_despawn {
+        for &(e, _, _) in block_list.iter().filter(|(_, gx, _)| *gx == min_gx) {
             commands.entity(e).despawn();
         }
         let new_gx = max_gx + 1;
-        // The new column joins the +X side of the grid: its W neighbour
-        // (new_gx - 1 = max_gx) exists and fixes its W edge; E/N/S free (S
-        // may exist if the row above/below was recycled this frame — but we
-        // only recycle one column, so S is not freshly spawned; check the
-        // snapshot for an existing S neighbour too, for safety).
-        for (_, _, gz, _, _, _) in block_list
-            .iter()
-            .filter(|(_, gx, _, _, _, _)| *gx == min_gx)
-        {
-            let new_gz = *gz;
-            let fixed_w = kind_at(new_gx - 1, new_gz).map(|k| sockets(k)[E]);
-            let fixed_s = kind_at(new_gx, new_gz - 1).map(|k| sockets(k)[N]);
-            let fixed = [fixed_w, None, fixed_s, None];
-            let mut s = seed_for(new_gx, new_gz);
-            let kind = pick_tile(fixed, &mut s);
-            let root = commands
-                .spawn((
-                    Transform::from_xyz(
-                        (new_gx as f32 + 0.5) * block,
-                        0.0,
-                        (new_gz as f32 + 0.5) * block,
-                    ),
-                    Visibility::default(),
-                    Block {
-                        gx: new_gx,
-                        gz: new_gz,
-                        kind,
-                    },
-                ))
-                .id();
-            populate_block(
-                &mut commands,
-                &mut meshes,
-                &mut materials,
-                &textures,
-                root,
-                new_gx,
-                new_gz,
-                seed_for(new_gx, new_gz),
-                kind,
-            );
+        for gz in gz_values {
+            spawn_block_at(&mut commands, &mut meshes, &mut materials, &textures, block, new_gx, gz);
         }
     } else if car_x < x_edge_lo {
-        // Recycle the max_gx column to gx = min_gx - 1.
-        let to_despawn: Vec<Entity> = block_list
+        // Retire the +X (max_gx) column; regenerate it on the -X side at min_gx-1.
+        let gz_values: Vec<i32> = block_list
             .iter()
-            .filter(|(_, gx, _, _, _, _)| *gx == max_gx)
-            .map(|(e, _, _, _, _, _)| *e)
+            .filter(|(_, gx, _)| *gx == max_gx)
+            .map(|(_, _, gz)| *gz)
             .collect();
-        for e in to_despawn {
+        for &(e, _, _) in block_list.iter().filter(|(_, gx, _)| *gx == max_gx) {
             commands.entity(e).despawn();
         }
         let new_gx = min_gx - 1;
-        // The new column joins the -X side: its E neighbour (new_gx + 1 =
-        // min_gx) exists and fixes its E edge; W/S free (S may exist — check
-        // the snapshot).
-        for (_, _, gz, _, _, _) in block_list
-            .iter()
-            .filter(|(_, gx, _, _, _, _)| *gx == max_gx)
-        {
-            let new_gz = *gz;
-            let fixed_e = kind_at(new_gx + 1, new_gz).map(|k| sockets(k)[W]);
-            let fixed_s = kind_at(new_gx, new_gz - 1).map(|k| sockets(k)[N]);
-            let fixed = [None, fixed_e, fixed_s, None];
-            let mut s = seed_for(new_gx, new_gz);
-            let kind = pick_tile(fixed, &mut s);
-            let root = commands
-                .spawn((
-                    Transform::from_xyz(
-                        (new_gx as f32 + 0.5) * block,
-                        0.0,
-                        (new_gz as f32 + 0.5) * block,
-                    ),
-                    Visibility::default(),
-                    Block {
-                        gx: new_gx,
-                        gz: new_gz,
-                        kind,
-                    },
-                ))
-                .id();
-            populate_block(
-                &mut commands,
-                &mut meshes,
-                &mut materials,
-                &textures,
-                root,
-                new_gx,
-                new_gz,
-                seed_for(new_gx, new_gz),
-                kind,
-            );
+        for gz in gz_values {
+            spawn_block_at(&mut commands, &mut meshes, &mut materials, &textures, block, new_gx, gz);
         }
     }
 
-    // --- Z axis: recycle a row if the car is past the +Z or -Z grid edge ---
-    // Re-snapshot after the X recycle (new blocks were spawned with new gz
-    // values identical to the despawned ones, so min/max gz are unchanged —
-    // but the entity set changed). We re-query to be safe.
-    let block_list_z: Vec<(Entity, i32, i32, TileKind)> = blocks
-        .iter()
-        .map(|(e, b, _)| (e, b.gx, b.gz, b.kind))
-        .collect();
-    let kind_at_z = |gx: i32, gz: i32| -> Option<TileKind> {
-        block_list_z
-            .iter()
-            .find(|(_, bgx, bgz, _)| *bgx == gx && *bgz == gz)
-            .map(|(_, _, _, k)| *k)
-    };
+    // --- Z axis --- (re-snapshot in case X recycled; gx set is unchanged but
+    // entities changed, so re-query.)
+    let block_list_z: Vec<(Entity, i32, i32)> =
+        blocks.iter().map(|(e, b, _)| (e, b.gx, b.gz)).collect();
     let (min_gz, max_gz) = block_list_z
         .iter()
-        .map(|(_, _, gz, _)| *gz)
+        .map(|(_, _, gz)| *gz)
         .fold((i32::MAX, i32::MIN), |(mn, mx), gz| (mn.min(gz), mx.max(gz)));
-    let z_edge_hi = (max_gz as f32 + 0.5) * block + VIEW_MARGIN; // past +Z edge
-    let z_edge_lo = (min_gz as f32 + 0.5) * block - VIEW_MARGIN; // past -Z edge
+    let z_edge_hi = (max_gz as f32 + 0.5) * block + VIEW_MARGIN;
+    let z_edge_lo = (min_gz as f32 + 0.5) * block - VIEW_MARGIN;
     if car_z > z_edge_hi {
-        // Recycle the min_gz row to gz = max_gz + 1.
-        let to_despawn: Vec<Entity> = block_list_z
+        let gx_values: Vec<i32> = block_list_z
             .iter()
-            .filter(|(_, _, gz, _)| *gz == min_gz)
-            .map(|(e, _, _, _)| *e)
+            .filter(|(_, _, gz)| *gz == min_gz)
+            .map(|(_, gx, _)| *gx)
             .collect();
-        for e in to_despawn {
+        for &(e, _, _) in block_list_z.iter().filter(|(_, _, gz)| *gz == min_gz) {
             commands.entity(e).despawn();
         }
         let new_gz = max_gz + 1;
-        // The new row joins the +Z side: its S neighbour (new_gz - 1 =
-        // max_gz) exists and fixes its S edge; W/N free (W may exist — check
-        // the snapshot).
-        for (_, gx, _, _) in block_list_z.iter().filter(|(_, _, gz, _)| *gz == min_gz) {
-            let new_gx = *gx;
-            let fixed_s = kind_at_z(new_gx, new_gz - 1).map(|k| sockets(k)[N]);
-            let fixed_w = kind_at_z(new_gx - 1, new_gz).map(|k| sockets(k)[E]);
-            let fixed = [fixed_w, None, fixed_s, None];
-            let mut s = seed_for(new_gx, new_gz);
-            let kind = pick_tile(fixed, &mut s);
-            let root = commands
-                .spawn((
-                    Transform::from_xyz(
-                        (new_gx as f32 + 0.5) * block,
-                        0.0,
-                        (new_gz as f32 + 0.5) * block,
-                    ),
-                    Visibility::default(),
-                    Block {
-                        gx: new_gx,
-                        gz: new_gz,
-                        kind,
-                    },
-                ))
-                .id();
-            // The original entity was already despawned in the loop above;
-            // spawn a fresh root and populate it.
-            populate_block(
-                &mut commands,
-                &mut meshes,
-                &mut materials,
-                &textures,
-                root,
-                new_gx,
-                new_gz,
-                seed_for(new_gx, new_gz),
-                kind,
-            );
+        for gx in gx_values {
+            spawn_block_at(&mut commands, &mut meshes, &mut materials, &textures, block, gx, new_gz);
         }
     } else if car_z < z_edge_lo {
-        // Recycle the max_gz row to gz = min_gz - 1.
-        let to_despawn: Vec<Entity> = block_list_z
+        let gx_values: Vec<i32> = block_list_z
             .iter()
-            .filter(|(_, _, gz, _)| *gz == max_gz)
-            .map(|(e, _, _, _)| *e)
+            .filter(|(_, _, gz)| *gz == max_gz)
+            .map(|(_, gx, _)| *gx)
             .collect();
-        for e in to_despawn {
+        for &(e, _, _) in block_list_z.iter().filter(|(_, _, gz)| *gz == max_gz) {
             commands.entity(e).despawn();
         }
         let new_gz = min_gz - 1;
-        // The new row joins the -Z side: its N neighbour (new_gz + 1 =
-        // min_gz) exists and fixes its N edge; W/S free (W may exist — check
-        // the snapshot).
-        for (_, gx, _, _) in block_list_z.iter().filter(|(_, _, gz, _)| *gz == max_gz) {
-            let new_gx = *gx;
-            let fixed_n = kind_at_z(new_gx, new_gz + 1).map(|k| sockets(k)[S]);
-            let fixed_w = kind_at_z(new_gx - 1, new_gz).map(|k| sockets(k)[E]);
-            let fixed = [fixed_w, None, None, fixed_n];
-            let mut s = seed_for(new_gx, new_gz);
-            let kind = pick_tile(fixed, &mut s);
-            let root = commands
-                .spawn((
-                    Transform::from_xyz(
-                        (new_gx as f32 + 0.5) * block,
-                        0.0,
-                        (new_gz as f32 + 0.5) * block,
-                    ),
-                    Visibility::default(),
-                    Block {
-                        gx: new_gx,
-                        gz: new_gz,
-                        kind,
-                    },
-                ))
-                .id();
-            // The original entity was already despawned in the loop above;
-            // spawn a fresh root and populate it.
-            populate_block(
-                &mut commands,
-                &mut meshes,
-                &mut materials,
-                &textures,
-                root,
-                new_gx,
-                new_gz,
-                seed_for(new_gx, new_gz),
-                kind,
-            );
+        for gx in gx_values {
+            spawn_block_at(&mut commands, &mut meshes, &mut materials, &textures, block, gx, new_gz);
         }
     }
+}
+
+/// Spawn one block at (gx,gz): derive its tile deterministically from the road
+/// lines (see `tile_from_edges`), spawn the root, and populate it. Shared
+/// edges always agree because both adjacent blocks derive them from the same
+/// line index — no neighbour querying needed.
+fn spawn_block_at(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    textures: &TextureAssets,
+    block: f32,
+    gx: i32,
+    gz: i32,
+) {
+    let kind = tile_from_edges(gx, gz);
+    let root = commands
+        .spawn((
+            Transform::from_xyz((gx as f32 + 0.5) * block, 0.0, (gz as f32 + 0.5) * block),
+            Visibility::default(),
+            Block { gx, gz, kind },
+        ))
+        .id();
+    populate_block(commands, meshes, materials, textures, root, gx, gz, seed_for(gx, gz), kind);
 }
 
 /// On a fresh round, re-center the grid on the car's spawn (origin): despawn
