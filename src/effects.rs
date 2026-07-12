@@ -172,11 +172,19 @@ fn fade_ladder(
     rgb: Color,
     peak_alpha: f32,
 ) -> Vec<Handle<StandardMaterial>> {
-    let [r, g, b] = [rgb.to_linear().red, rgb.to_linear().green, rgb.to_linear().blue];
+    let [r, g, b] = [
+        rgb.to_linear().red,
+        rgb.to_linear().green,
+        rgb.to_linear().blue,
+    ];
     (0..steps)
         .map(|i| {
             // frac: 0.0 at full alpha (i=0) → ~1.0 at last step.
-            let frac = if steps <= 1 { 0.0 } else { i as f32 / (steps - 1) as f32 };
+            let frac = if steps <= 1 {
+                0.0
+            } else {
+                i as f32 / (steps - 1) as f32
+            };
             // Ease the fade a touch (alpha holds up then drops) for a nicer
             // tail: alpha = peak * (1 - frac)^1.3.
             let a = peak_alpha * (1.0 - frac).powf(1.3);
@@ -203,9 +211,9 @@ struct TireMark {
     age: f32,
 }
 
-/// A smoke/dust particle. `age` counts up; despawn at `SMOKE_LIFETIME`.
-/// `seed` gives each puff a slightly different rise/expansion so a burst
-/// doesn't look like one synchronized blob.
+/// A smoke/dust particle. `age` counts up; at `SMOKE_LIFETIME` it is hidden
+/// and remains available for deterministic pool reuse. `seed` gives each puff
+/// a slightly different rise/expansion so a burst doesn't look synchronized.
 #[derive(Component)]
 struct Smoke {
     age: f32,
@@ -224,11 +232,7 @@ impl Plugin for EffectsPlugin {
         app.init_resource::<EffectsAssets>()
             .add_systems(
                 Update,
-                (
-                    emit_tire_effects,
-                    fade_tire_marks,
-                    update_smoke,
-                )
+                (emit_tire_effects, fade_tire_marks, update_smoke)
                     .chain()
                     .run_if(in_state(GameState::Playing)),
             )
@@ -259,19 +263,39 @@ struct EmitState {
 /// reads `ObstacleHit` for a small impact smoke puff (multiple readers of the
 /// same message are fine — T2 reads it too).
 fn emit_tire_effects(
-    car: Query<(&Car, &Transform), With<Car>>,
+    car: Query<(&Car, &Transform), (With<Car>, Without<TireMark>, Without<Smoke>)>,
     mut commands: Commands,
     assets: Res<EffectsAssets>,
     time: Res<Time>,
     mut state: Local<EmitState>,
-    marks: Query<Entity, With<TireMark>>,
-    smokes: Query<Entity, With<Smoke>>,
+    mut marks: Query<
+        (
+            Entity,
+            &mut TireMark,
+            &mut Transform,
+            &mut Visibility,
+            &mut MeshMaterial3d<StandardMaterial>,
+        ),
+        (With<TireMark>, Without<Smoke>),
+    >,
+    mut smokes: Query<
+        (
+            Entity,
+            &mut Smoke,
+            &mut Transform,
+            &mut Visibility,
+            &mut MeshMaterial3d<StandardMaterial>,
+        ),
+        (With<Smoke>, Without<TireMark>),
+    >,
     mut obstacle_hits: MessageReader<ObstacleHit>,
 ) {
     let Ok((car, car_t)) = car.single() else {
         return;
     };
     let dt = time.delta_secs();
+    let mut mark_emissions = Vec::with_capacity(2);
+    let mut smoke_emissions = Vec::with_capacity(10);
 
     // --- First-frame init: seed prev_heading so we don't emit on frame 0. ---
     if !state.initialized {
@@ -286,8 +310,7 @@ fn emit_tire_effects(
     let ang_vel = dh / dt.max(1e-4);
     state.prev_heading = car.heading;
 
-    let skidding =
-        ang_vel.abs() > ANG_VEL_THRESHOLD && car.speed.abs() > SPEED_THRESHOLD;
+    let skidding = ang_vel.abs() > ANG_VEL_THRESHOLD && car.speed.abs() > SPEED_THRESHOLD;
 
     // --- Rear-wheel world positions ---
     // Local offsets rotated by the car's heading (yaw about Y), then offset
@@ -298,57 +321,57 @@ fn emit_tire_effects(
     // drift). Matches `car.rs` forward = (-sin h, 0, -cos h).
     let fwd = Vec3::new(-car.heading.sin(), 0.0, -car.heading.cos());
 
-    // --- Tire marks (rate-limited) ---
+    // Gather this frame's requests before touching either pool. Processing a
+    // batch lets each existing entity be claimed at most once and lets pending
+    // Commands spawns count against the cap immediately.
     state.mark_timer -= dt;
     if skidding && state.mark_timer <= 0.0 {
         state.mark_timer = MARK_EMIT_INTERVAL;
-        // One mark per rear wheel.
         for &pos in &[left_w, right_w] {
-            spawn_or_recycle_mark(
-                &mut commands,
-                &assets,
-                &marks,
+            mark_emissions.push(MarkEmission {
                 pos,
                 fwd,
-                car.heading,
-            );
+                heading: car.heading,
+            });
         }
     }
 
-    // --- Smoke (rate-limited) ---
     state.smoke_timer -= dt;
     if skidding && state.smoke_timer <= 0.0 {
         state.smoke_timer = SMOKE_EMIT_INTERVAL;
-        // A couple of puffs per wheel for a small burst, varied by seed.
         for &pos in &[left_w, right_w] {
             for _ in 0..2 {
-                spawn_or_recycle_smoke(&mut commands, &assets, &smokes, pos, fwd);
+                if smoke_emissions.len() < SMOKE_POOL_CAP {
+                    smoke_emissions.push(SmokeEmission { pos, fwd });
+                }
             }
         }
     }
 
-    // --- Impact smoke on hard obstacle hits ---
-    // (Independent of skidding; a crash kicks up dust even at low angular vel.)
+    // Impact smoke is independent of skidding. Requests beyond the complete
+    // pool are immaterial (there cannot be more than the cap visible at once),
+    // so do not accumulate an unbounded message burst.
     for hit in obstacle_hits.read() {
         if hit.impact_speed >= HIT_SMOKE_SPEED {
-            // A burst centered on the car body, puffed slightly forward of the
-            // contact (which is the front bumper when driving into a wall).
             let center = car_t.translation + fwd * 0.9;
             for _ in 0..6 {
-                spawn_or_recycle_smoke(
-                    &mut commands,
-                    &assets,
-                    &smokes,
-                    Vec3::new(
+                if smoke_emissions.len() >= SMOKE_POOL_CAP {
+                    break;
+                }
+                smoke_emissions.push(SmokeEmission {
+                    pos: Vec3::new(
                         center.x + (rand_local() - 0.5) * 0.6,
                         MARK_Y + 0.1,
                         center.z + (rand_local() - 0.5) * 0.6,
                     ),
                     fwd,
-                );
+                });
             }
         }
     }
+
+    apply_mark_emissions(&mut commands, &assets, &mut marks, &mark_emissions);
+    apply_smoke_emissions(&mut commands, &assets, &mut smokes, &smoke_emissions);
 }
 
 /// Compute the world-space ground-contact points of the two rear wheels from
@@ -365,87 +388,157 @@ fn rear_wheel_world(car_t: &Transform, half_x: f32, rear_z: f32) -> (Vec3, Vec3)
     (left, right)
 }
 
-/// Spawn a fresh tire-mark quad, or — if the pool is at capacity — recycle an
-/// existing mark (reset its transform + age + full-alpha material) instead.
-/// This bounds the mark entity count at `MARK_POOL_CAP` forever (web-friendly).
-fn spawn_or_recycle_mark(
-    commands: &mut Commands,
-    assets: &EffectsAssets,
-    marks: &Query<Entity, With<TireMark>>,
+#[derive(Clone, Copy)]
+struct MarkEmission {
     pos: Vec3,
     fwd: Vec3,
     heading: f32,
-) {
-    // Orient the quad along travel: rotate by the heading yaw (same as the
-    // car). The mesh's length is already along its local Z (see MARK_LEN).
-    let rot = Quat::from_rotation_y(heading);
-    // Nudge the mark slightly backward along travel so it sits where the wheel
-    // *was* a moment ago (the contact patch trails the wheel center).
-    let pos = pos - fwd * (MARK_LEN * 0.5);
-    // Fresh mark starts at full alpha (bucket 0).
-    let full_mat = assets.mark_materials[0].clone();
+}
 
-    if marks.iter().count() < MARK_POOL_CAP {
-        // Pool not full: spawn a new mark.
-        commands.spawn((
-            Mesh3d(assets.mark_mesh.clone()),
-            MeshMaterial3d(full_mat),
-            Transform::from_translation(pos).with_rotation(rot),
-            Visibility::default(),
-            TireMark { age: 0.0 },
+#[derive(Clone, Copy)]
+struct SmokeEmission {
+    pos: Vec3,
+    fwd: Vec3,
+}
+
+/// Apply a mark batch deterministically. Hidden/expired entities are consumed
+/// first. If none exist, free pool capacity is used; only a full pool causes
+/// the oldest active marks to be recycled. Each entity is claimed once, so a
+/// two-wheel emission cannot repeatedly teleport the same fresh mark.
+fn apply_mark_emissions(
+    commands: &mut Commands,
+    assets: &EffectsAssets,
+    marks: &mut Query<
+        (
+            Entity,
+            &mut TireMark,
+            &mut Transform,
+            &mut Visibility,
+            &mut MeshMaterial3d<StandardMaterial>,
+        ),
+        (With<TireMark>, Without<Smoke>),
+    >,
+    emissions: &[MarkEmission],
+) {
+    let mut entities = Vec::new();
+    let mut slots = Vec::new();
+    for (entity, mark, _tf, visibility, _mat) in marks.iter_mut() {
+        entities.push(entity);
+        slots.push(PoolSlot::new(
+            mark.age,
+            *visibility == Visibility::Hidden || mark.age >= MARK_LIFETIME,
+            entity.index().index(),
         ));
-    } else {
-        // Pool full: recycle an existing slot. We only have `Entity` here (the
-        // fade system owns `&TireMark`), so pick the first iterated entity —
-        // any pool member is a valid recycle slot. Reset transform + age +
-        // full-alpha material + visibility so it starts a fresh fade.
-        if let Some(entity) = marks.iter().next() {
-            commands.entity(entity).insert((
-                MeshMaterial3d(full_mat),
-                Transform::from_translation(pos).with_rotation(rot),
-                TireMark { age: 0.0 },
+    }
+
+    let existing = entities.len();
+    let mut pending_spawns = 0;
+    for emission in emissions {
+        let rot = Quat::from_rotation_y(emission.heading);
+        let pos = emission.pos - emission.fwd * (MARK_LEN * 0.5);
+        let transform = Transform::from_translation(pos).with_rotation(rot);
+
+        let reuse = take_pool_slot(&mut slots, true).or_else(|| {
+            if pool_has_spawn_capacity(existing, pending_spawns, MARK_POOL_CAP) {
+                None
+            } else {
+                take_pool_slot(&mut slots, false)
+            }
+        });
+
+        if let Some(index) = reuse {
+            if let Ok((_entity, mut mark, mut tf, mut visibility, mut mat)) =
+                marks.get_mut(entities[index])
+            {
+                mark.age = 0.0;
+                *tf = transform;
+                *visibility = Visibility::Visible;
+                mat.0 = assets.mark_materials[0].clone();
+            }
+        } else if pool_has_spawn_capacity(existing, pending_spawns, MARK_POOL_CAP) {
+            commands.spawn((
+                Mesh3d(assets.mark_mesh.clone()),
+                MeshMaterial3d(assets.mark_materials[0].clone()),
+                transform,
                 Visibility::Visible,
+                TireMark { age: 0.0 },
             ));
+            pending_spawns += 1;
         }
+        // If every existing slot was already claimed and no capacity remains,
+        // the batch already represents a complete pool; discard the excess.
     }
 }
 
-/// Spawn a fresh smoke puff, or recycle an existing one if the pool is full.
-fn spawn_or_recycle_smoke(
+/// Smoke uses the same allocation policy as marks and is kept as a stable
+/// hidden pool after expiry rather than despawned and recreated every burst.
+fn apply_smoke_emissions(
     commands: &mut Commands,
     assets: &EffectsAssets,
-    smokes: &Query<Entity, With<Smoke>>,
-    pos: Vec3,
-    fwd: Vec3,
+    smokes: &mut Query<
+        (
+            Entity,
+            &mut Smoke,
+            &mut Transform,
+            &mut Visibility,
+            &mut MeshMaterial3d<StandardMaterial>,
+        ),
+        (With<Smoke>, Without<TireMark>),
+    >,
+    emissions: &[SmokeEmission],
 ) {
-    // Smoke puffs start at the wheel and drift slightly backward/upward.
-    let seed = rand_local();
-    let start_pos = pos - fwd * 0.1 + Vec3::new(0.0, 0.1, 0.0);
-    let full_mat = assets.smoke_materials[0].clone();
-    let scale = 0.6 + seed * 0.4;
-
-    if smokes.iter().count() < SMOKE_POOL_CAP {
-        commands.spawn((
-            Mesh3d(assets.smoke_mesh.clone()),
-            MeshMaterial3d(full_mat),
-            Transform::from_translation(start_pos).with_scale(Vec3::splat(scale)),
-            Visibility::default(),
-            Smoke { age: 0.0, seed },
+    let mut entities = Vec::new();
+    let mut slots = Vec::new();
+    for (entity, smoke, _tf, visibility, _mat) in smokes.iter_mut() {
+        entities.push(entity);
+        slots.push(PoolSlot::new(
+            smoke.age,
+            *visibility == Visibility::Hidden || smoke.age >= SMOKE_LIFETIME,
+            entity.index().index(),
         ));
-    } else {
-        if let Some(entity) = smokes.iter().next() {
-            commands.entity(entity).insert((
-                MeshMaterial3d(full_mat),
-                Transform::from_translation(start_pos).with_scale(Vec3::splat(scale)),
-                Smoke { age: 0.0, seed },
+    }
+
+    let existing = entities.len();
+    let mut pending_spawns = 0;
+    for emission in emissions {
+        let seed = rand_local();
+        let start_pos = emission.pos - emission.fwd * 0.1 + Vec3::new(0.0, 0.1, 0.0);
+        let scale = 0.6 + seed * 0.4;
+        let transform = Transform::from_translation(start_pos).with_scale(Vec3::splat(scale));
+
+        let reuse = take_pool_slot(&mut slots, true).or_else(|| {
+            if pool_has_spawn_capacity(existing, pending_spawns, SMOKE_POOL_CAP) {
+                None
+            } else {
+                take_pool_slot(&mut slots, false)
+            }
+        });
+
+        if let Some(index) = reuse {
+            if let Ok((_entity, mut smoke, mut tf, mut visibility, mut mat)) =
+                smokes.get_mut(entities[index])
+            {
+                smoke.age = 0.0;
+                smoke.seed = seed;
+                *tf = transform;
+                *visibility = Visibility::Visible;
+                mat.0 = assets.smoke_materials[0].clone();
+            }
+        } else if pool_has_spawn_capacity(existing, pending_spawns, SMOKE_POOL_CAP) {
+            commands.spawn((
+                Mesh3d(assets.smoke_mesh.clone()),
+                MeshMaterial3d(assets.smoke_materials[0].clone()),
+                transform,
                 Visibility::Visible,
+                Smoke { age: 0.0, seed },
             ));
+            pending_spawns += 1;
         }
     }
 }
 
 // ===========================================================================
-// Fade + recycle — advance age, fade alpha (material swap), despawn when expired
+// Fade + recycle — advance age, fade alpha (material swap), hide when expired
 // ===========================================================================
 
 /// Advance each tire mark's age and fade its alpha by swapping the material
@@ -492,30 +585,27 @@ fn fade_tire_marks(
     }
 }
 
-/// Advance each smoke puff: rise (+Y), expand (scale up), fade alpha (material
-/// swap), and despawn when expired. Despawn (not hide) keeps the visible
-/// particle count low — the emitter just spawns fresh ones up to cap.
+/// Advance each smoke puff: rise (+Y), expand (scale up), and fade alpha by
+/// material swap. Expired puffs are hidden but retained as reusable pool slots.
 fn update_smoke(
-    mut commands: Commands,
     time: Res<Time>,
     assets: Res<EffectsAssets>,
     mut smokes: Query<(
-        Entity,
         &mut Smoke,
         &mut Transform,
+        &mut Visibility,
         &mut MeshMaterial3d<StandardMaterial>,
     )>,
 ) {
     let dt = time.delta_secs();
     let last = SMOKE_FADE_STEPS - 1;
-    for (entity, mut smoke, mut tf, mut mat) in smokes.iter_mut() {
+    for (mut smoke, mut tf, mut visibility, mut mat) in smokes.iter_mut() {
         smoke.age += dt;
         if smoke.age >= SMOKE_LIFETIME {
-            // Expired: despawn (emitter spawns fresh up to cap). Keeps the
-            // visible count bounded — web-friendly.
-            commands.entity(entity).despawn();
+            *visibility = Visibility::Hidden;
             continue;
         }
+        *visibility = Visibility::Visible;
         let t = smoke.age / SMOKE_LIFETIME;
         // Alpha bucket for fade.
         let bucket = ((t * SMOKE_FADE_STEPS as f32) as usize).min(last);
@@ -557,6 +647,101 @@ fn cleanup_effects(
 // ===========================================================================
 // Helpers
 // ===========================================================================
+
+/// Read-only allocation metadata used to make pool selection independent of
+/// ECS iteration/mutation. Entity indices provide a stable equal-age tie-break.
+#[derive(Clone, Copy, Debug)]
+struct PoolSlot {
+    age: f32,
+    reusable: bool,
+    tie_breaker: u32,
+    available: bool,
+}
+
+impl PoolSlot {
+    fn new(age: f32, reusable: bool, tie_breaker: u32) -> Self {
+        Self {
+            age,
+            reusable,
+            tie_breaker,
+            available: true,
+        }
+    }
+}
+
+/// Claim the best slot: reusable entries before active entries, then greatest
+/// age (oldest) within that class. With `reusable_only`, active effects are not
+/// considered while the caller still has room to grow the pool.
+fn take_pool_slot(slots: &mut [PoolSlot], reusable_only: bool) -> Option<usize> {
+    let mut best: Option<usize> = None;
+    for (index, slot) in slots.iter().enumerate() {
+        if !slot.available || (reusable_only && !slot.reusable) {
+            continue;
+        }
+        let replace = match best {
+            None => true,
+            Some(best_index) => {
+                let current = &slots[best_index];
+                (slot.reusable && !current.reusable)
+                    || (slot.reusable == current.reusable
+                        && (slot.age.total_cmp(&current.age).is_gt()
+                            || (slot.age.total_cmp(&current.age).is_eq()
+                                && slot.tie_breaker < current.tie_breaker)))
+            }
+        };
+        if replace {
+            best = Some(index);
+        }
+    }
+    if let Some(index) = best {
+        slots[index].available = false;
+    }
+    best
+}
+
+/// Include deferred spawns in capacity checks so several emissions in one
+/// system invocation can never queue enough Commands to overrun a hard cap.
+fn pool_has_spawn_capacity(existing: usize, pending_spawns: usize, cap: usize) -> bool {
+    existing.saturating_add(pending_spawns) < cap
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PoolSlot, pool_has_spawn_capacity, take_pool_slot};
+
+    #[test]
+    fn reuse_prefers_expired_then_oldest_with_stable_ties() {
+        let mut slots = [
+            PoolSlot::new(9.0, false, 1),
+            PoolSlot::new(4.0, true, 8),
+            PoolSlot::new(4.0, true, 3),
+            PoolSlot::new(8.0, false, 2),
+        ];
+
+        // Reusable beats even an older active slot; equal ages use the stable
+        // entity-index tie-break. Claimed slots cannot be selected twice.
+        assert_eq!(take_pool_slot(&mut slots, false), Some(2));
+        assert_eq!(take_pool_slot(&mut slots, false), Some(1));
+        assert_eq!(take_pool_slot(&mut slots, false), Some(0));
+        assert_eq!(take_pool_slot(&mut slots, false), Some(3));
+        assert_eq!(take_pool_slot(&mut slots, false), None);
+    }
+
+    #[test]
+    fn reusable_only_does_not_teleport_an_active_effect() {
+        let mut slots = [PoolSlot::new(2.0, false, 1)];
+        assert_eq!(take_pool_slot(&mut slots, true), None);
+        assert_eq!(take_pool_slot(&mut slots, false), Some(0));
+    }
+
+    #[test]
+    fn pending_spawns_respect_the_hard_cap() {
+        assert!(pool_has_spawn_capacity(78, 1, 80));
+        assert!(!pool_has_spawn_capacity(78, 2, 80));
+        assert!(!pool_has_spawn_capacity(80, 0, 80));
+        assert!(!pool_has_spawn_capacity(usize::MAX, 1, 80));
+    }
+}
 
 /// Shortest signed delta in `(-π, π]` for a raw heading difference (handles
 /// the 2π wrap so heading 0 → 2π doesn't read as a huge angular velocity).

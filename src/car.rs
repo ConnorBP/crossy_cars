@@ -1,7 +1,7 @@
 use bevy::color::LinearRgba;
 use bevy::mesh::VertexAttributeValues;
 use bevy::prelude::*;
-use std::f32::consts::FRAC_PI_2;
+use std::f32::consts::{FRAC_PI_2, TAU};
 
 use crate::game::events::ObstacleHit;
 use crate::game::resources::GameConfig;
@@ -27,12 +27,26 @@ pub struct InputFrozen(pub bool);
 #[derive(Component)]
 struct CarBody;
 
+/// Smoothed visual suspension state. This is deliberately kept on the body
+/// child so pitch and roll never feed back into the car's driving transform.
+#[derive(Component, Default)]
+struct BodyMotion {
+    roll: f32,
+    pitch: f32,
+    previous_speed: f32,
+}
+
 /// A single wheel. `spin` accumulates rolling rotation (radians) driven by
 /// `spin_wheels` from the car's speed.
 #[derive(Component)]
 struct Wheel {
     spin: f32,
+    steer: f32,
 }
+
+/// Front wheels yaw for steering in addition to sharing the tire roll logic.
+#[derive(Component)]
+struct FrontWheel;
 
 /// Tag for brake-light children so `brake_lights` can find their shared
 /// material and brighten it while braking.
@@ -111,38 +125,68 @@ fn spawn_car(
         ..default()
     });
 
-    // Windshield: thin dark-glass slab on the front of the cabin.
-    let windshield_mesh = meshes.add(Cuboid::new(0.7, 0.2, 0.03));
-    let windshield_mat = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.05, 0.08, 0.12),
+    // A few shared primitives make a readable greenhouse without generating
+    // unique meshes or materials per window (important for the web build).
+    let end_glass_mesh = meshes.add(Cuboid::new(0.68, 0.23, 0.025));
+    let side_glass_mesh = meshes.add(Cuboid::new(0.025, 0.22, 0.56));
+    let roof_mesh = meshes.add(Cuboid::new(0.72, 0.07, 0.74));
+    let glass_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.035, 0.065, 0.1),
         perceptual_roughness: 0.08,
-        metallic: 0.6,
+        metallic: 0.55,
         ..default()
     });
 
-    // Headlights: warm emissive cubes at the front bumper.
-    let headlight_mesh = meshes.add(Cuboid::new(0.18, 0.12, 0.04));
+    // Front and rear fascia share the paint and geometry. Thin lamps sit just
+    // proud of their face rather than floating at the ellipsoid's tips.
+    let fascia_mesh = meshes.add(Cuboid::new(0.82, 0.16, 0.09));
+    let bumper_mesh = meshes.add(Cuboid::new(0.9, 0.065, 0.07));
+    let trim_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.06, 0.07, 0.075),
+        metallic: 0.65,
+        perceptual_roughness: 0.3,
+        ..default()
+    });
+    let grille_mesh = meshes.add(Cuboid::new(0.32, 0.075, 0.025));
+    let grille_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.008, 0.01, 0.012),
+        perceptual_roughness: 0.9,
+        ..default()
+    });
+
+    // Headlights: warm emissive lenses seated in the front fascia.
+    let headlight_mesh = meshes.add(Cuboid::new(0.18, 0.1, 0.025));
     let headlight_mat = materials.add(StandardMaterial {
         base_color: Color::srgb(1.0, 0.9, 0.6),
         emissive: LinearRgba::new(1.0, 0.9, 0.6, 1.0),
+        perceptual_roughness: 0.18,
         ..default()
     });
 
-    // Brake lights: red emissive cubes at the rear. Both children share one
+    // Brake lights: red emissive lenses at the rear. Both children share one
     // material handle so `brake_lights` can dim/brighten them in one place.
-    let brake_mesh = meshes.add(Cuboid::new(0.18, 0.12, 0.04));
+    let brake_mesh = meshes.add(Cuboid::new(0.18, 0.1, 0.025));
     let brake_mat = materials.add(StandardMaterial {
         base_color: Color::srgb(0.3, 0.02, 0.02),
         emissive: LinearRgba::new(0.8, 0.05, 0.05, 1.0),
+        perceptual_roughness: 0.22,
         ..default()
     });
 
     // Wheels: cylinders with the axle along X, tire-black. Width 0.18 (not 0.3) so
-    // they read as tires, not fat blocks.
+    // they read as tires, not fat blocks. One slightly wider hub cylinder exposes
+    // a metallic cap on both outside faces without extra entities per side.
     let wheel_mesh = meshes.add(Cylinder::new(0.15, 0.18));
     let wheel_mat = materials.add(StandardMaterial {
         base_color: palette::CAR_WHEEL,
         perceptual_roughness: 0.9,
+        ..default()
+    });
+    let hub_mesh = meshes.add(Cylinder::new(0.066, 0.19));
+    let hub_mat = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.42, 0.45, 0.48),
+        metallic: 0.9,
+        perceptual_roughness: 0.2,
         ..default()
     });
 
@@ -171,34 +215,70 @@ fn spawn_car(
                 MeshMaterial3d(textures.car_paint.clone()),
                 Transform::from_xyz(0.0, 0.35, 0.0),
                 CarBody,
+                BodyMotion::default(),
             ))
             .with_children(|body| {
-                // Cabin (sits on top of the body).
+                // Cabin core, four dark glass faces, and a painted roof make a
+                // compact greenhouse whose front/rear slope reads at a glance.
                 body.spawn((
                     Mesh3d(cabin_mesh.clone()),
                     MeshMaterial3d(cabin_mat.clone()),
                     Transform::from_xyz(0.0, 0.35, 0.2),
                 ));
-                // Windshield on the front of the cabin (front is -Z).
                 body.spawn((
-                    Mesh3d(windshield_mesh.clone()),
-                    MeshMaterial3d(windshield_mat.clone()),
-                    Transform::from_xyz(0.0, 0.45, -0.3),
+                    Mesh3d(end_glass_mesh.clone()),
+                    MeshMaterial3d(glass_mat.clone()),
+                    Transform::from_xyz(0.0, 0.39, -0.305)
+                        .with_rotation(Quat::from_rotation_x(0.24)),
                 ));
-                // Headlights at the front bumper (-Z).
-                for &(x, z) in &[(0.3, -1.0), (-0.3, -1.0)] {
+                body.spawn((
+                    Mesh3d(end_glass_mesh.clone()),
+                    MeshMaterial3d(glass_mat.clone()),
+                    Transform::from_xyz(0.0, 0.39, 0.705)
+                        .with_rotation(Quat::from_rotation_x(-0.24)),
+                ));
+                for x in [-0.405, 0.405] {
+                    body.spawn((
+                        Mesh3d(side_glass_mesh.clone()),
+                        MeshMaterial3d(glass_mat.clone()),
+                        Transform::from_xyz(x, 0.39, 0.2),
+                    ));
+                }
+                body.spawn((
+                    Mesh3d(roof_mesh.clone()),
+                    MeshMaterial3d(textures.car_paint.clone()),
+                    Transform::from_xyz(0.0, 0.575, 0.2),
+                ));
+
+                // Painted fascia and dark lower bumper are shared nose-to-tail.
+                for z in [-0.87, 0.87] {
+                    body.spawn((
+                        Mesh3d(fascia_mesh.clone()),
+                        MeshMaterial3d(textures.car_paint.clone()),
+                        Transform::from_xyz(0.0, -0.08, z),
+                    ));
+                    body.spawn((
+                        Mesh3d(bumper_mesh.clone()),
+                        MeshMaterial3d(trim_mat.clone()),
+                        Transform::from_xyz(0.0, -0.18, z.signum() * 0.9),
+                    ));
+                }
+                // The recessed black grille marks the nose (front is -Z).
+                body.spawn((
+                    Mesh3d(grille_mesh.clone()),
+                    MeshMaterial3d(grille_mat.clone()),
+                    Transform::from_xyz(0.0, -0.1, -0.922),
+                ));
+                for x in [-0.27, 0.27] {
                     body.spawn((
                         Mesh3d(headlight_mesh.clone()),
                         MeshMaterial3d(headlight_mat.clone()),
-                        Transform::from_xyz(x, -0.1, z),
+                        Transform::from_xyz(x, -0.055, -0.929),
                     ));
-                }
-                // Brake lights at the rear (+Z).
-                for &(x, z) in &[(0.3, 1.0), (-0.3, 1.0)] {
                     body.spawn((
                         Mesh3d(brake_mesh.clone()),
                         MeshMaterial3d(brake_mat.clone()),
-                        Transform::from_xyz(x, -0.1, z),
+                        Transform::from_xyz(x, -0.055, 0.929),
                         BrakeLight,
                     ));
                 }
@@ -207,12 +287,25 @@ fn spawn_car(
             // Wheels at the four corners, resting on the ground (radius 0.15
             // => center y = 0.15). Axle lies along X via from_rotation_z.
             for &(x, z) in &[(0.6, 0.7), (-0.6, 0.7), (0.6, -0.7), (-0.6, -0.7)] {
-                car.spawn((
+                let mut wheel = car.spawn((
                     Mesh3d(wheel_mesh.clone()),
                     MeshMaterial3d(wheel_mat.clone()),
                     Transform::from_xyz(x, 0.15, z).with_rotation(Quat::from_rotation_z(FRAC_PI_2)),
-                    Wheel { spin: 0.0 },
+                    Wheel {
+                        spin: 0.0,
+                        steer: 0.0,
+                    },
                 ));
+                if z < 0.0 {
+                    wheel.insert(FrontWheel);
+                }
+                wheel.with_children(|wheel| {
+                    wheel.spawn((
+                        Mesh3d(hub_mesh.clone()),
+                        MeshMaterial3d(hub_mat.clone()),
+                        Transform::default(),
+                    ));
+                });
             }
 
             // Blob shadow, flat on the ground under the car. Plane3d::default()
@@ -288,27 +381,46 @@ fn move_car(
 
 fn spin_wheels(
     cars: Query<&Car>,
-    mut wheels: Query<(&mut Transform, &mut Wheel)>,
+    mut wheels: Query<(&mut Transform, &mut Wheel, Option<&FrontWheel>)>,
+    keys: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
 ) {
     let Ok(car) = cars.single() else {
         return;
     };
     let dt = time.delta_secs();
-    // Rolling: distance travelled / radius => radians.
+    let steer_input = if keys.pressed(KeyCode::KeyA) || keys.pressed(KeyCode::ArrowLeft) {
+        1.0
+    } else if keys.pressed(KeyCode::KeyD) || keys.pressed(KeyCode::ArrowRight) {
+        -1.0
+    } else {
+        0.0
+    };
+    // Rolling: distance travelled / radius => radians. Rebuild the quaternion
+    // from independent yaw/base/roll terms every frame so steering cannot
+    // accumulate into a tumbling wheel.
     let spin_delta = car.speed.abs() * dt / 0.15;
-    for (mut tf, mut wheel) in &mut wheels {
-        wheel.spin += spin_delta;
-        // Lay the axle along X (Rz) and roll around the axle = local Y (Ry).
-        tf.rotation = Quat::from_rotation_z(FRAC_PI_2) * Quat::from_rotation_y(wheel.spin);
+    let steer_alpha = 1.0 - (-14.0 * dt).exp();
+    for (mut tf, mut wheel, front) in &mut wheels {
+        wheel.spin = (wheel.spin + spin_delta).rem_euclid(TAU);
+        let target_steer = if front.is_some() {
+            steer_input * 0.36
+        } else {
+            0.0
+        };
+        wheel.steer += (target_steer - wheel.steer) * steer_alpha;
+        tf.rotation = Quat::from_rotation_y(wheel.steer)
+            * Quat::from_rotation_z(FRAC_PI_2)
+            * Quat::from_rotation_y(wheel.spin);
     }
 }
 
 fn roll_body(
     cars: Query<&Car>,
-    mut bodies: Query<&mut Transform, With<CarBody>>,
+    mut bodies: Query<(&mut Transform, &mut BodyMotion), With<CarBody>>,
     keys: Res<ButtonInput<KeyCode>>,
     cfg: Res<GameConfig>,
+    time: Res<Time>,
 ) {
     let Ok(car) = cars.single() else {
         return;
@@ -320,11 +432,22 @@ fn roll_body(
     } else {
         0.0
     };
+    let dt = time.delta_secs();
     let speed_frac = (car.speed / cfg.max_speed).clamp(-1.0, 1.0);
-    // Lean into the turn: tilt around the car's longitudinal (Z) axis.
-    let tilt = -steer * speed_frac * 0.12;
-    for mut tf in &mut bodies {
-        tf.rotation = Quat::from_rotation_z(tilt);
+    let target_roll = -steer * speed_frac * 0.12;
+    for (mut tf, mut motion) in &mut bodies {
+        // Longitudinal acceleration is sampled only for presentation. Positive
+        // acceleration lifts the -Z nose; braking settles it down.
+        let acceleration = if dt > f32::EPSILON {
+            (car.speed - motion.previous_speed) / dt
+        } else {
+            0.0
+        };
+        motion.previous_speed = car.speed;
+        let target_pitch = (acceleration * 0.0015).clamp(-0.045, 0.045);
+        motion.roll += (target_roll - motion.roll) * (1.0 - (-9.0 * dt).exp());
+        motion.pitch += (target_pitch - motion.pitch) * (1.0 - (-7.0 * dt).exp());
+        tf.rotation = Quat::from_rotation_x(motion.pitch) * Quat::from_rotation_z(motion.roll);
     }
 }
 

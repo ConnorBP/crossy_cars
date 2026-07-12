@@ -1,5 +1,6 @@
 //! Minimap (T4): a small top-right radar panel that plots coins, chickens and
-//! obstacles as colored dots around a car-centered, heading-rotated view.
+//! obstacles as high-contrast markers around a car-centered, heading-rotated
+//! view.
 //!
 //! Design:
 //! - A fixed pool of dot children is spawned up front (hidden by default) and
@@ -7,7 +8,7 @@
 //! - Each frame the car's XZ offset to every nearby coin / chicken / obstacle
 //!   is projected onto the car's right/forward axes, scaled into the panel,
 //!   and assigned to the next pool dot (north = car forward). Unused dots are
-//!   hidden. The first dot is always the car (red, centered).
+//!   hidden. The first dot is always the car (tall, red, and centered).
 //! - The panel is spawned on `OnEnter(Playing)` and despawned on
 //!   `OnExit(Playing)`, mirroring `health.rs`'s HUD lifecycle. Owns its UI;
 //!   does not touch `ui.rs`.
@@ -23,13 +24,20 @@ use crate::world::{Coin, Collider};
 // Tuning constants
 // ---------------------------------------------------------------------------
 
-/// Minimap panel size in UI pixels (square).
-const MAP_SIZE: f32 = 120.0;
-/// World-space radius (units) mapped to the panel's half-size. Entities
-/// farther than this are not plotted. 60u => 1.0 px per unit.
+/// Minimap plotting surface size in UI pixels (square).
+const MAP_SIZE: f32 = 132.0;
+/// World-space radius (units) represented by the inner frame.
 const RANGE: f32 = 60.0;
-/// Size of each dot (square) in UI pixels.
-const DOT_SIZE: f32 = 4.0;
+/// Width of the high-contrast outer panel border.
+const PANEL_BORDER: f32 = 2.0;
+/// Inset and width of the frame that marks the plotted range.
+const INNER_FRAME_INSET: f32 = 6.0;
+const INNER_FRAME_WIDTH: f32 = 1.0;
+/// Dots are kept wholly inside the inner edge of the range frame.
+const PLOT_MIN: f32 = INNER_FRAME_INSET + INNER_FRAME_WIDTH;
+const PLOT_MAX: f32 = MAP_SIZE - PLOT_MIN;
+const PLOT_SIZE: f32 = PLOT_MAX - PLOT_MIN;
+const MAP_CENTER: f32 = MAP_SIZE / 2.0;
 /// Fixed pool size — bounds the entity count plotted per frame (web-friendly:
 /// no per-frame spawns). One slot is reserved for the car dot.
 const POOL_SIZE: usize = 64;
@@ -48,19 +56,31 @@ const PANEL_RIGHT: f32 = 16.0;
 struct MinimapRoot;
 
 /// A pooled dot child. `kind` is refreshed each frame to match whatever entity
-/// the dot is currently plotting (it drives the color via `dot_color`).
+/// the dot is currently plotting (it drives all visual properties via
+/// [`dot_style`]).
 #[derive(Component)]
 struct MapDot {
     kind: DotKind,
 }
 
-/// What a dot represents. Determines its color.
-#[derive(Clone, Copy)]
+/// What a dot represents. Color and silhouette both vary by kind so the map
+/// remains readable without relying on color perception alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DotKind {
     Coin,
     Chicken,
     Car,
     Obstacle,
+}
+
+/// Complete, reusable visual style for a pooled dot.
+#[derive(Clone, Copy)]
+struct DotStyle {
+    width: f32,
+    height: f32,
+    border_width: f32,
+    fill: Color,
+    border: Color,
 }
 
 /// A world entity projected into minimap-local coordinates, ready to assign to
@@ -83,14 +103,8 @@ pub struct MinimapPlugin;
 impl Plugin for MinimapPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(OnEnter(GameState::Playing), spawn_minimap)
-            .add_systems(
-                OnExit(GameState::Playing),
-                despawn_marker::<MinimapRoot>,
-            )
-            .add_systems(
-                Update,
-                update_minimap.run_if(in_state(GameState::Playing)),
-            );
+            .add_systems(OnExit(GameState::Playing), despawn_marker::<MinimapRoot>)
+            .add_systems(Update, update_minimap.run_if(in_state(GameState::Playing)));
     }
 }
 
@@ -102,36 +116,107 @@ impl Plugin for MinimapPlugin {
 /// only while `Playing`; the root is despawned on exit (recursively removing
 /// the dot children).
 fn spawn_minimap(mut commands: Commands) {
-    let center = MAP_SIZE / 2.0;
+    let initial_style = dot_style(DotKind::Car);
     commands
         .spawn((
             Node {
                 position_type: PositionType::Absolute,
                 top: px(PANEL_TOP),
                 right: px(PANEL_RIGHT),
+                // The content box is exactly MAP_SIZE, keeping all plotting
+                // coordinates independent of the outer border's box model.
+                width: px(MAP_SIZE + PANEL_BORDER * 2.0),
+                height: px(MAP_SIZE + PANEL_BORDER * 2.0),
+                border: UiRect::all(px(PANEL_BORDER)),
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.015, 0.02, 0.035, 0.88)),
+            BorderColor::all(Color::srgb(0.82, 0.90, 1.0)),
+            MinimapRoot,
+        ))
+        .with_children(|root| {
+            root.spawn(Node {
                 width: px(MAP_SIZE),
                 height: px(MAP_SIZE),
                 ..default()
-            },
-            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.5)),
-            MinimapRoot,
-        ))
-        .with_children(|p| {
-            for _ in 0..POOL_SIZE {
-                p.spawn((
+            })
+            .with_children(|map| {
+                // A second frame clearly defines the maximum represented
+                // range. It and the heading cues are static pooled-UI siblings,
+                // never entities spawned by the update system.
+                map.spawn((
                     Node {
                         position_type: PositionType::Absolute,
-                        left: px(center),
-                        top: px(center),
-                        width: px(DOT_SIZE),
-                        height: px(DOT_SIZE),
+                        left: px(INNER_FRAME_INSET),
+                        top: px(INNER_FRAME_INSET),
+                        width: px(MAP_SIZE - INNER_FRAME_INSET * 2.0),
+                        height: px(MAP_SIZE - INNER_FRAME_INSET * 2.0),
+                        border: UiRect::all(px(INNER_FRAME_WIDTH)),
                         ..default()
                     },
-                    BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.0)),
-                    Visibility::Hidden,
-                    MapDot { kind: DotKind::Car },
+                    BorderColor::all(Color::srgba(0.58, 0.70, 0.84, 0.75)),
                 ));
-            }
+
+                // Fixed range crosshair: the full line spans center-to-edge in
+                // each direction, making distance and orientation easy to read.
+                map.spawn((
+                    Node {
+                        position_type: PositionType::Absolute,
+                        left: px(MAP_CENTER - 0.5),
+                        top: px(PLOT_MIN),
+                        width: px(1.0),
+                        height: px(PLOT_SIZE),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgba(0.55, 0.68, 0.82, 0.24)),
+                ));
+                map.spawn((
+                    Node {
+                        position_type: PositionType::Absolute,
+                        left: px(PLOT_MIN),
+                        top: px(MAP_CENTER - 0.5),
+                        width: px(PLOT_SIZE),
+                        height: px(1.0),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgba(0.55, 0.68, 0.82, 0.24)),
+                ));
+
+                // Bright, fixed north tick: north on this map is always the
+                // car's forward direction.
+                map.spawn((
+                    Node {
+                        position_type: PositionType::Absolute,
+                        left: px(MAP_CENTER - 2.0),
+                        top: px(PLOT_MIN + 2.0),
+                        width: px(4.0),
+                        height: px(12.0),
+                        border: UiRect::all(px(1.0)),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgb(0.30, 0.95, 1.0)),
+                    BorderColor::all(Color::srgb(0.95, 1.0, 1.0)),
+                ));
+
+                // The only dynamic minimap UI: a fixed 64-node pool.
+                for _ in 0..POOL_SIZE {
+                    map.spawn((
+                        Node {
+                            position_type: PositionType::Absolute,
+                            left: px(MAP_CENTER),
+                            top: px(MAP_CENTER),
+                            width: px(initial_style.width),
+                            height: px(initial_style.height),
+                            border: UiRect::all(px(initial_style.border_width)),
+                            ..default()
+                        },
+                        BackgroundColor(initial_style.fill),
+                        BorderColor::all(initial_style.border),
+                        Visibility::Hidden,
+                        MapDot { kind: DotKind::Car },
+                    ));
+                }
+            });
         });
 }
 
@@ -147,16 +232,22 @@ fn despawn_marker<M: Component>(mut commands: Commands, q: Query<Entity, With<M>
 // ---------------------------------------------------------------------------
 
 /// Refresh every pool dot from the current car / coin / chicken / obstacle
-/// transforms. The first dot is the car (red, centered); the remaining dots
-/// are filled with nearby entities in priority order (coins => chickens =>
-/// obstacles); unused dots are hidden. Plotted count is capped at the pool
-/// size.
+/// transforms. The first dot is the car (tall, red, and centered); the
+/// remaining dots are filled with nearby entities in priority order (coins =>
+/// chickens => obstacles); unused dots are hidden. Plotted count is capped at
+/// the pool size.
 fn update_minimap(
     car: Query<(&Car, &Transform)>,
     coins: Query<&GlobalTransform, With<Coin>>,
     chickens: Query<&GlobalTransform, With<Chicken>>,
     obstacles: Query<&GlobalTransform, With<Collider>>,
-    mut dots: Query<(&mut Node, &mut BackgroundColor, &mut Visibility, &mut MapDot)>,
+    mut dots: Query<(
+        &mut Node,
+        &mut BackgroundColor,
+        &mut BorderColor,
+        &mut Visibility,
+        &mut MapDot,
+    )>,
     mut plots: Local<Vec<Plot>>,
 ) {
     let Ok((car, car_t)) = car.single() else {
@@ -170,9 +261,6 @@ fn update_minimap(
     //   right   = ( cos h, 0, -sin h)
     let (sin_h, cos_h) = heading.sin_cos();
 
-    let center = MAP_SIZE / 2.0;
-    let scale = MAP_SIZE / (2.0 * RANGE);
-    let range2 = RANGE * RANGE;
     let max_plots = POOL_SIZE - 1; // one slot reserved for the car dot
 
     // Reuse the Local allocation; clear and refill each frame. Coins and
@@ -184,9 +272,6 @@ fn update_minimap(
         car_pos,
         sin_h,
         cos_h,
-        center,
-        scale,
-        range2,
         DotKind::Coin,
         &mut plots,
         max_plots,
@@ -196,9 +281,6 @@ fn update_minimap(
         car_pos,
         sin_h,
         cos_h,
-        center,
-        scale,
-        range2,
         DotKind::Chicken,
         &mut plots,
         max_plots,
@@ -208,32 +290,30 @@ fn update_minimap(
         car_pos,
         sin_h,
         cos_h,
-        center,
-        scale,
-        range2,
         DotKind::Obstacle,
         &mut plots,
         max_plots,
     );
 
-    // Assign pool dots: first = car (centered, red), rest = plots in order.
+    // Assign pool dots: first = car (centered), rest = plots in order. Each
+    // pooled node is fully restyled, so its silhouette follows its new kind.
     let mut iter = dots.iter_mut();
-    // --- Car dot (always visible, centered, red) ---
-    if let Some((mut node, mut bg, mut vis, mut dot)) = iter.next() {
-        node.left = px(center - DOT_SIZE / 2.0);
-        node.top = px(center - DOT_SIZE / 2.0);
-        bg.0 = dot_color(DotKind::Car);
+    if let Some((mut node, mut bg, mut border, mut vis, mut dot)) = iter.next() {
+        let style = dot_style(DotKind::Car);
+        apply_dot_style(&mut node, &mut bg, &mut border, style);
+        let position = clamped_dot_position(Vec2::splat(MAP_CENTER), style);
+        node.left = px(position.x);
+        node.top = px(position.y);
         *vis = Visibility::Visible;
         dot.kind = DotKind::Car;
     }
-    // --- Entity dots (repurposed from the pool; extras hidden) ---
-    for (i, (mut node, mut bg, mut vis, mut dot)) in iter.enumerate() {
+    for (i, (mut node, mut bg, mut border, mut vis, mut dot)) in iter.enumerate() {
         if let Some(plot) = plots.get(i) {
-            let left = plot.x - DOT_SIZE / 2.0;
-            let top = plot.y - DOT_SIZE / 2.0;
-            node.left = px(left.clamp(0.0, MAP_SIZE - DOT_SIZE));
-            node.top = px(top.clamp(0.0, MAP_SIZE - DOT_SIZE));
-            bg.0 = dot_color(plot.kind);
+            let style = dot_style(plot.kind);
+            apply_dot_style(&mut node, &mut bg, &mut border, style);
+            let position = clamped_dot_position(Vec2::new(plot.x, plot.y), style);
+            node.left = px(position.x);
+            node.top = px(position.y);
             *vis = Visibility::Visible;
             dot.kind = plot.kind;
         } else {
@@ -250,9 +330,6 @@ fn collect_plots<'a>(
     car_pos: Vec3,
     sin_h: f32,
     cos_h: f32,
-    center: f32,
-    scale: f32,
-    range2: f32,
     kind: DotKind,
     plots: &mut Vec<Plot>,
     max_plots: usize,
@@ -267,27 +344,146 @@ fn collect_plots<'a>(
         let pos = tf.translation();
         let dx = pos.x - car_pos.x;
         let dz = pos.z - car_pos.z;
-        if dx * dx + dz * dz > range2 {
-            continue;
+        if let Some(point) = project_offset(dx, dz, sin_h, cos_h) {
+            plots.push(Plot {
+                x: point.x,
+                y: point.y,
+                kind,
+            });
         }
-        // Project onto car right / forward axes.
-        let right_comp = dx * cos_h - dz * sin_h;
-        let fwd_comp = -dx * sin_h - dz * cos_h;
-        // Map to minimap-local px (forward = up = decreasing top).
-        plots.push(Plot {
-            x: center + right_comp * scale,
-            y: center - fwd_comp * scale,
-            kind,
-        });
     }
 }
 
-/// Dot color by kind: gold = coin, white = chicken, red = car, grey = obstacle.
-fn dot_color(kind: DotKind) -> Color {
+/// Project an XZ world offset through the car's heading into minimap-local
+/// coordinates. Returning `None` keeps the radar's range circular. Forward is
+/// always decreasing UI Y; this is deliberately independent of ECS state so
+/// projection semantics can be tested directly.
+fn project_offset(dx: f32, dz: f32, sin_h: f32, cos_h: f32) -> Option<Vec2> {
+    if dx * dx + dz * dz > RANGE * RANGE {
+        return None;
+    }
+    let right_comp = dx * cos_h - dz * sin_h;
+    let fwd_comp = -dx * sin_h - dz * cos_h;
+    let scale = PLOT_SIZE / (2.0 * RANGE);
+    Some(Vec2::new(
+        MAP_CENTER + right_comp * scale,
+        MAP_CENTER - fwd_comp * scale,
+    ))
+}
+
+/// Convert a desired dot center into a clamped top-left coordinate. The clamp
+/// includes each style's full dimensions, keeping every pooled node wholly
+/// within the inner edge of the range frame.
+fn clamped_dot_position(center: Vec2, style: DotStyle) -> Vec2 {
+    Vec2::new(
+        (center.x - style.width / 2.0).clamp(PLOT_MIN, PLOT_MAX - style.width),
+        (center.y - style.height / 2.0).clamp(PLOT_MIN, PLOT_MAX - style.height),
+    )
+}
+
+/// Visual encoding by kind. Every kind has a distinct size/aspect/border
+/// signature as well as a high-contrast color, avoiding color-only meaning.
+fn dot_style(kind: DotKind) -> DotStyle {
     match kind {
-        DotKind::Coin => Color::srgb(1.0, 0.85, 0.10),
-        DotKind::Chicken => Color::srgb(0.95, 0.95, 0.95),
-        DotKind::Car => Color::srgb(1.0, 0.20, 0.20),
-        DotKind::Obstacle => Color::srgb(0.55, 0.55, 0.60),
+        // Compact square with a dark keyline.
+        DotKind::Coin => DotStyle {
+            width: 8.0,
+            height: 8.0,
+            border_width: 1.0,
+            fill: Color::srgb(1.0, 0.82, 0.05),
+            border: Color::srgb(0.20, 0.13, 0.0),
+        },
+        // Wide dash, visually distinct from every square marker.
+        DotKind::Chicken => DotStyle {
+            width: 11.0,
+            height: 6.0,
+            border_width: 1.0,
+            fill: Color::srgb(1.0, 1.0, 1.0),
+            border: Color::srgb(0.10, 0.12, 0.16),
+        },
+        // Tall marker reinforces that the car points toward map north.
+        DotKind::Car => DotStyle {
+            width: 8.0,
+            height: 12.0,
+            border_width: 1.0,
+            fill: Color::srgb(1.0, 0.12, 0.18),
+            border: Color::srgb(1.0, 0.92, 0.92),
+        },
+        // Largest square and uniquely heavy border.
+        DotKind::Obstacle => DotStyle {
+            width: 11.0,
+            height: 11.0,
+            border_width: 2.0,
+            fill: Color::srgb(0.38, 0.62, 0.82),
+            border: Color::srgb(0.04, 0.08, 0.13),
+        },
+    }
+}
+
+fn apply_dot_style(
+    node: &mut Node,
+    background: &mut BackgroundColor,
+    border: &mut BorderColor,
+    style: DotStyle,
+) {
+    node.width = px(style.width);
+    node.height = px(style.height);
+    node.border = UiRect::all(px(style.border_width));
+    background.0 = style.fill;
+    *border = BorderColor::all(style.border);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dot_styles_have_distinct_non_color_signatures() {
+        let kinds = [
+            DotKind::Coin,
+            DotKind::Chicken,
+            DotKind::Car,
+            DotKind::Obstacle,
+        ];
+        let signatures = kinds.map(|kind| {
+            let style = dot_style(kind);
+            assert!(style.width > 4.0 && style.height > 4.0);
+            (style.width, style.height, style.border_width)
+        });
+
+        for i in 0..signatures.len() {
+            for j in (i + 1)..signatures.len() {
+                assert_ne!(signatures[i], signatures[j]);
+            }
+        }
+    }
+
+    #[test]
+    fn projection_preserves_forward_and_range_semantics() {
+        let forward = project_offset(0.0, -RANGE, 0.0, 1.0).unwrap();
+        assert!((forward.x - MAP_CENTER).abs() < 0.001);
+        assert!((forward.y - PLOT_MIN).abs() < 0.001);
+        let right = project_offset(RANGE, 0.0, 0.0, 1.0).unwrap();
+        assert!((right.x - PLOT_MAX).abs() < 0.001);
+        assert!((right.y - MAP_CENTER).abs() < 0.001);
+        assert!(project_offset(RANGE + 0.01, 0.0, 0.0, 1.0).is_none());
+    }
+
+    #[test]
+    fn every_style_is_clamped_wholly_inside_inner_frame() {
+        for kind in [
+            DotKind::Coin,
+            DotKind::Chicken,
+            DotKind::Car,
+            DotKind::Obstacle,
+        ] {
+            let style = dot_style(kind);
+            for center in [Vec2::splat(-1000.0), Vec2::splat(1000.0)] {
+                let position = clamped_dot_position(center, style);
+                assert!(position.x >= PLOT_MIN && position.y >= PLOT_MIN);
+                assert!(position.x + style.width <= PLOT_MAX);
+                assert!(position.y + style.height <= PLOT_MAX);
+            }
+        }
     }
 }

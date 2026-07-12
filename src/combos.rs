@@ -13,10 +13,10 @@
 use bevy::prelude::*;
 use bevy::text::FontSize;
 
+use crate::game::SpawnSet;
 use crate::game::events::{ChickenHit, CoinCollected};
 use crate::game::resources::{RoundActive, Score};
 use crate::game::state::GameState;
-use crate::game::SpawnSet;
 use crate::palette;
 
 // ---------------------------------------------------------------------------
@@ -36,6 +36,17 @@ const BAR_HEIGHT: f32 = 6.0;
 /// ~24px text => ends ~y=40). Centered horizontally so it never overlaps the
 /// timer or the minimap (both top-right).
 const COMBO_TOP: f32 = 48.0;
+
+/// Presentation-only animation tuning. These animate existing UI components;
+/// combo hits never spawn transient entities.
+const BASE_FONT_SIZE: f32 = 32.0;
+const PUNCH_FONT_BOOST: f32 = 11.0;
+const PUNCH_DURATION: f32 = 0.20;
+const REVEAL_IN_SPEED: f32 = 12.0;
+const REVEAL_OUT_SPEED: f32 = 8.0;
+/// The final portion of the combo window pulses to warn that it is expiring.
+const URGENCY_THRESHOLD: f32 = 0.35;
+const URGENCY_PULSE_SPEED: f32 = 12.0;
 
 // ---------------------------------------------------------------------------
 // Resource
@@ -78,6 +89,33 @@ impl Combo {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::Combo;
+
+    #[test]
+    fn multiplier_thresholds_and_cap() {
+        for (count, expected) in [
+            (0, 1),
+            (4, 1),
+            (5, 2),
+            (9, 2),
+            (10, 3),
+            (14, 3),
+            (15, 4),
+            (19, 4),
+            (20, 5),
+            (100, 5),
+        ] {
+            assert_eq!(
+                Combo::multiplier_from_count(count),
+                expected,
+                "unexpected multiplier at count {count}"
+            );
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // UI markers
 // ---------------------------------------------------------------------------
@@ -92,9 +130,31 @@ struct ComboRoot;
 #[derive(Component)]
 struct ComboText;
 
-/// The depleting timer bar fill; its width is refreshed each frame.
+/// Both parts of the `xN` label. Font size, tier color, and alpha are animated
+/// together by [`update_combo_ui`].
+#[derive(Component)]
+struct ComboLabel;
+
+/// The depleting timer bar fill; its width and color are refreshed each frame.
 #[derive(Component)]
 struct ComboBarFill;
+
+/// Dark track behind the timer fill. Marked separately so its fade can be
+/// queried disjointly from [`ComboBarFill`].
+#[derive(Component)]
+struct ComboBarTrack;
+
+/// Animation state stored on the persistent combo root. It is intentionally a
+/// component rather than a stream of short-lived entities, keeping hit juice
+/// allocation-free after the UI is spawned.
+#[derive(Component)]
+struct ComboPresentation {
+    reveal: f32,
+    punch: f32,
+    urgency_phase: f32,
+    last_count: u32,
+    displayed_multiplier: u32,
+}
 
 // ---------------------------------------------------------------------------
 // Plugin
@@ -108,17 +168,16 @@ impl Plugin for CombosPlugin {
             // Fresh-round reset (skipped on resume from Paused). MUST run in
             // SpawnSet so it executes before reset_run flips RoundActive
             // (risk E11 — mirrors chickens.rs / health.rs).
+            .add_systems(OnEnter(GameState::Playing), reset_combo.in_set(SpawnSet))
+            // UI lifecycle tied to Playing (despawned on exit so a
+            // pause/resume cycle respawns it cleanly, like the HUD). Spawn
+            // after reset so presentation state always snapshots the correct
+            // fresh-round/resumed combo.
             .add_systems(
                 OnEnter(GameState::Playing),
-                reset_combo.in_set(SpawnSet),
+                spawn_combo_ui.after(reset_combo),
             )
-            // UI lifecycle tied to Playing (despawned on exit so a
-            // pause/resume cycle respawns it cleanly, like the HUD).
-            .add_systems(OnEnter(GameState::Playing), spawn_combo_ui)
-            .add_systems(
-                OnExit(GameState::Playing),
-                despawn_marker::<ComboRoot>,
-            )
+            .add_systems(OnExit(GameState::Playing), despawn_marker::<ComboRoot>)
             .add_systems(
                 Update,
                 // Chain so hits register first, then the timer ticks, then
@@ -205,7 +264,7 @@ fn reset_combo(mut combo: ResMut<Combo>, round_active: Res<RoundActive>) {
 /// badge above a thin depleting timer bar. Lives only while `Playing`
 /// (despawned by [`despawn_marker::<ComboRoot>`] on exit). Starts hidden;
 /// [`update_combo_ui`] reveals it when `multiplier > 1`.
-fn spawn_combo_ui(mut commands: Commands) {
+fn spawn_combo_ui(mut commands: Commands, combo: Res<Combo>) {
     commands
         .spawn((
             Node {
@@ -219,6 +278,13 @@ fn spawn_combo_ui(mut commands: Commands) {
                 ..default()
             },
             ComboRoot,
+            ComboPresentation {
+                reveal: 0.0,
+                punch: 0.0,
+                urgency_phase: 0.0,
+                last_count: combo.count,
+                displayed_multiplier: combo.multiplier.max(2),
+            },
             Visibility::Hidden,
         ))
         .with_children(|col| {
@@ -227,7 +293,7 @@ fn spawn_combo_ui(mut commands: Commands) {
             col.spawn((
                 Text::new("x"),
                 TextFont {
-                    font_size: FontSize::Px(32.0),
+                    font_size: FontSize::Px(BASE_FONT_SIZE),
                     ..default()
                 },
                 TextColor(palette::HUD_ACCENT.into()),
@@ -235,15 +301,17 @@ fn spawn_combo_ui(mut commands: Commands) {
                     margin: UiRect::bottom(px(4.0)),
                     ..default()
                 },
+                ComboLabel,
             ))
             .with_child((
                 TextSpan::default(),
                 TextFont {
-                    font_size: FontSize::Px(32.0),
+                    font_size: FontSize::Px(BASE_FONT_SIZE),
                     ..default()
                 },
                 TextColor(palette::HUD_ACCENT.into()),
                 ComboText,
+                ComboLabel,
             ));
             // Timer bar track (dark background) with the colored fill child.
             col.spawn((
@@ -252,7 +320,8 @@ fn spawn_combo_ui(mut commands: Commands) {
                     height: px(BAR_HEIGHT),
                     ..default()
                 },
-                BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.6)),
+                BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.0)),
+                ComboBarTrack,
             ))
             .with_child((
                 Node {
@@ -266,30 +335,120 @@ fn spawn_combo_ui(mut commands: Commands) {
         });
 }
 
-/// Refresh the multiplier text, the timer bar width, and the root visibility
-/// each frame. The display is shown only when `multiplier > 1`.
+/// Refresh and animate the multiplier label, timer bar, and visibility. A hit
+/// punches the existing text, tier changes recolor it, reveal/hide is eased,
+/// and the final part of the timer pulses toward red. No entities are spawned
+/// by this per-frame system.
 fn update_combo_ui(
     combo: Res<Combo>,
-    mut root: Query<&mut Visibility, With<ComboRoot>>,
+    time: Res<Time>,
+    mut root: Query<(&mut Visibility, &mut ComboPresentation), With<ComboRoot>>,
     mut text: Query<&mut TextSpan, With<ComboText>>,
-    mut bar: Query<&mut Node, With<ComboBarFill>>,
+    mut labels: Query<(&mut TextFont, &mut TextColor), With<ComboLabel>>,
+    mut bar_fill: Query<
+        (&mut Node, &mut BackgroundColor),
+        (With<ComboBarFill>, Without<ComboBarTrack>),
+    >,
+    mut bar_track: Query<&mut BackgroundColor, (With<ComboBarTrack>, Without<ComboBarFill>)>,
 ) {
-    let Ok(mut vis) = root.single_mut() else {
+    let Ok((mut visibility, mut presentation)) = root.single_mut() else {
         return;
     };
 
-    if combo.multiplier > 1 {
-        *vis = Visibility::Visible;
-        for mut span in &mut text {
-            **span = format!("{}", combo.multiplier);
-        }
-        let frac = (combo.timer / COMBO_WINDOW).clamp(0.0, 1.0);
-        for mut node in &mut bar {
-            node.width = px(BAR_WIDTH * frac);
-        }
-    } else {
-        *vis = Visibility::Hidden;
+    let dt = time.delta_secs();
+    let active = combo.multiplier > 1;
+
+    // A count increase means one or more hits landed this frame. Restarting a
+    // single component timer gives every increment a crisp punch without
+    // creating transient UI entities.
+    if combo.count > presentation.last_count && active {
+        presentation.punch = 1.0;
     }
+    presentation.last_count = combo.count;
+    if active {
+        presentation.displayed_multiplier = combo.multiplier;
+    }
+
+    let reveal_target = if active { 1.0 } else { 0.0 };
+    let reveal_speed = if active {
+        REVEAL_IN_SPEED
+    } else {
+        REVEAL_OUT_SPEED
+    };
+    let reveal_step = 1.0 - (-reveal_speed * dt).exp();
+    presentation.reveal += (reveal_target - presentation.reveal) * reveal_step;
+    if !active && presentation.reveal < 0.01 {
+        presentation.reveal = 0.0;
+    }
+    let reveal = presentation.reveal.clamp(0.0, 1.0);
+    // Smoothstep keeps the first and last reveal frames from popping.
+    let eased_reveal = reveal * reveal * (3.0 - 2.0 * reveal);
+    *visibility = if active || reveal > 0.0 {
+        Visibility::Visible
+    } else {
+        Visibility::Hidden
+    };
+
+    let timer_frac = (combo.timer / COMBO_WINDOW).clamp(0.0, 1.0);
+    let urgent = active && timer_frac <= URGENCY_THRESHOLD;
+    if urgent {
+        presentation.urgency_phase += dt * URGENCY_PULSE_SPEED;
+    } else {
+        presentation.urgency_phase = 0.0;
+    }
+    let urgency_pulse = if urgent {
+        (presentation.urgency_phase.sin() + 1.0) * 0.5
+    } else {
+        0.0
+    };
+
+    let punch = presentation.punch * presentation.punch;
+    let font_size =
+        BASE_FONT_SIZE + PUNCH_FONT_BOOST * punch + if urgent { 2.0 * urgency_pulse } else { 0.0 };
+    presentation.punch = (presentation.punch - dt / PUNCH_DURATION).max(0.0);
+
+    let alpha_pulse = if urgent {
+        0.72 + 0.28 * urgency_pulse
+    } else {
+        1.0
+    };
+    let alpha = eased_reveal * alpha_pulse;
+    let warning_mix = if urgent {
+        0.25 + 0.55 * urgency_pulse
+    } else {
+        0.0
+    };
+    let color = combo_tier_color(presentation.displayed_multiplier, warning_mix, alpha);
+
+    let multiplier_text = format!("{}", presentation.displayed_multiplier);
+    for mut span in &mut text {
+        **span = multiplier_text.clone();
+    }
+    for (mut font, mut text_color) in &mut labels {
+        font.font_size = FontSize::Px(font_size);
+        text_color.0 = color;
+    }
+    for (mut node, mut fill_color) in &mut bar_fill {
+        node.width = px(BAR_WIDTH * timer_frac);
+        fill_color.0 = color;
+    }
+    for mut track_color in &mut bar_track {
+        track_color.0 = Color::srgba(0.0, 0.0, 0.0, 0.6 * eased_reveal);
+    }
+}
+
+/// Distinct, increasingly hot colors make multiplier tiers readable at a
+/// glance. During urgency the current tier smoothly leans toward warning red.
+fn combo_tier_color(multiplier: u32, warning_mix: f32, alpha: f32) -> Color {
+    let tier_rgb = match multiplier {
+        2 => Vec3::new(0.20, 0.88, 1.00),   // cyan
+        3 => Vec3::new(1.00, 0.82, 0.12),   // gold
+        4 => Vec3::new(1.00, 0.42, 0.08),   // orange
+        5.. => Vec3::new(1.00, 0.18, 0.62), // hot pink
+        _ => Vec3::new(1.00, 0.80, 0.00),
+    };
+    let rgb = tier_rgb.lerp(Vec3::new(1.0, 0.08, 0.04), warning_mix.clamp(0.0, 1.0));
+    Color::srgba(rgb.x, rgb.y, rgb.z, alpha.clamp(0.0, 1.0))
 }
 
 // ---------------------------------------------------------------------------
