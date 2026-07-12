@@ -626,7 +626,7 @@ fn spin_coins(mut coins: Query<&mut Transform, With<Coin>>, time: Res<Time>) {
 
 fn collect_coins(
     car: Query<&Transform, (With<Car>, Without<Coin>)>,
-    mut coins: Query<(Entity, &Transform), (With<Coin>, Without<Car>)>,
+    mut coins: Query<(Entity, &GlobalTransform), (With<Coin>, Without<Car>)>,
     mut commands: Commands,
     mut score: ResMut<Score>,
     mut timeleft: ResMut<TimeLeft>,
@@ -636,7 +636,9 @@ fn collect_coins(
         return;
     };
     for (e, coin_t) in &mut coins {
-        if car_t.translation.distance(coin_t.translation) < 1.2 {
+        // Coins are chunk-root children -> `Transform` is local; use
+        // `GlobalTransform` for the world position or pickup won't line up.
+        if car_t.translation.distance(coin_t.translation()) < 1.2 {
             commands.entity(e).despawn();
             score.coins += 1;
             timeleft.0 += 3.0; // time bonus!

@@ -317,8 +317,8 @@ fn brake_lights(
 ///   `ObstacleHit` message so the health system can apply damage.
 pub fn physics_collisions(
     mut car: Query<(&mut Car, &mut Transform), With<Car>>,
-    curbs: Query<(&Curb, &Transform), (With<Curb>, Without<Car>, Without<Collider>)>,
-    obstacles: Query<(&Collider, &Transform), (With<Collider>, Without<Car>, Without<Curb>)>,
+    curbs: Query<(&Curb, &GlobalTransform), (With<Curb>, Without<Car>, Without<Collider>)>,
+    obstacles: Query<(&Collider, &GlobalTransform), (With<Collider>, Without<Car>, Without<Curb>)>,
     time: Res<Time>,
     mut obstacle_hits: MessageWriter<ObstacleHit>,
 ) {
@@ -329,10 +329,14 @@ pub fn physics_collisions(
     const CAR_RADIUS: f32 = 0.9;
 
     // --- Ground height: hop up onto any curb the car is over. ---
+    // Curbs (and obstacles/coins) are children of chunk roots, so their
+    // `Transform` is LOCAL to the chunk — use `GlobalTransform` for world
+    // positions or collision won't line up with the visuals.
     let mut target_y = 0.0_f32;
     for (curb, ct) in &curbs {
-        let dx = tf.translation.x - ct.translation.x;
-        let dz = tf.translation.z - ct.translation.z;
+        let cpos = ct.translation();
+        let dx = tf.translation.x - cpos.x;
+        let dz = tf.translation.z - cpos.z;
         if dx.abs() <= curb.half_x && dz.abs() <= curb.half_z {
             target_y = target_y.max(curb.height);
         }
@@ -342,8 +346,9 @@ pub fn physics_collisions(
     // --- Obstacle collision: circle-vs-AABB pushout + kill speed into wall. ---
     let forward = Vec3::new(-car.heading.sin(), 0.0, -car.heading.cos());
     for (collider, ot) in &obstacles {
-        let dx = tf.translation.x - ot.translation.x;
-        let dz = tf.translation.z - ot.translation.z;
+        let opos = ot.translation();
+        let dx = tf.translation.x - opos.x;
+        let dz = tf.translation.z - opos.z;
         let closest_x = dx.clamp(-collider.half_x, collider.half_x);
         let closest_z = dz.clamp(-collider.half_z, collider.half_z);
         let px = dx - closest_x;

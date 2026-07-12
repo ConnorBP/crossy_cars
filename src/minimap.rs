@@ -153,9 +153,9 @@ fn despawn_marker<M: Component>(mut commands: Commands, q: Query<Entity, With<M>
 /// size.
 fn update_minimap(
     car: Query<(&Car, &Transform)>,
-    coins: Query<&Transform, With<Coin>>,
-    chickens: Query<&Transform, With<Chicken>>,
-    obstacles: Query<&Transform, With<Collider>>,
+    coins: Query<&GlobalTransform, With<Coin>>,
+    chickens: Query<&GlobalTransform, With<Chicken>>,
+    obstacles: Query<&GlobalTransform, With<Collider>>,
     mut dots: Query<(&mut Node, &mut BackgroundColor, &mut Visibility, &mut MapDot)>,
     mut plots: Local<Vec<Plot>>,
 ) {
@@ -246,7 +246,7 @@ fn update_minimap(
 /// `plots`, stopping once `plots` reaches `max_plots`. Entities are projected
 /// onto the car's right/forward axes so north = car forward.
 fn collect_plots<'a>(
-    iter: impl Iterator<Item = &'a Transform>,
+    iter: impl Iterator<Item = &'a GlobalTransform>,
     car_pos: Vec3,
     sin_h: f32,
     cos_h: f32,
@@ -261,8 +261,12 @@ fn collect_plots<'a>(
         if plots.len() >= max_plots {
             break;
         }
-        let dx = tf.translation.x - car_pos.x;
-        let dz = tf.translation.z - car_pos.z;
+        // Coins/obstacles are chunk-root children -> their `Transform` is
+        // local; `GlobalTransform` gives the world position so minimap dots
+        // line up with the actual entities.
+        let pos = tf.translation();
+        let dx = pos.x - car_pos.x;
+        let dz = pos.z - car_pos.z;
         if dx * dx + dz * dz > range2 {
             continue;
         }
