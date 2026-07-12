@@ -15,6 +15,7 @@ Each fresh round begins with a 3-2-1 countdown, followed by **60 seconds** of ac
 - Avoid pedestrians, cows, and moose. Hitting a critter costs health and removes chicken-score points.
 - Buildings, roadside obstacles, and moving traffic are solid. Hard impacts damage the car; reaching zero health ends the round.
 - Difficulty rises during the round, adding and accelerating oncoming traffic.
+- Two deterministic mid-run events temporarily surge traffic, chickens, critters, or combo rewards; banners announce each event.
 - Power-ups provide speed boost, coin magnet, health recovery, bonus time, or a mega-coin reward.
 - The best total score persists between rounds: browser builds use `localStorage`; native builds use `best_score.txt` in the process working directory.
 

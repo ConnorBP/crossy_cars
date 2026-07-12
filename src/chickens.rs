@@ -31,6 +31,7 @@ use crate::game::events::ChickenHit;
 use crate::game::resources::{GameConfig, Score};
 use crate::game::state::GameState;
 use crate::modifiers::ActiveModifier;
+use crate::run_events::{ActiveEvent, EventKind, RoundEventStarted};
 
 // ---------------------------------------------------------------------------
 // Tuning constants
@@ -38,6 +39,12 @@ use crate::modifiers::ActiveModifier;
 
 /// Initial chickens scattered around the car at the start of a fresh round.
 const CHICKEN_COUNT: usize = 14;
+
+/// Hard cap for the temporary flock added by a single Chicken Burst start.
+/// Keeping this independent of road-condition population tuning makes the
+/// event additive without changing the fresh-round target.
+const CHICKEN_BURST_SPAWN_LIMIT: usize = CHICKEN_COUNT;
+const CHICKEN_BASE_SCORE: u32 = 1;
 
 /// Chicken wander speed as a fraction of `GameConfig::max_speed` (chickens are
 /// much slower than the car). With the default max_speed 12.0 → 2.4 u/s.
@@ -98,6 +105,12 @@ pub struct Chicken {
     pub timer: f32,
     pub bob: f32,
 }
+
+/// Marks temporary Chicken Burst additions. They participate in hits and
+/// respawn after hits normally, but natural wander recycling retires them so
+/// the flock eventually returns to the modifier-adjusted baseline population.
+#[derive(Component)]
+struct ChickenBurstExtra;
 
 /// Set after round cleanup and consumed by the next fresh-round spawn. This
 /// remains reliable whether `reset_run` executes before or after `SpawnSet`,
@@ -287,6 +300,12 @@ impl Plugin for ChickensPlugin {
                 Update,
                 update_particles.run_if(in_state(GameState::Playing)),
             )
+            // This consumer only reads the car and issues deferred spawns, so
+            // it does not conflict with systems mutating existing chickens.
+            .add_systems(
+                Update,
+                spawn_chicken_burst.run_if(in_state(GameState::Playing)),
+            )
             // Recursive despawn of all chickens + particles on round end.
             .add_systems(
                 OnEnter(GameState::GameOver),
@@ -342,6 +361,51 @@ fn spawn_chickens(
     }
 }
 
+/// Consume the one-shot run-event start and add a bounded temporary flock
+/// ahead of the car. The reader is intentionally owned by this system; other
+/// event consumers retain their own independent message cursors.
+fn spawn_chicken_burst(
+    mut commands: Commands,
+    assets: Res<ChickenAssets>,
+    car: Query<&Transform, (With<Car>, Without<Chicken>)>,
+    mut starts: MessageReader<RoundEventStarted>,
+    mut seed: Local<u32>,
+) {
+    // Do not consume the one-shot start until its car-relative origin exists.
+    let Ok(car_t) = car.single() else {
+        return;
+    };
+    let spawn_count = starts.read().fold(0_usize, |count, started| {
+        if started.0 == EventKind::ChickenBurst {
+            count
+                .saturating_add(chicken_burst_spawn_count(started.0))
+                .min(CHICKEN_BURST_SPAWN_LIMIT)
+        } else {
+            count
+        }
+    });
+    if spawn_count == 0 {
+        return;
+    }
+
+    ensure_seeded(&mut seed, 0xC1C0_B057);
+    let car_pos = car_t.translation;
+    let forward = horizontal_forward(car_t.rotation);
+
+    for _ in 0..spawn_count {
+        let pos = respawn_ahead_pos(car_pos, forward, &mut seed);
+        let entity = spawn_one_rich_chicken(
+            &mut commands,
+            &assets,
+            pos,
+            rand_dir_xz(&mut seed),
+            1.5 + rand(&mut seed) * 2.0,
+            rand(&mut seed) * TAU,
+        );
+        commands.entity(entity).insert(ChickenBurstExtra);
+    }
+}
+
 /// Build one rich chicken as a parent + children hierarchy.
 ///
 /// Hierarchy:
@@ -369,7 +433,7 @@ fn spawn_one_rich_chicken(
     dir: Vec3,
     timer: f32,
     bob: f32,
-) {
+) -> Entity {
     commands
         .spawn((
             Transform::from_translation(pos),
@@ -437,7 +501,8 @@ fn spawn_one_rich_chicken(
                 MeshMaterial3d(assets.shadow_mat.clone()),
                 Transform::from_xyz(0.0, 0.02, 0.0),
             ));
-        });
+        })
+        .id()
 }
 
 // ---------------------------------------------------------------------------
@@ -452,7 +517,13 @@ fn wander_chickens(
     assets: Res<ChickenAssets>,
     cfg: Res<GameConfig>,
     car: Query<&Transform, (With<Car>, Without<Chicken>)>,
-    mut chickens: Query<(Entity, &mut Chicken, &mut Transform, &Children)>,
+    mut chickens: Query<(
+        Entity,
+        &mut Chicken,
+        &mut Transform,
+        &Children,
+        Option<&ChickenBurstExtra>,
+    )>,
     mut bodies: Query<(&mut Transform, &ChickenBody), (Without<Chicken>, Without<Car>)>,
     time: Res<Time>,
     mut seed: Local<u32>,
@@ -466,7 +537,7 @@ fn wander_chickens(
     let dt = time.delta_secs();
     let speed = cfg.max_speed * CHICKEN_SPEED_RATIO;
 
-    for (e, mut chicken, mut tf, children) in &mut chickens {
+    for (e, mut chicken, mut tf, children, burst_extra) in &mut chickens {
         // --- Periodically pick a new random heading ---
         chicken.timer -= dt;
         if chicken.timer <= 0.0 {
@@ -484,15 +555,19 @@ fn wander_chickens(
         // --- Recycle chickens that fell behind or drifted too far away ---
         if should_recycle(tf.translation, car_pos, car_forward) {
             commands.entity(e).despawn();
-            let new_pos = respawn_ahead_pos(car_pos, car_forward, &mut seed);
-            spawn_one_rich_chicken(
-                &mut commands,
-                &assets,
-                new_pos,
-                rand_dir_xz(&mut seed),
-                1.5 + rand(&mut seed) * 2.0,
-                rand(&mut seed) * TAU,
-            );
+            // Burst additions naturally drain from the flock; ordinary
+            // chickens still recycle to preserve the road-condition target.
+            if burst_extra.is_none() {
+                let new_pos = respawn_ahead_pos(car_pos, car_forward, &mut seed);
+                spawn_one_rich_chicken(
+                    &mut commands,
+                    &assets,
+                    new_pos,
+                    rand_dir_xz(&mut seed),
+                    1.5 + rand(&mut seed) * 2.0,
+                    rand(&mut seed) * TAU,
+                );
+            }
             continue;
         }
 
@@ -513,16 +588,18 @@ fn wander_chickens(
 // ---------------------------------------------------------------------------
 
 /// On car-to-chicken contact (XZ distance < `HIT_RADIUS`): despawn the chicken,
-/// bump `Score.chickens` by its normal point plus any road-condition bonus,
+/// bump `Score.chickens` by its normal point plus road-condition and active
+/// event bonuses,
 /// write a `ChickenHit` message (audio.rs plays the hit SFX), spawn a feather +
-/// puff particle burst, and respawn one chicken ahead of the car so the flock
-/// population stays constant at its fresh-round target.
+/// puff particle burst, and respawn one chicken ahead of the car. Temporary
+/// burst status follows hit replacements until wander recycling retires them.
 fn hit_chickens(
     mut commands: Commands,
     assets: Res<ChickenAssets>,
     modifier: Res<ActiveModifier>,
+    event: Res<ActiveEvent>,
     car: Query<&Transform, (With<Car>, Without<Chicken>)>,
-    chickens: Query<(Entity, &Transform), With<Chicken>>,
+    chickens: Query<(Entity, &Transform, Option<&ChickenBurstExtra>), With<Chicken>>,
     mut score: ResMut<Score>,
     mut chicken_hits: MessageWriter<ChickenHit>,
     mut seed: Local<u32>,
@@ -535,19 +612,23 @@ fn hit_chickens(
     let car_forward = horizontal_forward(car_t.rotation);
     let hit_r2 = HIT_RADIUS * HIT_RADIUS;
 
-    for (e, chicken_t) in &chickens {
+    for (e, chicken_t, burst_extra) in &chickens {
         let dx = car_pos.x - chicken_t.translation.x;
         let dz = car_pos.z - chicken_t.translation.z;
         if dx * dx + dz * dz < hit_r2 {
             commands.entity(e).despawn();
             // Keep combo handling on the single ChickenHit message; only the
-            // direct chicken award receives the road-condition bonus here.
-            score.chickens += chicken_score_per_hit(&modifier);
+            // direct award receives road-condition and run-event bonuses here.
+            score.chickens = score
+                .chickens
+                .saturating_add(chicken_score_per_hit(&modifier, &event));
             chicken_hits.write(ChickenHit);
             spawn_particle_burst(&mut commands, &assets, chicken_t.translation, &mut seed);
-            // Respawn ahead so the player always has chickens to chase.
+            // Preserve both the modifier-adjusted baseline and the temporary
+            // burst population through hits. Wander recycling alone retires
+            // burst extras as they naturally leave the active area.
             let new_pos = respawn_ahead_pos(car_pos, car_forward, &mut seed);
-            spawn_one_rich_chicken(
+            let replacement = spawn_one_rich_chicken(
                 &mut commands,
                 &assets,
                 new_pos,
@@ -555,6 +636,9 @@ fn hit_chickens(
                 1.5 + rand(&mut seed) * 2.0,
                 rand(&mut seed) * TAU,
             );
+            if burst_extra.is_some() {
+                commands.entity(replacement).insert(ChickenBurstExtra);
+            }
         }
     }
 }
@@ -698,10 +782,32 @@ const fn effective_chicken_target(modifier: &ActiveModifier) -> usize {
     modifier.chicken_target(CHICKEN_COUNT)
 }
 
+/// Number of temporary additions requested by an event start. Deriving the
+/// delta from the stable event target API keeps unrelated events neutral, and
+/// the explicit cap protects against future multiplier changes.
+const fn chicken_burst_spawn_count(kind: EventKind) -> usize {
+    let requested = kind
+        .chicken_target(CHICKEN_COUNT)
+        .saturating_sub(CHICKEN_COUNT);
+    if requested > CHICKEN_BURST_SPAWN_LIMIT {
+        CHICKEN_BURST_SPAWN_LIMIT
+    } else {
+        requested
+    }
+}
+
+const fn direct_chicken_score(base: u32, road_bonus: u32, event_bonus: u32) -> u32 {
+    base.saturating_add(road_bonus).saturating_add(event_bonus)
+}
+
 /// Direct score awarded by one chicken hit. Combo scoring remains driven by
 /// the single `ChickenHit` message and is deliberately not included here.
-const fn chicken_score_per_hit(modifier: &ActiveModifier) -> u32 {
-    1 + modifier.chicken_score_bonus()
+const fn chicken_score_per_hit(modifier: &ActiveModifier, event: &ActiveEvent) -> u32 {
+    direct_chicken_score(
+        CHICKEN_BASE_SCORE,
+        modifier.chicken_score_bonus(),
+        event.chicken_score_bonus(),
+    )
 }
 
 /// Tiny LCG (matches `world.rs::rand`) — deterministic pseudo-random 0..1
@@ -761,7 +867,7 @@ fn respawn_ahead_pos(car_pos: Vec3, car_forward: Vec3, seed: &mut u32) -> Vec3 {
     car_relative_ground_pos(car_pos, car_forward, ahead, lateral)
 }
 
-/// Seed a `Local<u32>` RNG on first use with a per-system constant so the three
+/// Seed a `Local<u32>` RNG on first use with a per-system constant so the
 /// systems' sequences don't start correlated (the LCG never produces 0 from a
 /// non-zero seed, so this fires exactly once per system).
 fn ensure_seeded(seed: &mut u32, initial: u32) {
@@ -787,14 +893,33 @@ mod tests {
     }
 
     #[test]
-    fn chicken_frenzy_adds_one_direct_point_per_hit() {
+    fn direct_hit_score_combines_road_condition_and_event_bonuses() {
         let standard = ActiveModifier(ModifierKind::Standard);
         let frenzy = ActiveModifier(ModifierKind::ChickenFrenzy);
         let glass_cannon = ActiveModifier(ModifierKind::GlassCannon);
+        let inactive = ActiveEvent(None);
+        let burst = ActiveEvent(Some(EventKind::ChickenBurst));
+        let traffic = ActiveEvent(Some(EventKind::TrafficSurge));
 
-        assert_eq!(chicken_score_per_hit(&standard), 1);
-        assert_eq!(chicken_score_per_hit(&frenzy), 2);
-        assert_eq!(chicken_score_per_hit(&glass_cannon), 1);
+        assert_eq!(chicken_score_per_hit(&standard, &inactive), 1);
+        assert_eq!(chicken_score_per_hit(&frenzy, &inactive), 2);
+        assert_eq!(chicken_score_per_hit(&standard, &burst), 2);
+        assert_eq!(chicken_score_per_hit(&frenzy, &burst), 3);
+        assert_eq!(chicken_score_per_hit(&glass_cannon, &traffic), 1);
+        assert_eq!(direct_chicken_score(u32::MAX, 1, 1), u32::MAX);
+        assert_eq!(direct_chicken_score(1, u32::MAX, 1), u32::MAX);
+    }
+
+    #[test]
+    fn chicken_burst_additions_are_event_specific_and_bounded() {
+        assert_eq!(
+            chicken_burst_spawn_count(EventKind::ChickenBurst),
+            CHICKEN_COUNT
+        );
+        assert_eq!(chicken_burst_spawn_count(EventKind::TrafficSurge), 0);
+        assert_eq!(chicken_burst_spawn_count(EventKind::ComboFrenzy), 0);
+        assert_eq!(chicken_burst_spawn_count(EventKind::CritterBurst), 0);
+        assert!(chicken_burst_spawn_count(EventKind::ChickenBurst) <= CHICKEN_BURST_SPAWN_LIMIT);
     }
 
     #[test]

@@ -9,7 +9,8 @@
 //! already add +1 to `Score.chickens` / `Score.coins` per hit. This module
 //! adds the **bonus** on top: `score.chickens += multiplier - 1` (and likewise
 //! for coins). Standard therefore totals `multiplier` points per hit; round
-//! modifiers may scale only the bonus while the originating +1 stays intact.
+//! modifiers and events may scale only the bonus while the originating +1
+//! stays intact.
 
 use bevy::prelude::*;
 use bevy::text::FontSize;
@@ -20,6 +21,7 @@ use crate::game::resources::{RoundActive, Score};
 use crate::game::state::GameState;
 use crate::modifiers::ActiveModifier;
 use crate::palette;
+use crate::run_events::ActiveEvent;
 
 // ---------------------------------------------------------------------------
 // Tuning constants
@@ -93,16 +95,18 @@ impl Combo {
 
 /// Bonus owned by this module for one hit. The hit's base point is awarded by
 /// the originating gameplay system and is deliberately never multiplied.
-fn combo_bonus_for_hit(multiplier: u32, modifier: &ActiveModifier) -> u32 {
+fn combo_bonus_for_hit(multiplier: u32, modifier: &ActiveModifier, event: &ActiveEvent) -> u32 {
     multiplier
         .saturating_sub(1)
         .saturating_mul(modifier.combo_bonus_multiplier())
+        .saturating_mul(event.combo_bonus_multiplier())
 }
 
 #[cfg(test)]
 mod tests {
     use super::{Combo, combo_bonus_for_hit};
     use crate::modifiers::{ActiveModifier, ModifierKind};
+    use crate::run_events::{ActiveEvent, EventKind};
 
     #[test]
     fn multiplier_thresholds_and_cap() {
@@ -130,14 +134,18 @@ mod tests {
     fn standard_and_glass_cannon_only_scale_the_bonus() {
         let standard = ActiveModifier(ModifierKind::Standard);
         let glass_cannon = ActiveModifier(ModifierKind::GlassCannon);
+        let event = ActiveEvent::default();
 
-        assert_eq!(combo_bonus_for_hit(4, &standard), 3);
-        assert_eq!(combo_bonus_for_hit(4, &glass_cannon), 6);
+        assert_eq!(combo_bonus_for_hit(4, &standard, &event), 3);
+        assert_eq!(combo_bonus_for_hit(4, &glass_cannon, &event), 6);
         // Including the point awarded by the hit's owning system, the awards
         // are 4 and 7 rather than 4 and 8: the base point stays unscaled.
-        assert_eq!(1_u32.saturating_add(combo_bonus_for_hit(4, &standard)), 4);
         assert_eq!(
-            1_u32.saturating_add(combo_bonus_for_hit(4, &glass_cannon)),
+            1_u32.saturating_add(combo_bonus_for_hit(4, &standard, &event)),
+            4
+        );
+        assert_eq!(
+            1_u32.saturating_add(combo_bonus_for_hit(4, &glass_cannon, &event)),
             7
         );
     }
@@ -145,8 +153,39 @@ mod tests {
     #[test]
     fn combo_bonus_math_saturates() {
         let glass_cannon = ActiveModifier(ModifierKind::GlassCannon);
-        assert_eq!(combo_bonus_for_hit(0, &glass_cannon), 0);
-        assert_eq!(combo_bonus_for_hit(u32::MAX, &glass_cannon), u32::MAX);
+        let event = ActiveEvent::default();
+        assert_eq!(combo_bonus_for_hit(0, &glass_cannon, &event), 0);
+        assert_eq!(
+            combo_bonus_for_hit(u32::MAX, &glass_cannon, &event),
+            u32::MAX
+        );
+    }
+
+    #[test]
+    fn standard_and_combo_frenzy_compose_on_the_bonus_only() {
+        let standard = ActiveModifier(ModifierKind::Standard);
+        let frenzy = ActiveEvent(Some(EventKind::ComboFrenzy));
+
+        assert_eq!(combo_bonus_for_hit(4, &standard, &frenzy), 6);
+        assert_eq!(
+            1_u32.saturating_add(combo_bonus_for_hit(4, &standard, &frenzy)),
+            7
+        );
+    }
+
+    #[test]
+    fn glass_cannon_and_combo_frenzy_compose_and_saturate() {
+        let glass_cannon = ActiveModifier(ModifierKind::GlassCannon);
+        let frenzy = ActiveEvent(Some(EventKind::ComboFrenzy));
+
+        assert_eq!(combo_bonus_for_hit(4, &glass_cannon, &frenzy), 12);
+        assert_eq!(combo_bonus_for_hit(0, &glass_cannon, &frenzy), 0);
+        // The modifier product still fits, then the event product saturates.
+        let event_saturates = u32::MAX / 4 + 2;
+        assert_eq!(
+            combo_bonus_for_hit(event_saturates, &glass_cannon, &frenzy),
+            u32::MAX
+        );
     }
 }
 
@@ -230,8 +269,9 @@ impl Plugin for CombosPlugin {
 /// Read `ChickenHit` and `CoinCollected` messages. On any hit: increment the
 /// combo counter, refresh the timer to [`COMBO_WINDOW`], recompute the
 /// multiplier, and add the bonus (`multiplier - 1`) to `Score` on top of the
-/// +1 the existing systems already added. Glass Cannon scales only that bonus;
-/// Standard therefore keeps the original total-per-hit behavior exactly.
+/// +1 the existing systems already added. Glass Cannon and Combo Frenzy scale
+/// only that bonus; with no active event, Standard keeps the original
+/// total-per-hit behavior exactly.
 ///
 /// `ChickenHit` / `CoinCollected` are already registered as messages in
 /// `game/mod.rs`; this module only **reads** them (never re-registers).
@@ -241,6 +281,7 @@ fn register_hit(
     mut combo: ResMut<Combo>,
     mut score: ResMut<Score>,
     modifier: Res<ActiveModifier>,
+    event: Res<ActiveEvent>,
 ) {
     // Process each hit individually so the counter + multiplier advance
     // correctly even if multiple hits arrive in one frame (rare but possible
@@ -250,18 +291,20 @@ fn register_hit(
         combo.timer = COMBO_WINDOW;
         combo.multiplier = Combo::multiplier_from_count(combo.count);
         // Bonus on top of the base +1 from chickens.rs::hit_chickens.
-        score.chickens = score
-            .chickens
-            .saturating_add(combo_bonus_for_hit(combo.multiplier, &modifier));
+        score.chickens =
+            score
+                .chickens
+                .saturating_add(combo_bonus_for_hit(combo.multiplier, &modifier, &event));
     }
     for _ in coin_hits.read() {
         combo.count = combo.count.saturating_add(1);
         combo.timer = COMBO_WINDOW;
         combo.multiplier = Combo::multiplier_from_count(combo.count);
         // Bonus on top of the base +1 from world.rs::collect_coins.
-        score.coins = score
-            .coins
-            .saturating_add(combo_bonus_for_hit(combo.multiplier, &modifier));
+        score.coins =
+            score
+                .coins
+                .saturating_add(combo_bonus_for_hit(combo.multiplier, &modifier, &event));
     }
 }
 

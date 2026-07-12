@@ -32,6 +32,7 @@ use crate::game::resources::{GameConfig, GameOverReason, Score};
 use crate::game::state::GameState;
 use crate::health::Health;
 use crate::modifiers::ActiveModifier;
+use crate::run_events::{EventKind, RoundEventStarted};
 
 // ---------------------------------------------------------------------------
 // Tuning constants
@@ -112,12 +113,18 @@ pub struct Critter {
 
 /// Which kind of critter this is — drives the model built in
 /// `spawn_one_critter` and the wander speed.
-#[derive(Component, Clone, Copy, Debug)]
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CritterKind {
     Pedestrian,
     Cow,
     Moose,
 }
+
+/// Marks the additional critters created by a mid-run `CritterBurst`. Hits
+/// preserve the marker on their replacement, while ordinary distance/behind
+/// recycling despawns them without replacement so the burst drains naturally.
+#[derive(Component)]
+struct CritterBurstExtra;
 
 /// The bob-animated body group of a critter (parent of the body mesh, head,
 /// spots, antlers, eyes). `base_y` is the resting local Y offset;
@@ -402,7 +409,7 @@ impl Plugin for CrittersPlugin {
             )
             .add_systems(
                 Update,
-                update_particles.run_if(in_state(GameState::Playing)),
+                (spawn_critter_burst, update_particles).run_if(in_state(GameState::Playing)),
             )
             // Recursive despawn of all critters + particles on round end /
             // return to menu.
@@ -470,6 +477,48 @@ fn spawn_critters(
     }
 }
 
+/// Consume this system's independent event cursor and add one deterministic,
+/// mixed group ahead of the car for each `CritterBurst` start. The read-only
+/// car query and deferred spawns keep this system disjoint from existing
+/// critters.
+fn spawn_critter_burst(
+    mut commands: Commands,
+    assets: Res<CritterAssets>,
+    cfg: Res<GameConfig>,
+    car: Query<&Transform, (With<Car>, Without<Critter>)>,
+    mut starts: MessageReader<RoundEventStarted>,
+    mut seed: Local<u32>,
+) {
+    let additional_count: usize = starts
+        .read()
+        .map(|started| critter_burst_spawn_count(started.0))
+        .sum();
+    if additional_count == 0 {
+        return;
+    }
+
+    let Ok(car_t) = car.single() else {
+        return;
+    };
+    ensure_seeded(&mut seed, 0xC817_7E25);
+    let car_pos = car_t.translation;
+    let forward = horizontal_forward(car_t.rotation);
+
+    for index in 0..additional_count {
+        let entity = spawn_one_critter(
+            &mut commands,
+            &assets,
+            &cfg,
+            respawn_ahead_pos(car_pos, forward, &mut seed),
+            burst_critter_kind(index),
+            rand_dir_xz(&mut seed),
+            1.5 + rand(&mut seed) * 2.0,
+            rand(&mut seed) * TAU,
+        );
+        commands.entity(entity).insert(CritterBurstExtra);
+    }
+}
+
 /// Build one critter as a parent + children hierarchy. The body group
 /// (`CritterBody`) is animated by `wander_critters`: its `translation.y` bobs
 /// and its `rotation.z` sways with the waddle phase.
@@ -491,7 +540,7 @@ fn spawn_one_critter(
     dir: Vec3,
     timer: f32,
     bob: f32,
-) {
+) -> Entity {
     let speed = critter_speed(kind, cfg);
     let base_y = critter_body_base_y(kind);
 
@@ -530,7 +579,8 @@ fn spawn_one_critter(
                 MeshMaterial3d(assets.shadow_mat.clone()),
                 Transform::from_xyz(0.0, 0.02, 0.0).with_scale(Vec3::new(sw, 1.0, sl)),
             ));
-        });
+        })
+        .id()
 }
 
 /// Pedestrian model: capsule torso + sphere head + dark pants legs. Front
@@ -703,7 +753,16 @@ fn wander_critters(
     assets: Res<CritterAssets>,
     cfg: Res<GameConfig>,
     car: Query<&Transform, (With<Car>, Without<Critter>)>,
-    mut critters: Query<(Entity, &mut Critter, &mut Transform, &Children), Without<Car>>,
+    mut critters: Query<
+        (
+            Entity,
+            &mut Critter,
+            &mut Transform,
+            &Children,
+            Has<CritterBurstExtra>,
+        ),
+        Without<Car>,
+    >,
     mut bodies: Query<(&mut Transform, &CritterBody), (Without<Critter>, Without<Car>)>,
     time: Res<Time>,
     mut seed: Local<u32>,
@@ -716,7 +775,7 @@ fn wander_critters(
     let car_forward = horizontal_forward(car_t.rotation);
     let dt = time.delta_secs();
 
-    for (e, mut critter, mut tf, children) in &mut critters {
+    for (e, mut critter, mut tf, children, burst_extra) in &mut critters {
         // --- Periodically pick a new random heading ---
         critter.timer -= dt;
         if critter.timer <= 0.0 {
@@ -734,22 +793,24 @@ fn wander_critters(
         // --- Recycle critters that fell behind or drifted too far away ---
         if should_recycle(tf.translation, car_pos, car_forward) {
             commands.entity(e).despawn();
-            let new_pos = respawn_ahead_pos(car_pos, car_forward, &mut seed);
-            let kind = match (rand(&mut seed) * 3.0) as u32 {
-                0 => CritterKind::Pedestrian,
-                1 => CritterKind::Cow,
-                _ => CritterKind::Moose,
-            };
-            spawn_one_critter(
-                &mut commands,
-                &assets,
-                &cfg,
-                new_pos,
-                kind,
-                rand_dir_xz(&mut seed),
-                1.5 + rand(&mut seed) * 2.0,
-                rand(&mut seed) * TAU,
-            );
+            if !burst_extra {
+                let new_pos = respawn_ahead_pos(car_pos, car_forward, &mut seed);
+                let kind = match (rand(&mut seed) * 3.0) as u32 {
+                    0 => CritterKind::Pedestrian,
+                    1 => CritterKind::Cow,
+                    _ => CritterKind::Moose,
+                };
+                spawn_one_critter(
+                    &mut commands,
+                    &assets,
+                    &cfg,
+                    new_pos,
+                    kind,
+                    rand_dir_xz(&mut seed),
+                    1.5 + rand(&mut seed) * 2.0,
+                    rand(&mut seed) * TAU,
+                );
+            }
             continue;
         }
 
@@ -779,7 +840,7 @@ fn hit_critters(
     assets: Res<CritterAssets>,
     cfg: Res<GameConfig>,
     mut car: Query<(&mut Car, &Transform), Without<Critter>>,
-    critters: Query<(Entity, &Transform, &CritterKind), With<Critter>>,
+    critters: Query<(Entity, &Transform, &CritterKind, Has<CritterBurstExtra>), With<Critter>>,
     mut health: ResMut<Health>,
     mut score: ResMut<Score>,
     mut critter_hits: MessageWriter<CritterHit>,
@@ -798,7 +859,7 @@ fn hit_critters(
     let car_forward = horizontal_forward(car_t.rotation);
     let hit_r2 = HIT_RADIUS * HIT_RADIUS;
 
-    for (e, critter_t, &kind) in &critters {
+    for (e, critter_t, &kind, burst_extra) in &critters {
         let dx = car_pos.x - critter_t.translation.x;
         let dz = car_pos.z - critter_t.translation.z;
         if dx * dx + dz * dz < hit_r2 {
@@ -835,7 +896,7 @@ fn hit_critters(
 
             // --- Respawn a critter ahead so there's always something to avoid ---
             let new_pos = respawn_ahead_pos(car_pos, car_forward, &mut seed);
-            spawn_one_critter(
+            let replacement = spawn_one_critter(
                 &mut commands,
                 &assets,
                 &cfg,
@@ -845,6 +906,9 @@ fn hit_critters(
                 1.5 + rand(&mut seed) * 2.0,
                 rand(&mut seed) * TAU,
             );
+            if burst_extra {
+                commands.entity(replacement).insert(CritterBurstExtra);
+            }
         }
     }
 }
@@ -984,8 +1048,28 @@ fn cleanup_particles(
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Number of additional critters produced by a single event-start message.
+/// Keeping this independent from `ActiveEvent` prevents mid-run events from
+/// changing the fresh-round population target.
+const fn critter_burst_spawn_count(kind: EventKind) -> usize {
+    match kind {
+        EventKind::CritterBurst => CRITTER_COUNT,
+        _ => 0,
+    }
+}
+
+/// Stable mixed ordering guarantees every burst contains all three kinds.
+const fn burst_critter_kind(index: usize) -> CritterKind {
+    match index % 3 {
+        0 => CritterKind::Pedestrian,
+        1 => CritterKind::Cow,
+        _ => CritterKind::Moose,
+    }
+}
+
 /// Fresh-round critter population after applying the active road condition.
-/// Recycling and hits replace exactly one critter, so this target stays fixed.
+/// Baseline recycling and hits replace exactly one critter; burst extras are
+/// deliberately outside this target and retire through natural recycling.
 const fn effective_critter_target(modifier: &ActiveModifier) -> usize {
     CRITTER_COUNT * modifier.critter_count_multiplier()
 }
@@ -1117,6 +1201,29 @@ fn critter_shadow_size(kind: CritterKind) -> (f32, f32) {
 mod tests {
     use super::*;
     use crate::modifiers::ModifierKind;
+
+    #[test]
+    fn only_critter_burst_spawns_one_mixed_base_count() {
+        assert_eq!(
+            critter_burst_spawn_count(EventKind::CritterBurst),
+            CRITTER_COUNT
+        );
+        assert_eq!(critter_burst_spawn_count(EventKind::TrafficSurge), 0);
+        assert_eq!(critter_burst_spawn_count(EventKind::ChickenBurst), 0);
+        assert_eq!(critter_burst_spawn_count(EventKind::ComboFrenzy), 0);
+
+        let kinds: Vec<_> = (0..CRITTER_COUNT).map(burst_critter_kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                CritterKind::Pedestrian,
+                CritterKind::Cow,
+                CritterKind::Moose,
+                CritterKind::Pedestrian,
+                CritterKind::Cow,
+            ]
+        );
+    }
 
     #[test]
     fn stampede_doubles_only_the_critter_population_target() {

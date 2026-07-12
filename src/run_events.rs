@@ -83,14 +83,6 @@ impl EventKind {
         }
     }
 
-    /// Multiplier for the target penalty-critter population.
-    pub(crate) const fn critter_count_multiplier(self) -> usize {
-        match self {
-            Self::CritterBurst => 2,
-            _ => 1,
-        }
-    }
-
     /// Multiplier applied only to score above a combo's base point.
     pub(crate) const fn combo_bonus_multiplier(self) -> u32 {
         match self {
@@ -120,24 +112,10 @@ impl ActiveEvent {
         }
     }
 
-    pub(crate) const fn chicken_target(&self, base: usize) -> usize {
-        match self.0 {
-            Some(kind) => kind.chicken_target(base),
-            None => base,
-        }
-    }
-
     pub(crate) const fn chicken_score_bonus(&self) -> u32 {
         match self.0 {
             Some(kind) => kind.chicken_score_bonus(),
             None => 0,
-        }
-    }
-
-    pub(crate) const fn critter_count_multiplier(&self) -> usize {
-        match self.0 {
-            Some(kind) => kind.critter_count_multiplier(),
-            None => 1,
         }
     }
 
@@ -406,10 +384,7 @@ mod tests {
         let active = ActiveEvent(None);
         assert_eq!(active.traffic_count_multiplier(), 1);
         assert_eq!(active.traffic_speed_multiplier(), 1.0);
-        assert_eq!(active.chicken_target(0), 0);
-        assert_eq!(active.chicken_target(17), 17);
         assert_eq!(active.chicken_score_bonus(), 0);
-        assert_eq!(active.critter_count_multiplier(), 1);
         assert_eq!(active.combo_bonus_multiplier(), 1);
     }
 
@@ -425,12 +400,7 @@ mod tests {
                 active.traffic_speed_multiplier(),
                 kind.traffic_speed_multiplier()
             );
-            assert_eq!(active.chicken_target(11), kind.chicken_target(11));
             assert_eq!(active.chicken_score_bonus(), kind.chicken_score_bonus());
-            assert_eq!(
-                active.critter_count_multiplier(),
-                kind.critter_count_multiplier()
-            );
             assert_eq!(
                 active.combo_bonus_multiplier(),
                 kind.combo_bonus_multiplier()
@@ -442,7 +412,6 @@ mod tests {
         assert_eq!(traffic.traffic_speed_multiplier(), 1.25);
         assert_eq!(traffic.chicken_target(11), 11);
         assert_eq!(traffic.chicken_score_bonus(), 0);
-        assert_eq!(traffic.critter_count_multiplier(), 1);
         assert_eq!(traffic.combo_bonus_multiplier(), 1);
 
         let chicken = EventKind::ChickenBurst;
@@ -450,7 +419,6 @@ mod tests {
         assert_eq!(chicken.traffic_speed_multiplier(), 1.0);
         assert_eq!(chicken.chicken_target(11), 22);
         assert_eq!(chicken.chicken_score_bonus(), 1);
-        assert_eq!(chicken.critter_count_multiplier(), 1);
         assert_eq!(chicken.combo_bonus_multiplier(), 1);
 
         let combo = EventKind::ComboFrenzy;
@@ -458,7 +426,6 @@ mod tests {
         assert_eq!(combo.traffic_speed_multiplier(), 1.0);
         assert_eq!(combo.chicken_target(11), 11);
         assert_eq!(combo.chicken_score_bonus(), 0);
-        assert_eq!(combo.critter_count_multiplier(), 1);
         assert_eq!(combo.combo_bonus_multiplier(), 2);
 
         let critter = EventKind::CritterBurst;
@@ -466,7 +433,6 @@ mod tests {
         assert_eq!(critter.traffic_speed_multiplier(), 1.0);
         assert_eq!(critter.chicken_target(11), 11);
         assert_eq!(critter.chicken_score_bonus(), 0);
-        assert_eq!(critter.critter_count_multiplier(), 2);
         assert_eq!(critter.combo_bonus_multiplier(), 1);
     }
 
