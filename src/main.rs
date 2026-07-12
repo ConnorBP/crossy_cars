@@ -4,6 +4,8 @@ mod car;
 mod chickens;
 mod combos;
 mod countdown;
+mod critters;
+mod difficulty;
 mod effects;
 mod game;
 mod health;
@@ -25,6 +27,8 @@ use car::CarPlugin;
 use chickens::ChickensPlugin;
 use combos::CombosPlugin;
 use countdown::CountdownPlugin;
+use critters::CrittersPlugin;
+use difficulty::DifficultyPlugin;
 use effects::EffectsPlugin;
 use game::GamePlugin;
 use health::HealthPlugin;
@@ -76,6 +80,8 @@ fn main() {
             EffectsPlugin,
             CombosPlugin,
             PickupsPlugin,
+            CrittersPlugin,
+            DifficultyPlugin,
         ))
         .run();
 }

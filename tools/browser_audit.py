@@ -56,16 +56,25 @@ def main() -> int:
             scan()
 
             if not crashed:
-                # Start gameplay (Enter) + drive to exercise systems (collision,
-                # chunk recycling, audio). Keypress also resumes AudioContext.
+                # Start gameplay (Enter) + drive in multiple directions to
+                # exercise the 2D grid recycling in ALL four directions.
                 page.keyboard.press("Enter")
-                page.wait_for_timeout(1500)
-                for k in ["KeyW", "KeyW", "KeyA", "KeyW", "KeyD",
-                          "KeyW", "KeyS", "KeyW", "KeyA", "KeyW"]:
+                page.wait_for_timeout(4000)  # let the 3-2-1-GO countdown finish
+                # forward, turn left, forward, turn right, forward, reverse,
+                # turn around, forward — covers -Z, -X, +X, +Z, -Z.
+                for k in ["KeyW", "KeyW", "KeyW",
+                          "KeyA", "KeyA",
+                          "KeyW", "KeyW", "KeyW",
+                          "KeyD", "KeyD",
+                          "KeyW", "KeyW",
+                          "KeyS", "KeyS",
+                          "KeyA", "KeyA", "KeyA",
+                          "KeyW", "KeyW", "KeyW",
+                          "KeyD", "KeyW", "KeyW"]:
                     page.keyboard.down(k)
-                    page.wait_for_timeout(400)
+                    page.wait_for_timeout(450)
                     page.keyboard.up(k)
-                    page.wait_for_timeout(120)
+                    page.wait_for_timeout(100)
                 page.wait_for_timeout(2500)
                 scan()
         except Exception as e:  # noqa: BLE001

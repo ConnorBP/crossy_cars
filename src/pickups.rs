@@ -1,10 +1,15 @@
-//! Power-ups (T11): periodic glowing orbs the car drives through to activate
-//! a temporary effect.
+//! Power-ups (T11 / T16): periodic glowing orbs the car drives through to
+//! activate a temporary or instant effect.
 //!
-//! Two kinds:
+//! Five kinds:
 //! - **SpeedBoost** (blue): nudges `car.speed` upward for ~4s (cap ~1.6× max).
 //! - **CoinMagnet** (gold): pulls every coin toward the car for ~6s so the
 //!   existing `world.rs::collect_coins` (distance < 1.2) scoops them up.
+//! - **Health** (green): instant — restores `Health` by +35 (cap 100).
+//! - **Time** (cyan clock): instant — adds +5s to `TimeLeft` (cap 99).
+//! - **MegaCoin** (big gold): instant — +5 coins to `Score` + writes a
+//!   `CoinCollected` message (-> `audio.rs` plays the coin chime +
+//!   `combos.rs` applies the multiplier).
 //!
 //! Design notes:
 //! - Power-up orbs are **top-level entities** (NOT chunk-root children), so
@@ -15,11 +20,17 @@
 //!   local `Transform` (valid because chunk roots have translation only —
 //!   no rotation/scale — so local and world translation deltas coincide).
 //! - All gameplay effects are driven from resources + queries **owned here**;
-//!   `car.rs` / `world.rs` are never edited.
-//! - Counts are capped (≤ 3 active orbs) and spawn timers bound the rate
+//!   `car.rs` / `world.rs` / `health.rs` are never edited. `Health`,
+//!   `TimeLeft`, `Score` are read via `ResMut`; `CoinCollected` is written
+//!   via `MessageWriter` (already registered in `game/mod.rs`).
+//! - Counts are capped (≤ 4 active orbs) and spawn timers bind the rate
 //!   (~8–12s) for web friendliness.
 //! - The orb mesh is a glowing emissive UV-sphere on a tiny pedestal; bloom
-//!   is on, so `emissive: LinearRgba::rgb(...)` makes them pop.
+//!   is on, so `emissive: LinearRgba::rgb(...)` makes them pop. MegaCoin
+//!   uses a larger orb mesh so it reads as a "big gold" prize.
+//! - Instant pickups (Health/Time/MegaCoin) have no timer bar — they fire
+//!   their effect + despawn immediately, with a brief colored screen flash
+//!   for feedback. Timed pickups (SpeedBoost/CoinMagnet) get UI bars.
 //! - Owns its UI (active-power-up icons + remaining-time bars, bottom-center
 //!   above the health bar); does not touch `ui.rs`.
 
@@ -29,9 +40,11 @@ use bevy::prelude::*;
 use bevy::text::FontSize;
 
 use crate::car::Car;
-use crate::game::resources::{GameConfig, RoundActive};
+use crate::game::events::CoinCollected;
+use crate::game::resources::{GameConfig, RoundActive, Score, TimeLeft};
 use crate::game::state::GameState;
 use crate::game::SpawnSet;
+use crate::health::Health;
 use crate::world::Coin;
 
 // ===========================================================================
@@ -46,8 +59,9 @@ const SPAWN_HALF_CONE: f32 = 0.7; // ~40°
 /// Min/max seconds between power-up spawns (re-rolled each spawn).
 const SPAWN_INTERVAL_MIN: f32 = 8.0;
 const SPAWN_INTERVAL_MAX: f32 = 12.0;
-/// Max simultaneous power-up orbs kept alive (web-friendly cap).
-const MAX_ACTIVE_PICKUPS: usize = 3;
+/// Max simultaneous power-up orbs kept alive (web-friendly cap). Bumped to 4
+/// for T16's wider kind variety.
+const MAX_ACTIVE_PICKUPS: usize = 4;
 /// Distance (world units) at which the car collects a power-up.
 const PICKUP_RADIUS: f32 = 1.2;
 
@@ -64,8 +78,24 @@ const MAGNET_DURATION: f32 = 6.0;
 /// = snappier pull). Applied as `pos += (car - pos) * STRENGTH * dt`.
 const MAGNET_STRENGTH: f32 = 4.5;
 
+/// Health pickup: amount restored (clamped to `HEALTH_MAX`).
+const HEALTH_RESTORE: f32 = 35.0;
+/// Health cap (matches `health.rs::HEALTH_MAX`).
+const HEALTH_MAX: f32 = 100.0;
+
+/// TimeBonus pickup: seconds added to `TimeLeft`.
+const TIME_BONUS: f32 = 5.0;
+/// TimeBonus cap — `TimeLeft` is clamped to this so a pile of clocks can't
+/// inflate the round indefinitely (matches the ~99s ceiling).
+const TIME_CAP: f32 = 99.0;
+
+/// MegaCoin pickup: coins added to `Score`.
+const MEGA_COIN_AMOUNT: u32 = 5;
+
 /// Orb mesh radius (icosahedron circumscribed sphere radius).
 const ORB_RADIUS: f32 = 0.45;
+/// MegaCoin orb radius (bigger so it reads as a prize).
+const MEGA_ORB_RADIUS: f32 = 0.72;
 /// Pedestal height (the orb floats ~this far above the ground).
 const ORB_HOVER_Y: f32 = 1.0;
 
@@ -76,6 +106,11 @@ const UI_BAR_H: f32 = 8.0;
 /// UI: bottom offset — sits above the health bar (which is at `bottom: 12` +
 /// its panel padding ~ 8 + label + bar + text ≈ 70px tall, so 84 clears it).
 const UI_BOTTOM: f32 = 84.0;
+
+/// Instant-pickup flash: full-screen tint lifetime (seconds).
+const PICKUP_FLASH_DURATION: f32 = 0.3;
+/// Instant-pickup flash: peak alpha (fades to 0 over the duration).
+const PICKUP_FLASH_PEAK_ALPHA: f32 = 0.22;
 
 // ===========================================================================
 // Resources
@@ -95,14 +130,22 @@ pub struct MagnetTimer(pub f32);
 /// `effects.rs::EffectsAssets`).
 #[derive(Resource)]
 pub struct PickupAssets {
-    /// Icosahedron mesh shared by both orb kinds.
+    /// Icosahedron mesh shared by the standard orb kinds.
     orb_mesh: Handle<Mesh>,
+    /// Larger orb mesh used by MegaCoin (reads as a "big gold" prize).
+    mega_orb_mesh: Handle<Mesh>,
     /// Tiny dark cylinder pedestal mesh.
     pedestal_mesh: Handle<Mesh>,
     /// SpeedBoost orb material (glowing blue).
     boost_mat: Handle<StandardMaterial>,
-    /// CoinMagnet orb material (glowing gold).
+    /// CoinMagnet orb material (glowing gold/orange).
     magnet_mat: Handle<StandardMaterial>,
+    /// Health orb material (glowing green).
+    health_mat: Handle<StandardMaterial>,
+    /// TimeBonus orb material (glowing cyan — distinct from SpeedBoost blue).
+    time_mat: Handle<StandardMaterial>,
+    /// MegaCoin orb material (glowing bright gold — distinct from magnet).
+    megacoin_mat: Handle<StandardMaterial>,
     /// Pedestal material (dark, unlit).
     pedestal_mat: Handle<StandardMaterial>,
 }
@@ -118,6 +161,8 @@ impl FromWorld for PickupAssets {
             // Icosphere-ish UV-sphere for the orb — a smooth faceted
             // ball that catches the emissive glow nicely.
             let orb_mesh = meshes.add(Sphere::new(ORB_RADIUS).mesh().uv(12, 8));
+            // Larger orb for MegaCoin.
+            let mega_orb_mesh = meshes.add(Sphere::new(MEGA_ORB_RADIUS).mesh().uv(12, 8));
             // Tiny pedestal cylinder under the orb.
             let pedestal_mesh = meshes.add(Cylinder::new(0.22, 0.25));
 
@@ -136,6 +181,29 @@ impl FromWorld for PickupAssets {
                 ..default()
             });
 
+            // Health: glowing green cross orb.
+            let health_mat = materials.add(StandardMaterial {
+                base_color: Color::srgb(0.2, 0.9, 0.3),
+                emissive: LinearRgba::rgb(0.3, 2.0, 0.45),
+                ..default()
+            });
+
+            // TimeBonus: glowing cyan clock orb (distinct from SpeedBoost's
+            // deeper blue — brighter + greener hue reads as "time").
+            let time_mat = materials.add(StandardMaterial {
+                base_color: Color::srgb(0.2, 0.72, 0.95),
+                emissive: LinearRgba::rgb(0.3, 1.7, 2.1),
+                ..default()
+            });
+
+            // MegaCoin: bright glowing gold — richer than CoinMagnet so the
+            // bigger orb reads as a premium prize.
+            let megacoin_mat = materials.add(StandardMaterial {
+                base_color: Color::srgb(1.0, 0.85, 0.2),
+                emissive: LinearRgba::rgb(2.6, 2.0, 0.4),
+                ..default()
+            });
+
             // Pedestal: dark, unlit (reads as a little stand).
             let pedestal_mat = materials.add(StandardMaterial {
                 base_color: Color::srgb(0.12, 0.12, 0.14),
@@ -145,9 +213,13 @@ impl FromWorld for PickupAssets {
 
             PickupAssets {
                 orb_mesh,
+                mega_orb_mesh,
                 pedestal_mesh,
                 boost_mat,
                 magnet_mat,
+                health_mat,
+                time_mat,
+                megacoin_mat,
                 pedestal_mat,
             }
         })
@@ -179,6 +251,9 @@ impl FromWorld for PickupAudio {
 pub enum PowerKind {
     SpeedBoost,
     CoinMagnet,
+    Health,
+    Time,
+    MegaCoin,
 }
 
 /// Tag + kind for a power-up orb entity (top-level, world Transform).
@@ -206,6 +281,19 @@ struct MagnetBarFill;
 #[derive(Component, Clone, Copy)]
 struct PowerUpRow {
     kind: PowerKind,
+}
+
+/// Full-screen colored tint spawned when an instant pickup (Health / Time /
+/// MegaCoin) is collected; fades out and despawns. Provides a quick "I got
+/// something" flash since those kinds have no timer bar.
+#[derive(Component)]
+struct PickupFlash {
+    /// Seconds remaining in the flash.
+    t: f32,
+    /// Base RGB (0..1) of the tint — rebuilt with a fading alpha each frame.
+    r: f32,
+    g: f32,
+    b: f32,
 }
 
 // ===========================================================================
@@ -249,6 +337,10 @@ impl Plugin for PickupsPlugin {
             // UI refresh runs in every state so the bars recolor even while
             // paused; the query is trivial when the UI root is absent.
             .add_systems(Update, update_powerup_ui)
+            // Flash fade runs in every state so a flash spawned right before
+            // a state transition still fades + despawns (it self-despawns,
+            // so no separate OnExit cleanup is needed).
+            .add_systems(Update, update_pickup_flash)
             // Clean up any lingering power-up orbs on round end / menu return.
             .add_systems(
                 OnEnter(GameState::GameOver),
@@ -276,7 +368,7 @@ struct SpawnState {
 
 /// Every frame while `Playing`, tick the spawn timer; when it elapses and the
 /// active-orb count is below the cap, spawn a new power-up ahead of the car.
-/// The kind alternates pseudo-randomly between SpeedBoost and CoinMagnet.
+/// The kind is picked by weighted probability (see [`pick_kind`]).
 fn spawn_pickup(
     mut commands: Commands,
     assets: Res<PickupAssets>,
@@ -333,17 +425,18 @@ fn spawn_pickup(
     // orb a touch tighter so it's always on the road/grass you can reach).
     let pos = Vec3::new(pos.x.clamp(-22.0, 22.0), ORB_HOVER_Y, pos.z);
 
-    // Pick a kind: alternate with a little jitter so it's not strictly
-    // periodic but both kinds show up.
-    let kind = if rand(&mut state.seed) < 0.5 {
-        PowerKind::SpeedBoost
-    } else {
-        PowerKind::CoinMagnet
-    };
+    // Weighted kind pick: Health ~10%, Time ~20%, MegaCoin ~15%,
+    // SpeedBoost ~25%, CoinMagnet ~30%.
+    let kind = pick_kind(rand(&mut state.seed));
 
-    let orb_mat = match kind {
-        PowerKind::SpeedBoost => assets.boost_mat.clone(),
-        PowerKind::CoinMagnet => assets.magnet_mat.clone(),
+    // Resolve the orb mesh + emissive material for this kind. MegaCoin uses
+    // the larger orb mesh; all others share the standard orb mesh.
+    let (orb_mesh, orb_mat) = match kind {
+        PowerKind::SpeedBoost => (assets.orb_mesh.clone(), assets.boost_mat.clone()),
+        PowerKind::CoinMagnet => (assets.orb_mesh.clone(), assets.magnet_mat.clone()),
+        PowerKind::Health => (assets.orb_mesh.clone(), assets.health_mat.clone()),
+        PowerKind::Time => (assets.orb_mesh.clone(), assets.time_mat.clone()),
+        PowerKind::MegaCoin => (assets.mega_orb_mesh.clone(), assets.megacoin_mat.clone()),
     };
 
     // Top-level entity: world Transform (no chunk parent). The orb sits at
@@ -357,7 +450,7 @@ fn spawn_pickup(
         .with_children(|p| {
             // Glowing orb (the power-up visual).
             p.spawn((
-                Mesh3d(assets.orb_mesh.clone()),
+                Mesh3d(orb_mesh),
                 MeshMaterial3d(orb_mat),
                 Transform::from_xyz(0.0, 0.0, 0.0),
             ));
@@ -375,14 +468,20 @@ fn spawn_pickup(
 // ===========================================================================
 
 /// When the car is within `PICKUP_RADIUS` of a power-up orb, despawn the orb
-/// and arm the corresponding timer resource. Plays a pickup SFX (reuses
-/// coin.wav) via `AudioPlayer` + `PlaybackSettings::DESPAWN`.
+/// and apply the corresponding effect. Timed kinds (SpeedBoost / CoinMagnet)
+/// arm a timer resource; instant kinds (Health / Time / MegaCoin) apply their
+/// effect immediately + spawn a brief colored flash. Plays a pickup SFX
+/// (reuses coin.wav) via `AudioPlayer` + `PlaybackSettings::DESPAWN`.
 fn collect_pickup(
     car: Query<&Transform, With<Car>>,
     mut powerups: Query<(Entity, &PowerUp, &Transform), Without<Car>>,
     mut commands: Commands,
     mut boost: ResMut<SpeedBoostTimer>,
     mut magnet: ResMut<MagnetTimer>,
+    mut health: ResMut<Health>,
+    mut timeleft: ResMut<TimeLeft>,
+    mut score: ResMut<Score>,
+    mut coin_events: MessageWriter<CoinCollected>,
     audio: Res<PickupAudio>,
 ) {
     let Ok(car_t) = car.single() else {
@@ -396,10 +495,28 @@ fn collect_pickup(
     for (e, power, tf) in &mut powerups {
         let p_xz = Vec3::new(tf.translation.x, 0.0, tf.translation.z);
         if car_xz.distance(p_xz) < PICKUP_RADIUS {
-            // Activate the effect.
+            // Activate the effect. Timed kinds arm a timer; instant kinds
+            // mutate their resource / score + flash. Every match arm is
+            // covered so adding a kind later stays exhaustive.
             match power.kind {
                 PowerKind::SpeedBoost => boost.0 = SPEED_BOOST_DURATION,
                 PowerKind::CoinMagnet => magnet.0 = MAGNET_DURATION,
+                PowerKind::Health => {
+                    health.0 = (health.0 + HEALTH_RESTORE).min(HEALTH_MAX);
+                    spawn_pickup_flash(&mut commands, health_flash_rgb());
+                }
+                PowerKind::Time => {
+                    timeleft.0 = (timeleft.0 + TIME_BONUS).min(TIME_CAP);
+                    spawn_pickup_flash(&mut commands, time_flash_rgb());
+                }
+                PowerKind::MegaCoin => {
+                    score.coins += MEGA_COIN_AMOUNT;
+                    // One message -> audio.rs plays the coin chime + combos.rs
+                    // applies the combo multiplier (the +5 score is applied
+                    // directly above; the message is the "coin got" signal).
+                    coin_events.write(CoinCollected);
+                    spawn_pickup_flash(&mut commands, megacoin_flash_rgb());
+                }
             }
             // Despawn the orb (recursive in 0.19 — nukes the orb + pedestal
             // children; safe, risk E2).
@@ -518,8 +635,9 @@ fn animate_pickups(
 // ===========================================================================
 
 /// Fresh-round reset: zero the effect timers and despawn any active power-up
-/// orbs. Skipped on resume from `Paused` (round still active), per the
-/// fresh-round rule (risk E11). Runs in `SpawnSet` so it precedes `reset_run`.
+/// orbs (covers ALL `PowerUp` kinds). Skipped on resume from `Paused` (round
+/// still active), per the fresh-round rule (risk E11). Runs in `SpawnSet` so
+/// it precedes `reset_run`.
 fn reset_pickups(
     mut boost: ResMut<SpeedBoostTimer>,
     mut magnet: ResMut<MagnetTimer>,
@@ -532,19 +650,22 @@ fn reset_pickups(
     }
     boost.0 = 0.0;
     magnet.0 = 0.0;
+    // `With<PowerUp>` matches every kind, so new kinds are covered for free.
     for e in &powerups {
         commands.entity(e).despawn();
     }
 }
 
-/// Despawn every active power-up orb (e.g. on GameOver / Menu). Recursive
-/// despawn in 0.19 is safe here (nukes the orb + pedestal children).
+/// Despawn every active power-up orb (e.g. on GameOver / Menu). Covers ALL
+/// `PowerUp` kinds. Recursive despawn in 0.19 is safe here (nukes the orb +
+/// pedestal children).
 fn cleanup_pickups(
     mut commands: Commands,
     powerups: Query<Entity, With<PowerUp>>,
     mut boost: ResMut<SpeedBoostTimer>,
     mut magnet: ResMut<MagnetTimer>,
 ) {
+    // `With<PowerUp>` matches every kind, so new kinds are covered for free.
     for e in &powerups {
         commands.entity(e).despawn();
     }
@@ -566,8 +687,9 @@ fn despawn_marker<M: Component>(mut commands: Commands, q: Query<Entity, With<M>
 // ===========================================================================
 
 /// Spawn the bottom-center power-up panel. Two rows (SpeedBoost, CoinMagnet),
-/// each with a colored icon label and a timer bar. Lives only while `Playing`
-/// (despawned by [`despawn_marker::<PowerUpUiRoot>`] on exit).
+/// each with a colored icon label and a timer bar. Instant kinds (Health /
+/// Time / MegaCoin) have no row — they flash on collect instead. Lives only
+/// while `Playing` (despawned by [`despawn_marker::<PowerUpUiRoot>`] on exit).
 fn spawn_powerup_ui(mut commands: Commands) {
     commands
         .spawn((
@@ -595,9 +717,9 @@ fn spawn_powerup_ui(mut commands: Commands) {
                 BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.30)),
             ))
             .with_children(|panel| {
-                // SpeedBoost row
+                // SpeedBoost row (timed — has a bar).
                 powerup_row(panel, "BOOST", boost_color(), PowerKind::SpeedBoost);
-                // CoinMagnet row
+                // CoinMagnet row (timed — has a bar).
                 powerup_row(panel, "MAGNET", magnet_color(), PowerKind::CoinMagnet);
             });
         });
@@ -605,7 +727,9 @@ fn spawn_powerup_ui(mut commands: Commands) {
 
 /// Build one power-up UI row: an icon (colored dot + label) and a timer bar
 /// track with a colored fill child. The row starts hidden (inactive); the
-/// update system shows it when its effect is active.
+/// update system shows it when its effect is active. Only timed kinds get a
+/// real fill marker; the instant-kind arms exist purely for match
+/// exhaustiveness (no row is spawned for them).
 fn powerup_row(parent: &mut ChildSpawnerCommands, label: &str, color: Color, kind: PowerKind) {
     parent
         .spawn((
@@ -644,8 +768,15 @@ fn powerup_row(parent: &mut ChildSpawnerCommands, label: &str, color: Color, kin
             ));
             // Bar track (dark) with a colored fill child. The fill carries a
             // kind-specific marker so `update_powerup_ui` can drive its width
-            // via a typed query. The marker type differs per kind, so we
-            // branch the fill spawn instead of unifying into one variable.
+            // via a typed query. Timed kinds get a real fill marker; instant
+            // kinds get a bare track (no row is spawned for them, but the
+            // match stays exhaustive).
+            let track_node = Node {
+                width: px(UI_BAR_W),
+                height: px(UI_BAR_H),
+                ..default()
+            };
+            let track_bg = BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.6));
             let fill_node = Node {
                 width: px(0.0),
                 height: Val::Percent(100.0),
@@ -654,26 +785,17 @@ fn powerup_row(parent: &mut ChildSpawnerCommands, label: &str, color: Color, kin
             let fill_bg = BackgroundColor(color);
             match kind {
                 PowerKind::SpeedBoost => {
-                    row.spawn((
-                        Node {
-                            width: px(UI_BAR_W),
-                            height: px(UI_BAR_H),
-                            ..default()
-                        },
-                        BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.6)),
-                    ))
-                    .with_child((fill_node, fill_bg, BoostBarFill));
+                    row.spawn((track_node, track_bg))
+                        .with_child((fill_node, fill_bg, BoostBarFill));
                 }
                 PowerKind::CoinMagnet => {
-                    row.spawn((
-                        Node {
-                            width: px(UI_BAR_W),
-                            height: px(UI_BAR_H),
-                            ..default()
-                        },
-                        BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.6)),
-                    ))
-                    .with_child((fill_node, fill_bg, MagnetBarFill));
+                    row.spawn((track_node, track_bg))
+                        .with_child((fill_node, fill_bg, MagnetBarFill));
+                }
+                // Instant kinds: no timer bar. These arms are unreachable
+                // (no row is spawned for them) but keep the match exhaustive.
+                PowerKind::Health | PowerKind::Time | PowerKind::MegaCoin => {
+                    row.spawn((track_node, track_bg));
                 }
             }
         });
@@ -682,7 +804,8 @@ fn powerup_row(parent: &mut ChildSpawnerCommands, label: &str, color: Color, kin
 /// Refresh the power-up UI each frame: show/hide each row based on whether
 /// its effect is active, and set the timer-bar fill width to the remaining
 /// fraction. Runs in every state; the query is empty when the UI root is
-/// absent (e.g. in Menu), so it's a no-op then.
+/// absent (e.g. in Menu), so it's a no-op then. Instant kinds report a 0
+/// fraction (they have no row, but the match stays exhaustive).
 fn update_powerup_ui(
     boost: Res<SpeedBoostTimer>,
     magnet: Res<MagnetTimer>,
@@ -701,11 +824,13 @@ fn update_powerup_ui(
         node.width = px(UI_BAR_W * magnet_frac);
     }
 
-    // Show/hide each row based on whether its effect is active.
+    // Show/hide each row based on whether its effect is active. Instant kinds
+    // never have a row, so their arms report 0.0 (unreachable but exhaustive).
     for (row, mut vis) in &mut rows {
         let frac = match row.kind {
             PowerKind::SpeedBoost => boost_frac,
             PowerKind::CoinMagnet => magnet_frac,
+            PowerKind::Health | PowerKind::Time | PowerKind::MegaCoin => 0.0,
         };
         *vis = if frac > 0.0 {
             Visibility::Visible
@@ -714,6 +839,59 @@ fn update_powerup_ui(
         };
     }
 }
+
+// ===========================================================================
+// Instant-pickup flash — brief colored screen tint on Health/Time/MegaCoin
+// ===========================================================================
+
+/// Spawn a full-screen colored overlay that fades over [`PICKUP_FLASH_DURATION`].
+/// `rgb` is the (r, g, b) tint in 0..1.
+fn spawn_pickup_flash(commands: &mut Commands, rgb: (f32, f32, f32)) {
+    commands.spawn((
+        Node {
+            position_type: PositionType::Absolute,
+            top: px(0.0),
+            left: px(0.0),
+            width: Val::Percent(100.0),
+            height: Val::Percent(100.0),
+            ..default()
+        },
+        BackgroundColor(Color::srgba(rgb.0, rgb.1, rgb.2, PICKUP_FLASH_PEAK_ALPHA)),
+        PickupFlash {
+            t: PICKUP_FLASH_DURATION,
+            r: rgb.0,
+            g: rgb.1,
+            b: rgb.2,
+        },
+    ));
+}
+
+/// Fade the flash alpha toward 0 and despawn once expired. Runs in every
+/// state so a flash spawned right before a state transition still fades out.
+fn update_pickup_flash(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut q: Query<(Entity, &mut PickupFlash, &mut BackgroundColor)>,
+) {
+    for (e, mut flash, mut bg) in &mut q {
+        flash.t -= time.delta_secs();
+        if flash.t <= 0.0 {
+            commands.entity(e).despawn();
+            continue;
+        }
+        let frac = (flash.t / PICKUP_FLASH_DURATION).clamp(0.0, 1.0);
+        bg.0 = Color::srgba(
+            flash.r,
+            flash.g,
+            flash.b,
+            PICKUP_FLASH_PEAK_ALPHA * frac,
+        );
+    }
+}
+
+// ===========================================================================
+// Colors
+// ===========================================================================
 
 /// SpeedBoost UI color (matches the orb's blue).
 fn boost_color() -> Color {
@@ -725,9 +903,45 @@ fn magnet_color() -> Color {
     Color::srgb(1.0, 0.78, 0.2)
 }
 
+/// Health flash tint RGB (green).
+fn health_flash_rgb() -> (f32, f32, f32) {
+    (0.2, 0.9, 0.3)
+}
+
+/// TimeBonus flash tint RGB (cyan).
+fn time_flash_rgb() -> (f32, f32, f32) {
+    (0.2, 0.72, 0.95)
+}
+
+/// MegaCoin flash tint RGB (bright gold).
+fn megacoin_flash_rgb() -> (f32, f32, f32) {
+    (1.0, 0.85, 0.2)
+}
+
 // ===========================================================================
 // Helpers
 // ===========================================================================
+
+/// Weighted power-up kind picker. `r` is a uniform random in [0, 1). The
+/// cumulative thresholds encode the spawn probabilities:
+/// - Health    ~10%  (r < 0.10)
+/// - Time      ~20%  (0.10 ≤ r < 0.30)
+/// - MegaCoin  ~15%  (0.30 ≤ r < 0.45)
+/// - SpeedBoost ~25% (0.45 ≤ r < 0.70)
+/// - CoinMagnet ~30% (0.70 ≤ r < 1.0)
+fn pick_kind(r: f32) -> PowerKind {
+    if r < 0.10 {
+        PowerKind::Health
+    } else if r < 0.30 {
+        PowerKind::Time
+    } else if r < 0.45 {
+        PowerKind::MegaCoin
+    } else if r < 0.70 {
+        PowerKind::SpeedBoost
+    } else {
+        PowerKind::CoinMagnet
+    }
+}
 
 /// Tiny LCG for deterministic-but-varied placement without pulling in `rand`
 /// (matches the `world.rs` / `chickens.rs` style).

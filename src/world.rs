@@ -1,14 +1,25 @@
-//! Infinite-road world: a recycling pool of Z-axis chunks plus the per-chunk
-//! environment (grass, road, sidewalks, lane dashes, buildings, trees, lamp
-//! posts, coins). The car drives toward -Z forever; as it advances, the
-//! trailing chunk is recycled to the front and re-populated with a fresh
-//! deterministic seed, giving a seamless endless feel at constant entity count
-//! (web-friendly).
+//! Infinite 2D city: a recycling pool of city-block grid cells plus the
+//! per-block environment (grass, road segments along the -X and -Z edges,
+//! curbs, lane dashes, buildings, trees, lamp posts, T12 obstacles, coins).
+//! The car can drive side-to-side (X) AND forward/back (Z) endlessly in ALL
+//! directions via 2D (4-directional) recycling: as the car crosses a grid
+//! edge, the far column/row is recycled to the opposite side with a fresh
+//! deterministic seed, giving a seamless endless feel at constant entity
+//! count (web-friendly).
 //!
-//! Solid obstacles (buildings / trees / lamp posts) carry a generic `Collider`
-//! (axis-aligned box, half-extents) so `car.rs::physics_collisions` can push
-//! the car out of any of them with one circle-vs-AABB loop. Curbs keep their
-//! own `Curb` component for the hop-up behaviour.
+//! Grid alignment: block (gx,gz) root sits at world `((gx+0.5)*block, 0,
+//! (gz+0.5)*block)`. Roads run along the world lines `x = n*block` and
+//! `z = n*block` (multiples of 40, INCLUDING x=0 and z=0). Each block draws
+//! ONLY its -X and -Z edge roads, so adjacent blocks tile the full road grid
+//! with no overlap; intersections emerge at the corners (world
+//! (gx*block, gz*block)). The car spawn (0,0,0) sits at the intersection of
+//! road x=0 and road z=0.
+//!
+//! Solid obstacles (buildings / trees / lamp posts / T12 variety) carry a
+//! generic `Collider` (axis-aligned box, half-extents) so
+//! `car.rs::physics_collisions` can push the car out of any of them with one
+//! circle-vs-AABB loop. Curbs keep their own `Curb` component for the
+//! hop-up behaviour.
 
 use bevy::math::primitives::Circle;
 use bevy::prelude::*;
@@ -25,8 +36,8 @@ use crate::textures::TextureAssets;
 /// Gate real-time shadows off on WebGL2 for performance.
 const SHADOWS: bool = cfg!(not(target_arch = "wasm32"));
 
-/// Tag for coin entities (environment now — spawned inside chunks, recycled
-/// with them, collected on pickup and respawned when the chunk re-populates).
+/// Tag for coin entities (environment now — spawned inside blocks, recycled
+/// with them, collected on pickup and respawned when the block re-populates).
 #[derive(Component)]
 pub struct Coin;
 
@@ -39,8 +50,8 @@ pub struct Curb {
 }
 
 /// A solid axis-aligned obstacle the car collides with and can't pass through.
-/// Tagged onto buildings, trees and lamp posts; `car.rs::physics_collisions`
-/// iterates `&Collider` generically.
+/// Tagged onto buildings, trees, lamp posts and T12 obstacles;
+/// `car.rs::physics_collisions` iterates `&Collider` generically.
 #[derive(Component)]
 pub struct Collider {
     pub half_x: f32,
@@ -70,42 +81,44 @@ pub struct Bench;
 pub struct Hedge;
 
 // ---------------------------------------------------------------------------
-// Chunk system
+// 2D city-block grid system
 // ---------------------------------------------------------------------------
 
-/// Tunable chunk layout. `length` is the Z size of one chunk; `count` is the
-/// pool size (kept alive and recycled). With the defaults (40 × 5) the world
-/// covers 200u of Z at any time.
+/// Tunable grid layout. `block` is the size of one city block (and the
+/// spacing of road grid lines); `count` is the grid window size (kept alive
+/// and recycled in BOTH X and Z). With the defaults (40 × 5) the world
+/// covers a 200u × 200u window around the car at any time.
 #[derive(Resource)]
-pub struct ChunkConfig {
-    pub length: f32,
+pub struct GridConfig {
+    pub block: f32,
     pub count: i32,
 }
 
-impl Default for ChunkConfig {
+impl Default for GridConfig {
     fn default() -> Self {
         Self {
-            length: 40.0,
+            block: 40.0,
             count: 5,
         }
     }
 }
 
-/// Identifies a chunk-root entity and its logical index. Root transform sits
-/// at `z = -index * CHUNK_LENGTH` (car drives toward -Z). When recycled, the
-/// root is moved forward by `count * length` and re-populated with a fresh
-/// index-derived seed.
+/// Identifies a block-root entity and its grid coordinates. Root transform
+/// sits at world `((gx+0.5)*block, 0, (gz+0.5)*block)`. When recycled along an
+/// axis, the root is moved to the opposite side of the grid and re-populated
+/// with a fresh (gx,gz)-derived seed.
 #[derive(Component)]
-pub struct Chunk {
-    pub index: i32,
+pub struct Block {
+    pub gx: i32,
+    pub gz: i32,
 }
 
 pub struct WorldPlugin;
 
 impl Plugin for WorldPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<ChunkConfig>()
-            .add_systems(Startup, spawn_initial_chunks)
+        app.init_resource::<GridConfig>()
+            .add_systems(Startup, spawn_initial_grid)
             // Coin spin + pickup still live here (coins are environment now).
             .add_systems(
                 Update,
@@ -113,28 +126,31 @@ impl Plugin for WorldPlugin {
                     .chain()
                     .run_if(in_state(GameState::Playing)),
             )
-            // Re-center the chunk pool on the car's spawn at the start of each
-            // fresh round (skips on resume from Paused via RoundActive). Runs in
-            // SpawnSet so it's before reset_run, which zeroes the car to origin.
+            // Re-center the grid on the car's spawn at the start of each
+            // fresh round (skips on resume from Paused via RoundActive). Runs
+            // in SpawnSet so it's before reset_run, which zeroes the car to
+            // origin.
             .add_systems(
                 OnEnter(GameState::Playing),
-                reset_chunks.in_set(SpawnSet),
+                reset_grid.in_set(SpawnSet),
             )
-            // Recycle chunks that fall off either end of the camera view to the
-            // opposite end, keeping a continuous window of chunks around the car.
+            // Recycle blocks that fall off any edge of the grid to the
+            // opposite side, keeping a continuous count×count window around
+            // the car in BOTH X and Z.
             .add_systems(
                 Update,
-                recycle_chunks.run_if(in_state(GameState::Playing)),
+                recycle_grid.run_if(in_state(GameState::Playing)),
             );
     }
 }
 
-/// Spawn the directional sun + the initial pool of `count` chunks covering
-/// `z ∈ [0, -count*length)` (the car starts at the origin and drives toward
-/// -Z). Run once at Startup.
-fn spawn_initial_chunks(
+/// Spawn the directional sun + the initial count×count grid of blocks
+/// centered on the origin: gx,gz in `-count/2 .. count/2 - 1` (for count=5:
+/// -2..=2). Run once at Startup. The sun is Startup-only and persists — it
+/// is NOT re-spawned by `reset_grid`.
+fn spawn_initial_grid(
     mut commands: Commands,
-    cfg: Res<ChunkConfig>,
+    cfg: Res<GridConfig>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     textures: Res<TextureAssets>,
@@ -149,58 +165,85 @@ fn spawn_initial_chunks(
         Transform::from_xyz(30.0, 25.0, 15.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));
 
-    let length = cfg.length;
+    spawn_grid_window(&mut commands, &cfg, &mut meshes, &mut materials, &textures);
+}
+
+/// Spawn the count×count grid of blocks centered on the origin: gx,gz in
+/// `-count/2 .. count/2 - 1`. Each block root at `((gx+0.5)*block, 0,
+/// (gz+0.5)*block)` with `Block { gx, gz }`, then `populate_block`. Used by
+/// both `spawn_initial_grid` (Startup) and `reset_grid` (round start).
+fn spawn_grid_window(
+    commands: &mut Commands,
+    cfg: &GridConfig,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    textures: &TextureAssets,
+) {
+    let block = cfg.block;
     let count = cfg.count;
-    for i in 0..count {
-        let chunk_root = commands
-            .spawn((
-                Transform::from_xyz(0.0, 0.0, -i as f32 * length),
-                Visibility::default(),
-                Chunk { index: i },
-            ))
-            .id();
-        populate_chunk(
-            &mut commands,
-            &mut meshes,
-            &mut materials,
-            &textures,
-            chunk_root,
-            i,
-            seed_for(i),
-        );
+    let lo = -count / 2;
+    let hi = count / 2 - 1; // inclusive
+    for gx in lo..=hi {
+        for gz in lo..=hi {
+            let root = commands
+                .spawn((
+                    Transform::from_xyz((gx as f32 + 0.5) * block, 0.0, (gz as f32 + 0.5) * block),
+                    Visibility::default(),
+                    Block { gx, gz },
+                ))
+                .id();
+            populate_block(
+                commands,
+                meshes,
+                materials,
+                textures,
+                root,
+                gx,
+                gz,
+                seed_for(gx, gz),
+            );
+        }
     }
 }
 
-/// Deterministic per-chunk seed (varies with index so each chunk differs, but
-/// the same index always yields the same layout — stable across recycles).
-fn seed_for(index: i32) -> u32 {
-    (index as u32)
+/// Deterministic per-block seed (varies with (gx,gz) so each block differs,
+/// but the same (gx,gz) always yields the same layout — stable across
+/// recycles).
+fn seed_for(gx: i32, gz: i32) -> u32 {
+    (gx as u32)
         .wrapping_mul(1664525)
-        .wrapping_add(0x9e3779b9)
+        ^ (gz as u32)
+            .wrapping_mul(22695477)
+            .wrapping_add(0x9e3779b9)
 }
 
-/// Build all of one chunk's contents as children of `chunk_root`: grass strip,
-/// road segment (8 × length), two sidewalk `Curb`s, lane dashes, ~3 buildings
-/// per side, ~3 trees per side, ~2 lamp posts per side, ~4 coins. Decorations
-/// are kept at least a 3.0u margin inside the chunk's Z range so recycling
-/// never pops a half-obstacle into the road (risk E12).
+/// Build all of one block's contents as children of `root`: grass cell, road
+/// segments on the -X and -Z edges (so adjacent blocks tile the full road
+/// grid with no overlap), curbs along the roads, lane dashes, buildings /
+/// trees / lamp posts / T12 obstacles in the block interior (overlap-
+/// rejected), and a few coins on the roads. Decorations are kept in the
+/// block interior (`|x| < block/2 - 6` AND `|z| < block/2 - 6`) so they never
+/// straddle a road or block boundary.
 #[allow(clippy::too_many_arguments)]
-pub fn populate_chunk(
+pub fn populate_block(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     textures: &TextureAssets,
-    chunk_root: Entity,
-    index: i32,
+    root: Entity,
+    gx: i32,
+    gz: i32,
     seed: u32,
 ) {
-    let length = 40.0_f32; // matches ChunkConfig default; decorations are laid
-                           // out relative to this.
+    let block = 40.0_f32; // matches GridConfig default; decorations are laid
+                          // out relative to this.
+    let half = block / 2.0;
 
-    // Chunk-local Z spans [-length/2, +length/2] around the root (root sits at
-    // the chunk center). Keep a margin so obstacles never straddle a boundary.
-    let z_min = -length / 2.0 + 3.0;
-    let z_max = length / 2.0 - 3.0;
+    // Block-local interior bounds: keep a 6.0u margin from the edges so
+    // obstacles never straddle a road (which runs along the -X and -Z edges)
+    // or a block boundary. The road is 8 wide (±4 from the edge line), so
+    // 6.0u keeps obstacles just past the road's inner edge.
+    let interior_max = half - 6.0;
 
     // Shared blob-shadow material (semi-transparent dark patch, reused by
     // trees, buildings & lamp posts).
@@ -210,60 +253,100 @@ pub fn populate_chunk(
         ..default()
     });
 
-    let _ = index; // available for callers; layout uses the seed instead.
+    let _ = (gx, gz); // available for callers; layout uses the seed instead.
 
-    commands.entity(chunk_root).with_children(|p| {
-        // --- Grass strip (chunk-wide) ---
+    commands.entity(root).with_children(|p| {
+        // --- Grass cell (block-wide, slightly oversized to avoid seams) ---
         p.spawn((
-            Mesh3d(meshes.add(Plane3d::default().mesh().size(100.0, length))),
+            Mesh3d(meshes.add(Plane3d::default().mesh().size(block + 2.0, block + 2.0))),
             MeshMaterial3d(textures.grass.clone()),
             Transform::from_xyz(0.0, 0.0, 0.0),
         ));
 
-        // --- Road segment (8 × length) ---
+        // --- Road on the -X edge (runs along Z, world road line x = gx*block) ---
         p.spawn((
-            Mesh3d(meshes.add(Plane3d::default().mesh().size(8.0, length))),
+            Mesh3d(meshes.add(Plane3d::default().mesh().size(8.0, block))),
             MeshMaterial3d(textures.road.clone()),
-            Transform::from_xyz(0.0, 0.02, 0.0),
+            Transform::from_xyz(-half, 0.02, 0.0),
         ));
 
-        // --- Sidewalk curbs (collidable as Curb for hop-up) ---
-        let sidewalk_mesh = meshes.add(Cuboid::new(1.5, 0.18, length));
-        for x in [4.75_f32, -4.75_f32] {
-            p.spawn((
-                Mesh3d(sidewalk_mesh.clone()),
-                MeshMaterial3d(textures.sidewalk.clone()),
-                Transform::from_xyz(x, 0.09, 0.0),
-                Curb {
-                    half_x: 0.75,
-                    half_z: length / 2.0,
-                    height: 0.18,
-                },
-            ));
-        }
+        // --- Road on the -Z edge (runs along X, world road line z = gz*block) ---
+        p.spawn((
+            Mesh3d(meshes.add(Plane3d::default().mesh().size(block, 8.0))),
+            MeshMaterial3d(textures.road.clone()),
+            Transform::from_xyz(0.0, 0.02, -half),
+        ));
 
-        // --- Lane dashes (step 4.0 across the chunk) ---
-        let dash_mesh = meshes.add(Cuboid::new(0.18, 0.02, 2.0));
+        // --- Curbs along the inner edges of each road (collidable, hop-up) ---
+        // -X road curb: along Z at local x = -half + 4.75 (inner edge of the
+        //   8-wide road, which spans x in [-half-4, -half+4]).
+        let curb_x_mesh = meshes.add(Cuboid::new(1.5, 0.18, block));
+        p.spawn((
+            Mesh3d(curb_x_mesh.clone()),
+            MeshMaterial3d(textures.sidewalk.clone()),
+            Transform::from_xyz(-half + 4.75, 0.09, 0.0),
+            Curb {
+                half_x: 0.75,
+                half_z: half,
+                height: 0.18,
+            },
+        ));
+        // -Z road curb: along X at local z = -half + 4.75.
+        let curb_z_mesh = meshes.add(Cuboid::new(block, 0.18, 1.5));
+        p.spawn((
+            Mesh3d(curb_z_mesh.clone()),
+            MeshMaterial3d(textures.sidewalk.clone()),
+            Transform::from_xyz(0.0, 0.09, -half + 4.75),
+            Curb {
+                half_x: half,
+                half_z: 0.75,
+                height: 0.18,
+            },
+        ));
+
+        // --- Lane dashes on each road (oriented along the road's direction) ---
+        let dash_mesh_z = meshes.add(Cuboid::new(0.18, 0.02, 2.0)); // along Z
+        let dash_mesh_x = meshes.add(Cuboid::new(2.0, 0.02, 0.18)); // along X
         let line_mat = materials.add(StandardMaterial {
             base_color: palette::LANE_WHITE,
             ..default()
         });
-        let mut z = -length / 2.0 + 2.0;
-        while z <= length / 2.0 - 2.0 {
+        // Dashes along the -X road (centered on x = -half, running in Z).
+        let mut z = -half + 2.0;
+        while z <= half - 2.0 {
             p.spawn((
-                Mesh3d(dash_mesh.clone()),
+                Mesh3d(dash_mesh_z.clone()),
                 MeshMaterial3d(line_mat.clone()),
-                Transform::from_xyz(0.0, 0.035, z),
+                Transform::from_xyz(-half, 0.035, z),
             ));
             z += 4.0;
         }
-        // Solid edge lines.
-        let edge_mesh = meshes.add(Cuboid::new(0.12, 0.02, length));
-        for x in [3.75_f32, -3.75_f32] {
+        // Dashes along the -Z road (centered on z = -half, running in X).
+        let mut x = -half + 2.0;
+        while x <= half - 2.0 {
             p.spawn((
-                Mesh3d(edge_mesh.clone()),
+                Mesh3d(dash_mesh_x.clone()),
                 MeshMaterial3d(line_mat.clone()),
-                Transform::from_xyz(x, 0.035, 0.0),
+                Transform::from_xyz(x, 0.035, -half),
+            ));
+            x += 4.0;
+        }
+        // Solid edge lines on the -X road.
+        let edge_x_mesh = meshes.add(Cuboid::new(0.12, 0.02, block));
+        for &xo in &[3.75_f32, -3.75] {
+            p.spawn((
+                Mesh3d(edge_x_mesh.clone()),
+                MeshMaterial3d(line_mat.clone()),
+                Transform::from_xyz(-half + xo, 0.035, 0.0),
+            ));
+        }
+        // Solid edge lines on the -Z road.
+        let edge_z_mesh = meshes.add(Cuboid::new(block, 0.02, 0.12));
+        for &zo in &[3.75_f32, -3.75] {
+            p.spawn((
+                Mesh3d(edge_z_mesh.clone()),
+                MeshMaterial3d(line_mat.clone()),
+                Transform::from_xyz(0.0, 0.035, -half + zo),
             ));
         }
 
@@ -342,7 +425,7 @@ pub fn populate_chunk(
             ..default()
         });
 
-        // --- Coins (~4 per chunk, on/near the road) ---
+        // --- Coins (mesh + mat) ---
         let coin_mesh = meshes.add(Cylinder::new(0.3, 0.08));
         let coin_mat = materials.add(StandardMaterial {
             base_color: palette::COIN,
@@ -353,157 +436,12 @@ pub fn populate_chunk(
             ..default()
         });
 
-        // --- Deterministic per-chunk LCG for placement variety ---
-        let mut s = seed;
-        // Overlap-rejection footprint list (simple-room-placement): every
-        // building/tree/lamp/obstacle we place pushes its AABB here so later
-        // placements skip spots that overlap it (with a margin). Prevents the
-        // overlapping buildings/obstacles the user reported.
-        let mut placed: Vec<[f32; 4]> = Vec::new();
-
-        // ~4 coins spread along the chunk, mostly on the road.
-        for _ in 0..4 {
-            let cx = (rand(&mut s) * 2.0 - 1.0) * 3.0; // within road ±3
-            let cz = z_min + rand(&mut s) * (z_max - z_min);
-            p.spawn((
-                Mesh3d(coin_mesh.clone()),
-                MeshMaterial3d(coin_mat.clone()),
-                Transform::from_xyz(cx, 0.5, cz),
-                Coin,
-            ));
-        }
-
-        // --- ~3 buildings per side (overlap-rejected) ---
-        for side in [-1.0_f32, 1.0] {
-            for _ in 0..3 {
-                let w = 3.5 + rand(&mut s) * 1.5; // 3.5..5.0
-                let h = 4.0 + rand(&mut s) * 5.0; // 4.0..9.0
-                let d = 3.5 + rand(&mut s) * 1.5;
-                let ci = (rand(&mut s) * 3.0) as usize % 3;
-                let (x_lo, x_hi) = if side > 0.0 { (16.0, 22.0) } else { (-22.0, -16.0) };
-                let Some((bx, bz)) =
-                    try_place(&mut placed, &mut s, w / 2.0, d / 2.0, x_lo, x_hi, z_min, z_max, 1.5, 8)
-                else {
-                    continue;
-                };
-                p.spawn((
-                    Transform::from_xyz(bx, 0.0, bz),
-                    Visibility::default(),
-                    Collider {
-                        half_x: w / 2.0,
-                        half_z: d / 2.0,
-                    },
-                    Building,
-                ))
-                .with_children(|bp| {
-                    bp.spawn((
-                        Mesh3d(meshes.add(Cuboid::new(w, h, d))),
-                        MeshMaterial3d(body_mats[ci].clone()),
-                        Transform::from_xyz(0.0, h / 2.0, 0.0),
-                    ));
-                    bp.spawn((
-                        Mesh3d(meshes.add(Cuboid::new(w * 1.12, 0.4, d * 1.12))),
-                        MeshMaterial3d(roof_mats[ci].clone()),
-                        Transform::from_xyz(0.0, h + 0.2, 0.0),
-                    ));
-                    bp.spawn((
-                        Mesh3d(meshes.add(Plane3d::default().mesh().size(
-                            w * 1.4,
-                            d * 1.4,
-                        ))),
-                        MeshMaterial3d(shadow_mat.clone()),
-                        Transform::from_xyz(0.0, 0.05, 0.0),
-                    ));
-                });
-            }
-        }
-
-        // --- ~3 trees per side (overlap-rejected) ---
-        for side in [-1.0_f32, 1.0] {
-            for _ in 0..3 {
-                let (x_lo, x_hi) = if side > 0.0 { (8.0, 13.0) } else { (-13.0, -8.0) };
-                let Some((tx, tz)) =
-                    try_place(&mut placed, &mut s, 0.3, 0.3, x_lo, x_hi, z_min, z_max, 1.0, 8)
-                else {
-                    continue;
-                };
-                p.spawn((
-                    Transform::from_xyz(tx, 0.0, tz),
-                    Visibility::default(),
-                    Collider {
-                        half_x: 0.3,
-                        half_z: 0.3,
-                    },
-                    Tree,
-                ))
-                .with_children(|tp| {
-                    tp.spawn((
-                        Mesh3d(trunk_mesh.clone()),
-                        MeshMaterial3d(trunk_mat.clone()),
-                        Transform::from_xyz(0.0, 0.45, 0.0),
-                    ));
-                    tp.spawn((
-                        Mesh3d(foliage_mesh.clone()),
-                        MeshMaterial3d(foliage_mat.clone()),
-                        Transform::from_xyz(0.0, 1.35, 0.0),
-                    ));
-                    tp.spawn((
-                        Mesh3d(tree_shadow_mesh.clone()),
-                        MeshMaterial3d(shadow_mat.clone()),
-                        Transform::from_xyz(0.0, 0.05, 0.0),
-                    ));
-                });
-            }
-        }
-
-        // --- ~2 lamp posts per side (overlap-rejected along z; fixed x) ---
-        for side in [-1.0_f32, 1.0] {
-            for _ in 0..2 {
-                let lx = side * 4.75;
-                let Some((_, lz)) = try_place(
-                    &mut placed, &mut s, 0.15, 0.15, lx, lx, z_min, z_max, 2.0, 8,
-                ) else {
-                    continue;
-                };
-                let dir = -side; // arm extends toward the road
-                p.spawn((
-                    Transform::from_xyz(lx, 0.0, lz),
-                    Visibility::default(),
-                    Collider {
-                        half_x: 0.15,
-                        half_z: 0.15,
-                    },
-                    LampPost,
-                ))
-                .with_children(|lp| {
-                    lp.spawn((
-                        Mesh3d(pole_mesh.clone()),
-                        MeshMaterial3d(metal_mat.clone()),
-                        Transform::from_xyz(0.0, 1.6, 0.0),
-                    ));
-                    lp.spawn((
-                        Mesh3d(arm_mesh.clone()),
-                        MeshMaterial3d(metal_mat.clone()),
-                        Transform::from_xyz(dir * 0.4, 3.1, 0.0),
-                    ));
-                    lp.spawn((
-                        Mesh3d(lamp_mesh.clone()),
-                        MeshMaterial3d(lamp_mat.clone()),
-                        Transform::from_xyz(dir * 0.8, 3.1, 0.0),
-                    ));
-                });
-            }
-        }
-
         // --- T12 obstacle variety: cones, hydrants, benches, hedges ---
-        // Shared assets for the four new obstacle types (built from primitives,
+        // Shared assets for the four obstacle types (built from primitives,
         // each carries a generic `Collider` so `physics_collisions` handles them
-        // automatically). Placed on the grass/sidewalk edge (|x| in 6..8, beyond
-        // the curbs at ±4.75 and inside the tree band at 8..13) so the road lane
-        // (|x|<4) stays drivable. Z stays within [z_min, z_max] to keep the 3.0u
-        // seam margin (risk E12).
-        // NB: the Bevy `Cone` primitive is fully-qualified here because this
-        // module also declares a `Cone` tag component (T12) of the same name.
+        // automatically). NB: the Bevy `Cone` primitive is fully-qualified
+        // here because this module also declares a `Cone` tag component (T12)
+        // of the same name.
         let cone_body_mesh = meshes.add(bevy::math::primitives::Cone::new(0.18, 0.4));
         let cone_base_mesh = meshes.add(Cuboid::new(0.4, 0.04, 0.4));
         let cone_mat = materials.add(StandardMaterial {
@@ -534,8 +472,7 @@ pub fn populate_chunk(
             perceptual_roughness: 0.9,
             ..default()
         });
-        let bench_shadow_mesh =
-            meshes.add(Plane3d::default().mesh().size(1.1, 0.45));
+        let bench_shadow_mesh = meshes.add(Plane3d::default().mesh().size(1.1, 0.45));
 
         let hedge_box_mesh = meshes.add(Cuboid::new(1.2, 0.5, 0.4));
         let hedge_mat = materials.add(StandardMaterial {
@@ -543,14 +480,199 @@ pub fn populate_chunk(
             perceptual_roughness: 0.9,
             ..default()
         });
-        let hedge_shadow_mesh =
-            meshes.add(Plane3d::default().mesh().size(1.4, 0.55));
+        let hedge_shadow_mesh = meshes.add(Plane3d::default().mesh().size(1.4, 0.55));
 
-        // Scatter 2-4 obstacles per chunk (mix of the four types, overlap-rejected).
+        // --- Deterministic per-block LCG for placement variety ---
+        let mut s = seed;
+        // Overlap-rejection footprint list (simple-room-placement): every
+        // building/tree/lamp/obstacle we place pushes its AABB here so later
+        // placements skip spots that overlap it (with a margin). Prevents the
+        // overlapping buildings/obstacles the user reported.
+        let mut placed: Vec<[f32; 4]> = Vec::new();
+
+        // --- ~4 coins on the roads (local x near -half OR z near -half) ---
+        for _ in 0..4 {
+            // Pick one of the two roads (the -X edge road or the -Z edge road).
+            if rand(&mut s) < 0.5 {
+                // -X road: x near -half (within ±3 of the edge line), z across
+                // the block.
+                let cx = -half + (rand(&mut s) * 2.0 - 1.0) * 3.0;
+                let cz = -half + 2.0 + rand(&mut s) * (block - 4.0);
+                p.spawn((
+                    Mesh3d(coin_mesh.clone()),
+                    MeshMaterial3d(coin_mat.clone()),
+                    Transform::from_xyz(cx, 0.5, cz),
+                    Coin,
+                ));
+            } else {
+                // -Z road: z near -half (within ±3 of the edge line), x across
+                // the block.
+                let cx = -half + 2.0 + rand(&mut s) * (block - 4.0);
+                let cz = -half + (rand(&mut s) * 2.0 - 1.0) * 3.0;
+                p.spawn((
+                    Mesh3d(coin_mesh.clone()),
+                    MeshMaterial3d(coin_mat.clone()),
+                    Transform::from_xyz(cx, 0.5, cz),
+                    Coin,
+                ));
+            }
+        }
+
+        // --- ~3 buildings (overlap-rejected, block interior) ---
+        for _ in 0..3 {
+            let w = 3.5 + rand(&mut s) * 1.5; // 3.5..5.0
+            let h = 4.0 + rand(&mut s) * 5.0; // 4.0..9.0
+            let d = 3.5 + rand(&mut s) * 1.5;
+            let ci = (rand(&mut s) * 3.0) as usize % 3;
+            let Some((bx, bz)) = try_place(
+                &mut placed,
+                &mut s,
+                w / 2.0,
+                d / 2.0,
+                -interior_max,
+                interior_max,
+                -interior_max,
+                interior_max,
+                1.5,
+                8,
+            ) else {
+                continue;
+            };
+            p.spawn((
+                Transform::from_xyz(bx, 0.0, bz),
+                Visibility::default(),
+                Collider {
+                    half_x: w / 2.0,
+                    half_z: d / 2.0,
+                },
+                Building,
+            ))
+            .with_children(|bp| {
+                bp.spawn((
+                    Mesh3d(meshes.add(Cuboid::new(w, h, d))),
+                    MeshMaterial3d(body_mats[ci].clone()),
+                    Transform::from_xyz(0.0, h / 2.0, 0.0),
+                ));
+                bp.spawn((
+                    Mesh3d(meshes.add(Cuboid::new(w * 1.12, 0.4, d * 1.12))),
+                    MeshMaterial3d(roof_mats[ci].clone()),
+                    Transform::from_xyz(0.0, h + 0.2, 0.0),
+                ));
+                bp.spawn((
+                    Mesh3d(meshes.add(Plane3d::default().mesh().size(w * 1.4, d * 1.4))),
+                    MeshMaterial3d(shadow_mat.clone()),
+                    Transform::from_xyz(0.0, 0.05, 0.0),
+                ));
+            });
+        }
+
+        // --- ~3 trees (overlap-rejected, block interior) ---
+        for _ in 0..3 {
+            let Some((tx, tz)) = try_place(
+                &mut placed,
+                &mut s,
+                0.3,
+                0.3,
+                -interior_max,
+                interior_max,
+                -interior_max,
+                interior_max,
+                1.0,
+                8,
+            ) else {
+                continue;
+            };
+            p.spawn((
+                Transform::from_xyz(tx, 0.0, tz),
+                Visibility::default(),
+                Collider {
+                    half_x: 0.3,
+                    half_z: 0.3,
+                },
+                Tree,
+            ))
+            .with_children(|tp| {
+                tp.spawn((
+                    Mesh3d(trunk_mesh.clone()),
+                    MeshMaterial3d(trunk_mat.clone()),
+                    Transform::from_xyz(0.0, 0.45, 0.0),
+                ));
+                tp.spawn((
+                    Mesh3d(foliage_mesh.clone()),
+                    MeshMaterial3d(foliage_mat.clone()),
+                    Transform::from_xyz(0.0, 1.35, 0.0),
+                ));
+                tp.spawn((
+                    Mesh3d(tree_shadow_mesh.clone()),
+                    MeshMaterial3d(shadow_mat.clone()),
+                    Transform::from_xyz(0.0, 0.05, 0.0),
+                ));
+            });
+        }
+
+        // --- ~2 lamp posts (overlap-rejected, block interior) ---
+        for _ in 0..2 {
+            let Some((lx, lz)) = try_place(
+                &mut placed,
+                &mut s,
+                0.15,
+                0.15,
+                -interior_max,
+                interior_max,
+                -interior_max,
+                interior_max,
+                2.0,
+                8,
+            ) else {
+                continue;
+            };
+            // Arm extends toward the nearest road edge (the -X or -Z road,
+            // whichever is closer). Pick the closer of -half-x vs -half-z.
+            let dist_x = (-half - lx).abs();
+            let dist_z = (-half - lz).abs();
+            let (dir_x, dir_z) = if dist_x < dist_z {
+                (-1.0_f32, 0.0_f32) // arm toward -X road
+            } else {
+                (0.0_f32, -1.0_f32) // arm toward -Z road
+            };
+            p.spawn((
+                Transform::from_xyz(lx, 0.0, lz),
+                Visibility::default(),
+                Collider {
+                    half_x: 0.15,
+                    half_z: 0.15,
+                },
+                LampPost,
+            ))
+            .with_children(|lp| {
+                lp.spawn((
+                    Mesh3d(pole_mesh.clone()),
+                    MeshMaterial3d(metal_mat.clone()),
+                    Transform::from_xyz(0.0, 1.6, 0.0),
+                ));
+                lp.spawn((
+                    Mesh3d(arm_mesh.clone()),
+                    MeshMaterial3d(metal_mat.clone()),
+                    // Orient the arm along the chosen axis.
+                    Transform::from_xyz(dir_x * 0.4, 3.1, dir_z * 0.4)
+                        .with_rotation(Quat::from_rotation_y(if dir_x != 0.0 {
+                            std::f32::consts::FRAC_PI_2
+                        } else {
+                            0.0
+                        })),
+                ));
+                lp.spawn((
+                    Mesh3d(lamp_mesh.clone()),
+                    MeshMaterial3d(lamp_mat.clone()),
+                    Transform::from_xyz(dir_x * 0.8, 3.1, dir_z * 0.8),
+                ));
+            });
+        }
+
+        // --- Scatter 2-4 T12 obstacles (mix of four types, overlap-rejected) ---
         let n_obs = 2 + (rand(&mut s) * 3.0) as usize; // 2..4
         for _ in 0..n_obs {
             let kind = (rand(&mut s) * 4.0) as usize % 4; // 0=cone,1=hydrant,2=bench,3=hedge
-            let side = if rand(&mut s) < 0.5 { -1.0 } else { 1.0 };
             // Footprint half-extents per kind (matches the Collider below).
             let (half_x, half_z) = match kind {
                 0 => (0.2, 0.2),   // cone
@@ -558,10 +680,18 @@ pub fn populate_chunk(
                 2 => (0.5, 0.18),  // bench
                 _ => (0.6, 0.25),  // hedge
             };
-            let (x_lo, x_hi) = (side * 8.0, side * 6.0); // |x| in 6..8
-            let Some((ox, oz)) =
-                try_place(&mut placed, &mut s, half_x, half_z, x_lo, x_hi, z_min, z_max, 0.8, 8)
-            else {
+            let Some((ox, oz)) = try_place(
+                &mut placed,
+                &mut s,
+                half_x,
+                half_z,
+                -interior_max,
+                interior_max,
+                -interior_max,
+                interior_max,
+                0.8,
+                8,
+            ) else {
                 continue;
             };
             match kind {
@@ -759,147 +889,254 @@ fn try_place(
     None
 }
 
-/// Recycle trailing chunks to the front as the car advances. When the car is
-/// more than `CHUNK_LENGTH` ahead of the trailing chunk's leading edge,
-/// despawn that chunk root (recursive — nukes all its children, safe in 0.19,
-/// risk E2) and spawn a brand-new chunk root at the front (`z -= span`) with
-/// a fresh index/seed. This keeps a constant pool of `count` chunks alive.
-fn recycle_chunks(
+/// 4-directional recycling: for EACH axis (X and Z) independently, find the
+/// min/max block coordinate; when the car is past the grid edge by
+/// `VIEW_MARGIN`, recycle the far column/row — despawn those block roots
+/// (recursive — nukes all their children, safe in 0.19, risk E2) and spawn
+/// fresh ones on the opposite side with progressed (gx,gz) + fresh seed.
+/// Keeps a continuous count×count window around the car in BOTH X and Z ->
+/// no gaps, car can drive endlessly in any direction. At most one
+/// column/row recycles per axis per frame.
+fn recycle_grid(
     mut commands: Commands,
-    cfg: Res<ChunkConfig>,
+    cfg: Res<GridConfig>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     textures: Res<TextureAssets>,
-    car: Query<&Transform, (With<Car>, Without<Chunk>)>,
-    chunks: Query<(Entity, &Chunk, &Transform)>,
+    car: Query<&Transform, (With<Car>, Without<Block>)>,
+    blocks: Query<(Entity, &Block, &Transform)>,
 ) {
     let Ok(car_t) = car.single() else {
         return;
     };
-    let length = cfg.length;
-    let count = cfg.count;
-    let span = count as f32 * length;
-    // Don't recycle a chunk until it's fully off-screen behind/ahead of the
-    // car. The ortho viewport is ~12u; add look-ahead + padding so chunks
-    // never vanish while still visible.
+    let block = cfg.block;
+    // Don't recycle a block until it's fully off-screen beyond the grid edge.
+    // The ortho viewport is ~12u; add look-ahead + padding so blocks never
+    // vanish while still visible.
     const VIEW_MARGIN: f32 = 16.0;
+    let car_x = car_t.translation.x;
     let car_z = car_t.translation.z;
 
-    // Trailing chunk = largest root-z (furthest behind, +Z); leading = smallest
-    // root-z (furthest ahead, -Z).
-    let mut trailing: Option<(Entity, i32, f32)> = None;
-    let mut leading: Option<(Entity, i32, f32)> = None;
-    for (e, chunk, tf) in &chunks {
-        let z = tf.translation.z;
-        if trailing.map_or(true, |(_, _, bz)| z > bz) {
-            trailing = Some((e, chunk.index, z));
-        }
-        if leading.map_or(true, |(_, _, bz)| z < bz) {
-            leading = Some((e, chunk.index, z));
-        }
-    }
+    // Snapshot the blocks so we can compute the despawn set + new (gx,gz)
+    // BEFORE despawning (don't mutate the query mid-iteration).
+    let block_list: Vec<(Entity, i32, i32, f32, f32)> = blocks
+        .iter()
+        .map(|(e, b, tf)| (e, b.gx, b.gz, tf.translation.x, tf.translation.z))
+        .collect();
 
-    // Recycle trailing -> front when it's fully off-screen behind the car
-    // (car driving -Z). Chunk spans [z-L/2, z+L/2]; its nearest edge to the
-    // car is z-L/2. Off-screen behind when car_z < z - L/2 - VIEW_MARGIN.
-    if let Some((e, idx, z)) = trailing {
-        if car_z < z - length / 2.0 - VIEW_MARGIN {
+    // --- X axis: recycle a column if the car is past the +X or -X grid edge ---
+    let (min_gx, max_gx) = block_list
+        .iter()
+        .map(|(_, gx, _, _, _)| *gx)
+        .fold((i32::MAX, i32::MIN), |(mn, mx), gx| (mn.min(gx), mx.max(gx)));
+    let x_edge_hi = (max_gx as f32 + 0.5) * block + VIEW_MARGIN; // past +X edge
+    let x_edge_lo = (min_gx as f32 + 0.5) * block - VIEW_MARGIN; // past -X edge
+    if car_x > x_edge_hi {
+        // Recycle the min_gx column to gx = max_gx + 1.
+        let to_despawn: Vec<Entity> = block_list
+            .iter()
+            .filter(|(_, gx, _, _, _)| *gx == min_gx)
+            .map(|(e, _, _, _, _)| *e)
+            .collect();
+        for e in to_despawn {
             commands.entity(e).despawn();
-            let new_index = idx + count;
-            let new_z = z - span;
+        }
+        let new_gx = max_gx + 1;
+        for (_, _, gz, _, _) in block_list
+            .iter()
+            .filter(|(_, gx, _, _, _)| *gx == min_gx)
+        {
+            let new_gz = *gz;
             let root = commands
                 .spawn((
-                    Transform::from_xyz(0.0, 0.0, new_z),
+                    Transform::from_xyz(
+                        (new_gx as f32 + 0.5) * block,
+                        0.0,
+                        (new_gz as f32 + 0.5) * block,
+                    ),
                     Visibility::default(),
-                    Chunk { index: new_index },
+                    Block {
+                        gx: new_gx,
+                        gz: new_gz,
+                    },
                 ))
                 .id();
-            populate_chunk(
+            populate_block(
                 &mut commands,
                 &mut meshes,
                 &mut materials,
                 &textures,
                 root,
-                new_index,
-                seed_for(new_index),
+                new_gx,
+                new_gz,
+                seed_for(new_gx, new_gz),
+            );
+        }
+    } else if car_x < x_edge_lo {
+        // Recycle the max_gx column to gx = min_gx - 1.
+        let to_despawn: Vec<Entity> = block_list
+            .iter()
+            .filter(|(_, gx, _, _, _)| *gx == max_gx)
+            .map(|(e, _, _, _, _)| *e)
+            .collect();
+        for e in to_despawn {
+            commands.entity(e).despawn();
+        }
+        let new_gx = min_gx - 1;
+        for (_, _, gz, _, _) in block_list
+            .iter()
+            .filter(|(_, gx, _, _, _)| *gx == max_gx)
+        {
+            let new_gz = *gz;
+            let root = commands
+                .spawn((
+                    Transform::from_xyz(
+                        (new_gx as f32 + 0.5) * block,
+                        0.0,
+                        (new_gz as f32 + 0.5) * block,
+                    ),
+                    Visibility::default(),
+                    Block {
+                        gx: new_gx,
+                        gz: new_gz,
+                    },
+                ))
+                .id();
+            populate_block(
+                &mut commands,
+                &mut meshes,
+                &mut materials,
+                &textures,
+                root,
+                new_gx,
+                new_gz,
+                seed_for(new_gx, new_gz),
             );
         }
     }
 
-    // Recycle leading -> back when it's fully off-screen ahead of the car
-    // (car reversed +Z). Off-screen ahead when car_z > z + L/2 + VIEW_MARGIN.
-    // Skip if it's the same entity as the trailing chunk (only possible with a
-    // single chunk; avoids a double-despawn panic).
-    if let Some((e, idx, z)) = leading {
-        let same_as_trailing = trailing.map_or(false, |(te, _, _)| te == e);
-        if !same_as_trailing && car_z > z + length / 2.0 + VIEW_MARGIN {
+    // --- Z axis: recycle a row if the car is past the +Z or -Z grid edge ---
+    // Re-snapshot after the X recycle (new blocks were spawned with new gz
+    // values identical to the despawned ones, so min/max gz are unchanged —
+    // but the entity set changed). We re-query to be safe.
+    let block_list_z: Vec<(Entity, i32, i32)> = blocks
+        .iter()
+        .map(|(e, b, _)| (e, b.gx, b.gz))
+        .collect();
+    let (min_gz, max_gz) = block_list_z
+        .iter()
+        .map(|(_, _, gz)| *gz)
+        .fold((i32::MAX, i32::MIN), |(mn, mx), gz| (mn.min(gz), mx.max(gz)));
+    let z_edge_hi = (max_gz as f32 + 0.5) * block + VIEW_MARGIN; // past +Z edge
+    let z_edge_lo = (min_gz as f32 + 0.5) * block - VIEW_MARGIN; // past -Z edge
+    if car_z > z_edge_hi {
+        // Recycle the min_gz row to gz = max_gz + 1.
+        let to_despawn: Vec<Entity> = block_list_z
+            .iter()
+            .filter(|(_, _, gz)| *gz == min_gz)
+            .map(|(e, _, _)| *e)
+            .collect();
+        for e in to_despawn {
             commands.entity(e).despawn();
-            let new_index = idx - count;
-            let new_z = z + span;
+        }
+        let new_gz = max_gz + 1;
+        for (_, gx, _) in block_list_z.iter().filter(|(_, _, gz)| *gz == min_gz) {
+            let new_gx = *gx;
             let root = commands
                 .spawn((
-                    Transform::from_xyz(0.0, 0.0, new_z),
+                    Transform::from_xyz(
+                        (new_gx as f32 + 0.5) * block,
+                        0.0,
+                        (new_gz as f32 + 0.5) * block,
+                    ),
                     Visibility::default(),
-                    Chunk { index: new_index },
+                    Block {
+                        gx: new_gx,
+                        gz: new_gz,
+                    },
                 ))
                 .id();
-            populate_chunk(
+            // The original entity was already despawned in the loop above;
+            // spawn a fresh root and populate it.
+            populate_block(
                 &mut commands,
                 &mut meshes,
                 &mut materials,
                 &textures,
                 root,
-                new_index,
-                seed_for(new_index),
+                new_gx,
+                new_gz,
+                seed_for(new_gx, new_gz),
+            );
+        }
+    } else if car_z < z_edge_lo {
+        // Recycle the max_gz row to gz = min_gz - 1.
+        let to_despawn: Vec<Entity> = block_list_z
+            .iter()
+            .filter(|(_, _, gz)| *gz == max_gz)
+            .map(|(e, _, _)| *e)
+            .collect();
+        for e in to_despawn {
+            commands.entity(e).despawn();
+        }
+        let new_gz = min_gz - 1;
+        for (_, gx, _) in block_list_z.iter().filter(|(_, _, gz)| *gz == max_gz) {
+            let new_gx = *gx;
+            let root = commands
+                .spawn((
+                    Transform::from_xyz(
+                        (new_gx as f32 + 0.5) * block,
+                        0.0,
+                        (new_gz as f32 + 0.5) * block,
+                    ),
+                    Visibility::default(),
+                    Block {
+                        gx: new_gx,
+                        gz: new_gz,
+                    },
+                ))
+                .id();
+            // The original entity was already despawned in the loop above;
+            // spawn a fresh root and populate it.
+            populate_block(
+                &mut commands,
+                &mut meshes,
+                &mut materials,
+                &textures,
+                root,
+                new_gx,
+                new_gz,
+                seed_for(new_gx, new_gz),
             );
         }
     }
 }
 
-/// On a fresh round, re-center the chunk pool on the car's spawn (origin):
-/// despawn all chunks and re-spawn the initial pool covering `[0, -span)`.
-/// Skips on resume from Paused (`RoundActive` already true). Runs in `SpawnSet`
-/// before `reset_run` zeroes the car. The sun is `Startup`-only and persists —
-/// it is NOT re-spawned here.
-fn reset_chunks(
+/// On a fresh round, re-center the grid on the car's spawn (origin): despawn
+/// all blocks and re-spawn the count×count grid centered on origin. Skips on
+/// resume from Paused (`RoundActive` already true). Runs in `SpawnSet` before
+/// `reset_run` zeroes the car. The sun is `Startup`-only and persists — it is
+/// NOT re-spawned here.
+fn reset_grid(
     mut commands: Commands,
-    cfg: Res<ChunkConfig>,
+    cfg: Res<GridConfig>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     textures: Res<TextureAssets>,
-    chunks: Query<Entity, With<Chunk>>,
+    blocks: Query<Entity, With<Block>>,
     round_active: Res<RoundActive>,
 ) {
     if round_active.0 {
         return;
     }
-    for e in &chunks {
+    for e in &blocks {
         commands.entity(e).despawn();
     }
-    let length = cfg.length;
-    let count = cfg.count;
-    for i in 0..count {
-        let root = commands
-            .spawn((
-                Transform::from_xyz(0.0, 0.0, -(i as f32) * length),
-                Visibility::default(),
-                Chunk { index: i },
-            ))
-            .id();
-        populate_chunk(
-            &mut commands,
-            &mut meshes,
-            &mut materials,
-            &textures,
-            root,
-            i,
-            seed_for(i),
-        );
-    }
+    spawn_grid_window(&mut commands, &cfg, &mut meshes, &mut materials, &textures);
 }
 
 // ---------------------------------------------------------------------------
-// Coins (environment now — spawned in chunks, collected on pickup)
+// Coins (environment now — spawned in blocks, collected on pickup)
 // ---------------------------------------------------------------------------
 
 fn spin_coins(mut coins: Query<&mut Transform, With<Coin>>, time: Res<Time>) {
@@ -922,7 +1159,7 @@ fn collect_coins(
         return;
     };
     for (e, coin_t) in &mut coins {
-        // Coins are chunk-root children -> `Transform` is local; use
+        // Coins are block-root children -> `Transform` is local; use
         // `GlobalTransform` for the world position or pickup won't line up.
         if car_t.translation.distance(coin_t.translation()) < 1.2 {
             commands.entity(e).despawn();

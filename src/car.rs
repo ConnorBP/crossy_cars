@@ -241,9 +241,8 @@ fn move_car(
 
     let forward = Vec3::new(-car.heading.sin(), 0.0, -car.heading.cos());
     tf.translation += forward * car.speed * dt;
-    // Infinite road along Z: clamp only X (keep the car on the grass strip
-    // beside the road). Z is unbounded so chunks recycle endlessly.
-    tf.translation.x = tf.translation.x.clamp(-24.0, 24.0);
+    // 2D city grid (T14): the car can drive freely in X and Z — the grid
+    // recycles in all 4 directions, so no clamp is needed.
     tf.rotation = Quat::from_rotation_y(car.heading);
 }
 
