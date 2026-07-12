@@ -37,6 +37,10 @@ jobs:
 
       - name: Build production site
         run: trunk build --release --cargo-profile wasm-release
+        env:
+          # Embedded nuisance-only leaderboard request key. The Worker must be
+          # configured with the matching LB_CLIENT_HMAC_KEY runtime secret.
+          ROADY_LEADERBOARD_CLIENT_HMAC_KEY: ${{ secrets.ROADY_LEADERBOARD_CLIENT_HMAC_KEY }}
 
       - name: Check release output
         run: python tools/check_release.py

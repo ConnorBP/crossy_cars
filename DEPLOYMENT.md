@@ -30,6 +30,7 @@ Open the repository's **Settings → Secrets and variables → Actions** and add
 
 - `CLOUDFLARE_API_TOKEN`: the custom API token
 - `CLOUDFLARE_ACCOUNT_ID`: the owning Cloudflare account ID
+- `ROADY_LEADERBOARD_CLIENT_HMAC_KEY`: a random 32-byte-or-longer nuisance-only client signing key injected into production WASM; install the matching value as the leaderboard Worker's `LB_CLIENT_HMAC_KEY` secret when that Worker is deployed
 
 Optionally add the repository variable `CLOUDFLARE_PAGES_PROJECT` with the Pages project name. If it is absent or empty, the workflow uses `roady-car`.
 
@@ -43,7 +44,7 @@ Push to `master`, or open **Actions → Deploy to Cloudflare Pages → Run workf
 npx wrangler@4 pages deploy dist --project-name "$PROJECT_NAME" --branch main
 ```
 
-Cloudflare assigns the project a `pages.dev` address. Consult the workflow log or Cloudflare dashboard for the actual address; the repository does not claim a fixed live URL.
+The production project is live at **https://roady-car.pages.dev**. Each deployment also receives an immutable preview URL in the workflow log.
 
 ## Local production build and upload
 

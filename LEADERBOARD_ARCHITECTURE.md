@@ -1,11 +1,11 @@
 # Roady Car Cloudflare Leaderboard Architecture
 
-**Status:** Approved design; implementation is intentionally phased.  
+**Status:** Approved design; implementation is intentionally phased.
 **Security goal:** deter casual spam, replay, and automated abuse without claiming that an untrusted browser can prove an honest score.
 
 ## 1. Honest threat model
 
-Roady Car's WebAssembly client is public and fully attacker-controlled. Any symmetric HMAC key embedded in the WASM can be extracted or the signing path can be reused. Therefore an embedded client secret is **not** a trust boundary and is omitted from the MVP.
+Roady Car's WebAssembly client is public and fully attacker-controlled. Any symmetric HMAC key embedded in the WASM can eventually be extracted or the signing path reused. Even so, Roady Car will require a build-injected client HMAC as an additional nuisance layer: it prevents completely unsigned raw API submissions and raises the effort above merely discovering the endpoint. It is **not** treated as proof of honest gameplay and never replaces the stronger controls below.
 
 The leaderboard will use defense in depth:
 
@@ -18,6 +18,7 @@ The leaderboard will use defense in depth:
 - Hashed IP attribution, never raw IP storage
 - Moderation flags and hide/delete controls
 - Cached public reads to limit cost and denial-of-service exposure
+- A mandatory client HMAC injected from deployment secrets and checked on score submission, explicitly treated as extractable nuisance friction
 
 This prevents casual unsigned spam and makes automated abuse more expensive. It does **not** cryptographically prove the score was earned. A determined attacker can fabricate telemetry below the plausibility cap. Truly authoritative scoring requires server-side game simulation; see [MULTIPLAYER_PLAN.md](MULTIPLAYER_PLAN.md).
 
@@ -137,6 +138,8 @@ Controls:
 
 ### `POST /v1/scores`
 
+Requires both the opaque Worker-issued session proof and `X-Roady-Client-Signature`, an unpadded base64url HMAC-SHA-256 signature created by the production client. The build key comes from the GitHub Actions secret `ROADY_LEADERBOARD_CLIENT_HMAC_KEY`; the Worker receives the matching runtime secret `LB_CLIENT_HMAC_KEY`.
+
 Request:
 
 ```json
@@ -178,6 +181,7 @@ Controls:
 - Require `terminal_total == chickens + coins`
 - Require total below the condition plausibility cap
 - Validate name/build/platform/reason/max combo/ranges
+- Reconstruct and verify the exact canonical client-HMAC bytes; missing/invalid signatures are rejected, while documentation remains explicit that an extracted key can produce valid signatures
 - Mark session used before inserting; if insert fails, player obtains a new session
 - Duplicate/replayed session returns `409`
 
@@ -229,7 +233,38 @@ Require `Authorization: Bearer <LB_ADMIN_TOKEN>`. Every action writes `moderatio
 
 Returns `{ "ok": true, "build": "...", "time": ... }`.
 
-## 5. Session proof
+## 5. Client submission HMAC
+
+Build secret: `ROADY_LEADERBOARD_CLIENT_HMAC_KEY`.
+Worker secret: `LB_CLIENT_HMAC_KEY`.
+
+The key is injected only during the production Rust/WASM build and installed separately as a Worker runtime secret. It must never appear in source, Trunk configuration, JavaScript glue, logs, or repository variables. The compiled WASM necessarily contains enough information to recover or reuse it; this is accepted because the HMAC is only an extra barrier against trivial direct API calls.
+
+Canonical UTF-8 bytes use fixed field order, one ASCII LF separator, and no trailing LF:
+
+```text
+roady.v1.score
+{sessionId}
+{proof}
+{name}
+{condition}
+{terminal_total}
+{chickens}
+{coins}
+{objective_completed_0_or_1}
+{max_combo}
+{round_duration_ms}
+{time_left_ms}
+{game_over_reason}
+{build}
+{platform}
+```
+
+Integers are canonical base-10 without a plus sign or unnecessary leading zeroes. Names are normalized to uppercase `[A-Z0-9]{3,5}` before signing. Both client and Worker HMAC the exact bytes with SHA-256 and encode the 32-byte result as unpadded base64url. The Worker validates JSON first, rebuilds the canonical bytes from the validated values, decodes the signature, and performs a fixed-length XOR-accumulate comparison.
+
+This check is mandatory, but an attacker who extracts the key can bypass it. Turnstile, one-time session proof, expiry, condition binding, rate limits, plausibility checks, and moderation remain mandatory and independent.
+
+## 6. Session proof
 
 Worker secret: `LB_SESSION_HMAC_KEY` (at least 32 random bytes, base64).
 
@@ -249,7 +284,7 @@ The Worker returns the base64url signature as an opaque bearer proof. On score s
 
 The proof is bound to one session, condition, and expiry. TLS, five-minute expiry, and single-use storage reduce interception/replay risk. It does not prove honest gameplay.
 
-## 6. D1 submission ordering
+## 7. D1 submission ordering
 
 Do not unconditionally batch `UPDATE used` and `INSERT`, because a batch cannot conditionally skip the insert when the update affected zero rows.
 
@@ -262,7 +297,7 @@ Use:
 
 If the insert fails after session consumption, return an error and require a new session. This is acceptable for the MVP and prevents replay duplicates.
 
-## 7. Score validation
+## 8. Score validation
 
 Hard invariants:
 
@@ -276,7 +311,7 @@ The caps must be generous and derived from the shipped rules: up to 90 seconds, 
 
 Telemetry such as duration, objective completion, combo, client timestamp, or build is advisory and forgeable. It may generate moderation flags but is not proof.
 
-## 8. Rate limiting and privacy
+## 9. Rate limiting and privacy
 
 Recommended limits:
 
@@ -295,13 +330,13 @@ ip_hash = base64url(SHA-256(clientIP + LB_IP_HASH_PEPPER))
 
 Never store raw IP addresses. Rotate the pepper carefully; rotation breaks historical correlation but not leaderboard rows.
 
-## 9. Turnstile
+## 10. Turnstile
 
 Turnstile is required on `POST /v1/session` for the public MVP, not postponed to a later hardening phase. The Worker verifies the token with Cloudflare siteverify and optionally the requesting IP. Failed verification returns `422 turnstile_failed`.
 
 The game should request a token only when the player chooses to submit a score, not on every page load.
 
-## 10. CORS
+## 11. CORS
 
 Allow only configured origins, for example:
 
@@ -310,7 +345,7 @@ Allow only configured origins, for example:
 
 Set `Vary: Origin`. Handle `OPTIONS` with allowed methods and `Content-Type, Authorization`. Do not use `Access-Control-Allow-Origin: *` for submission endpoints.
 
-## 11. Client integration
+## 12. Client integration
 
 Add a separate Bevy `LeaderboardPlugin`; keep `PersistPlugin` as the offline/local record system.
 
@@ -333,7 +368,18 @@ Initials UI:
 
 Use raw `web-sys` Fetch bindings instead of `reqwest` to preserve WASM size. The required web-sys features are `Headers`, `Request`, `RequestInit`, `Response`, `AbortController`, and `AbortSignal` in addition to existing `Window`/`Storage`.
 
-## 12. Worker repository structure
+## 13. Exact-byte reference and response authentication
+
+The corrected loader reference contributes a useful byte-discipline pattern:
+
+- `scriptsSubscribed.ts` calls `JSON.stringify` once, signs that exact string's UTF-8 bytes, and sends the same string.
+- `dataDownloadCore.ts` signs exact raw plaintext bytes or exact `IV || ciphertext` bytes when transport encoding is enabled.
+
+Roady Car follows the serialize-once/canonical-bytes principle for score-submission HMACs. It does not copy the loader's AES-CTR transport encoding or IP/HWID-bound session design: symmetric transport keys are recoverable from public WASM, client-asserted HWID is spoofable, and exact IP pinning is brittle under mobile networks and NAT.
+
+The MVP does not add `X-Response-Signature`; HTTPS authenticates live responses, while a symmetric response-verification key in WASM would also permit forgery after extraction. If independently verifiable offline snapshots are needed later, use asymmetric response signatures with a Worker-only Ed25519/P-256 private key and pinned public key in the game. Sign the exact returned bytes, include freshness/expiry and key ID in the body, use unpadded base64url, verify `response.arrayBuffer()` before parsing, and expose the signature header through CORS.
+
+## 14. Worker repository structure
 
 ```text
 leaderboard/
@@ -360,6 +406,7 @@ Secrets:
 - `LB_IP_HASH_PEPPER`
 - `LB_ADMIN_TOKEN`
 - `LB_TURNSTILE_SECRET`
+- `LB_CLIENT_HMAC_KEY` (must match production build secret `ROADY_LEADERBOARD_CLIENT_HMAC_KEY`)
 
 Non-secret vars:
 
@@ -369,7 +416,7 @@ Non-secret vars:
 
 GitHub deployment credentials are separate from Worker runtime secrets. The GitHub token needs Workers Scripts Edit and D1 Edit; runtime secrets are installed into the Worker through Wrangler and never exposed to the game client.
 
-## 13. Retention and moderation
+## 15. Retention and moderation
 
 Scheduled cleanup should:
 
@@ -381,7 +428,7 @@ Scheduled cleanup should:
 
 Flag suspicious entries for review rather than automatically deleting plausible high scores.
 
-## 14. Phases
+## 16. Phases
 
 1. **Worker skeleton:** health endpoint, CORS, D1 migrations.
 2. **Read-only board:** public cached global/per-condition GET.
@@ -390,15 +437,15 @@ Flag suspicious entries for review rather than automatically deleting plausible 
 5. **Game integration:** initials UI, fetch/menu display, asynchronous Game Over submission, offline cache.
 6. **Hardening:** retention cron, moderation flags, soak/cost tests.
 
-## 15. Non-goals
+## 17. Non-goals
 
 - No real-time multiplayer in the leaderboard Worker
 - No authoritative Roady Car simulation
 - No account/OAuth system in MVP
 - No claim of tamper-proof scores
-- No embedded client HMAC as a hard gate
+- No claim that the mandatory embedded client HMAC proves honest gameplay
 
-## 16. Deployment relationship
+## 18. Deployment relationship
 
 The current Cloudflare Pages workflow is blocked because the available token lacks **Cloudflare Pages Edit**, and the `roady-car` Pages project does not yet exist. The leaderboard Worker requires a separate token or expanded token with Workers Scripts Edit and D1 Edit.
 
