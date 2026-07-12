@@ -127,7 +127,6 @@ struct ChickenBody {
 struct Feather {
     vel: Vec3,
     life: f32,
-    max_life: f32,
     spin: f32,
 }
 
@@ -586,7 +585,6 @@ fn spawn_particle_burst(
             Feather {
                 vel,
                 life: FEATHER_LIFE,
-                max_life: FEATHER_LIFE,
                 spin: (rand(seed) * 2.0 - 1.0) * 10.0,
             },
         ));

@@ -32,6 +32,9 @@ impl Default for AudioSettings {
 
 impl AudioSettings {
     /// Whether all game audio is currently muted.
+    /// Kept for the planned volume-slider API; runtime mute handling currently
+    /// accesses the setting internally.
+    #[allow(dead_code)]
     pub fn muted(&self) -> bool {
         self.muted
     }
@@ -42,6 +45,8 @@ impl AudioSettings {
     }
 
     /// Set the master gain, clamping out-of-range input.
+    /// Kept for the planned volume-slider API, which will be its runtime caller.
+    #[allow(dead_code)]
     pub fn set_master(&mut self, master: f32) {
         self.master = clamp_master(master);
     }

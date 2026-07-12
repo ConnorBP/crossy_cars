@@ -3,25 +3,17 @@ use bevy::prelude::*;
 /// Tunable gameplay constants (moved out of `const` so they can be adjusted at runtime).
 #[derive(Resource)]
 pub struct GameConfig {
-    pub accel: f32,
     pub max_speed: f32,
     pub turn_rate: f32,
-    pub drag: f32,
     pub cam_offset: Vec3,
-    pub arena_min: f32,
-    pub arena_max: f32,
 }
 
 impl Default for GameConfig {
     fn default() -> Self {
         Self {
-            accel: 8.0,
             max_speed: 12.0,
             turn_rate: 2.5,
-            drag: 0.8,
             cam_offset: Vec3::new(12.0, 12.0, 12.0),
-            arena_min: -49.0,
-            arena_max: 49.0,
         }
     }
 }

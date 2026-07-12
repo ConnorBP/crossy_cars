@@ -70,6 +70,7 @@ const SPAWN_AHEAD_RANGE: f32 = 32.0;
 const SPAWN_LATERAL: f32 = 3.0;
 /// World spacing and half-width of the roads built in `world.rs`.
 const ROAD_GRID: f32 = 40.0;
+#[cfg(test)]
 const ROAD_HALF: f32 = 4.0;
 /// Centre of each directional lane. With the traffic half-width included,
 /// every car remains comfortably inside the road's ±4u paved area.
@@ -523,7 +524,7 @@ fn lane_offset(dir: f32) -> f32 {
 
 /// A spawn position ahead of the player, constrained to a road that actually
 /// exists in the deterministic world network. The final lane centre is inside
-/// [`ROAD_HALF`] even including the traffic collider half-width.
+/// `ROAD_HALF` even including the traffic collider half-width.
 fn traffic_spawn_pos_on_road(
     car_pos: Vec3,
     forward: Vec3,

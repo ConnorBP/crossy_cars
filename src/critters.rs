@@ -135,7 +135,6 @@ struct CritterBody {
 struct Gib {
     vel: Vec3,
     life: f32,
-    max_life: f32,
     spin: f32,
 }
 
@@ -877,7 +876,6 @@ fn spawn_particle_burst(
             Gib {
                 vel,
                 life: GIB_LIFE,
-                max_life: GIB_LIFE,
                 spin: (rand(seed) * 2.0 - 1.0) * 10.0,
             },
         ));

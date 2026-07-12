@@ -379,12 +379,227 @@ impl Default for GridConfig {
 /// Identifies a block-root entity and its grid coordinates. Root transform
 /// sits at world `((gx+0.5)*block, 0, (gz+0.5)*block)`. Recycling retires
 /// roots outside the desired window and deterministically creates missing
-/// `(gx,gz)` roots. `kind` is derived from the same coordinate road-line data.
+/// `(gx,gz)` roots. Tile kind is only needed while populating, so it is not
+/// retained on every root.
 #[derive(Component)]
 pub struct Block {
     pub gx: i32,
     pub gz: i32,
-    pub kind: TileKind,
+}
+
+/// Shared fixed-dimension meshes and materials used by streamed blocks.
+/// Dimension-varying building meshes remain per-instance.
+#[derive(Resource)]
+pub struct WorldAssets {
+    meshes: WorldMeshAssets,
+    materials: WorldMaterialAssets,
+}
+
+struct WorldMeshAssets {
+    ground: Handle<Mesh>,
+    road_z: Handle<Mesh>,
+    road_x: Handle<Mesh>,
+    curb_z: [Handle<Mesh>; 3],
+    curb_x: [Handle<Mesh>; 3],
+    dash_z: Handle<Mesh>,
+    dash_x: Handle<Mesh>,
+    edge_line_z: [Handle<Mesh>; 3],
+    edge_line_x: [Handle<Mesh>; 3],
+    trunk: Handle<Mesh>,
+    foliage: Handle<Mesh>,
+    tree_shadow: Handle<Mesh>,
+    pole: Handle<Mesh>,
+    arm: Handle<Mesh>,
+    lamp: Handle<Mesh>,
+    coin: Handle<Mesh>,
+    cone_body: Handle<Mesh>,
+    cone_base: Handle<Mesh>,
+    cone_shadow: Handle<Mesh>,
+    hydrant_body: Handle<Mesh>,
+    hydrant_dome: Handle<Mesh>,
+    hydrant_nub: Handle<Mesh>,
+    hydrant_shadow: Handle<Mesh>,
+    bench_seat: Handle<Mesh>,
+    bench_leg: Handle<Mesh>,
+    bench_back: Handle<Mesh>,
+    bench_shadow: Handle<Mesh>,
+    hedge_box: Handle<Mesh>,
+    hedge_shadow: Handle<Mesh>,
+}
+
+struct WorldMaterialAssets {
+    line: Handle<StandardMaterial>,
+    shadow: Handle<StandardMaterial>,
+    park: Handle<StandardMaterial>,
+    trunk: Handle<StandardMaterial>,
+    foliage: Handle<StandardMaterial>,
+    building_body: [Handle<StandardMaterial>; 3],
+    building_roof: [Handle<StandardMaterial>; 3],
+    metal: Handle<StandardMaterial>,
+    lamp: Handle<StandardMaterial>,
+    coin: Handle<StandardMaterial>,
+    cone: Handle<StandardMaterial>,
+    hydrant: Handle<StandardMaterial>,
+    bench: Handle<StandardMaterial>,
+    hedge: Handle<StandardMaterial>,
+}
+
+impl FromWorld for WorldAssets {
+    fn from_world(world: &mut World) -> Self {
+        // Separate resource scopes ensure the mutable asset-storage borrows
+        // never overlap.
+        let meshes = world.resource_scope(|_, mut a: Mut<Assets<Mesh>>| WorldMeshAssets {
+            ground: a.add(Plane3d::default().mesh().size(42.0, 42.0)),
+            road_z: a.add(Plane3d::default().mesh().size(8.0, 40.0)),
+            road_x: a.add(Plane3d::default().mesh().size(40.0, 8.0)),
+            curb_z: [
+                a.add(Cuboid::new(1.5, 0.18, 40.0)),
+                a.add(Cuboid::new(1.5, 0.18, 36.0)),
+                a.add(Cuboid::new(1.5, 0.18, 32.0)),
+            ],
+            curb_x: [
+                a.add(Cuboid::new(40.0, 0.18, 1.5)),
+                a.add(Cuboid::new(34.5, 0.18, 1.5)),
+                a.add(Cuboid::new(29.0, 0.18, 1.5)),
+            ],
+            dash_z: a.add(Cuboid::new(0.18, 0.02, 2.0)),
+            dash_x: a.add(Cuboid::new(2.0, 0.02, 0.18)),
+            edge_line_z: [
+                a.add(Cuboid::new(0.12, 0.02, 40.0)),
+                a.add(Cuboid::new(0.12, 0.02, 36.0)),
+                a.add(Cuboid::new(0.12, 0.02, 32.0)),
+            ],
+            edge_line_x: [
+                a.add(Cuboid::new(40.0, 0.02, 0.12)),
+                a.add(Cuboid::new(36.0, 0.02, 0.12)),
+                a.add(Cuboid::new(32.0, 0.02, 0.12)),
+            ],
+            trunk: a.add(Cylinder::new(0.18, 0.9)),
+            foliage: a.add(Sphere::new(0.75).mesh().uv(12, 8)),
+            tree_shadow: a.add(Circle::new(0.9)),
+            pole: a.add(Cylinder::new(0.07, 3.2)),
+            arm: a.add(Cuboid::new(0.8, 0.06, 0.06)),
+            lamp: a.add(Sphere::new(0.14).mesh().uv(8, 6)),
+            coin: a.add(Cylinder::new(0.3, 0.08)),
+            cone_body: a.add(bevy::math::primitives::Cone::new(0.18, 0.4)),
+            cone_base: a.add(Cuboid::new(0.4, 0.04, 0.4)),
+            cone_shadow: a.add(Circle::new(0.3)),
+            hydrant_body: a.add(Cylinder::new(0.12, 0.3)),
+            hydrant_dome: a.add(Sphere::new(0.1).mesh().uv(10, 6)),
+            hydrant_nub: a.add(Cylinder::new(0.05, 0.12)),
+            hydrant_shadow: a.add(Circle::new(0.35)),
+            bench_seat: a.add(Cuboid::new(0.9, 0.1, 0.3)),
+            bench_leg: a.add(Cuboid::new(0.08, 0.45, 0.28)),
+            bench_back: a.add(Cuboid::new(0.9, 0.3, 0.06)),
+            bench_shadow: a.add(Plane3d::default().mesh().size(1.1, 0.45)),
+            hedge_box: a.add(Cuboid::new(1.2, 0.5, 0.4)),
+            hedge_shadow: a.add(Plane3d::default().mesh().size(1.4, 0.55)),
+        });
+        let materials =
+            world.resource_scope(
+                |_, mut a: Mut<Assets<StandardMaterial>>| WorldMaterialAssets {
+                    line: a.add(StandardMaterial {
+                        base_color: palette::LANE_WHITE,
+                        ..default()
+                    }),
+                    shadow: a.add(StandardMaterial {
+                        base_color: Color::srgba(0.0, 0.0, 0.0, 0.35),
+                        alpha_mode: AlphaMode::Blend,
+                        ..default()
+                    }),
+                    park: a.add(StandardMaterial {
+                        base_color: Color::srgb(0.24, 0.52, 0.20),
+                        perceptual_roughness: 1.0,
+                        ..default()
+                    }),
+                    trunk: a.add(StandardMaterial {
+                        base_color: Color::srgb(0.34, 0.21, 0.11),
+                        perceptual_roughness: 0.9,
+                        ..default()
+                    }),
+                    foliage: a.add(StandardMaterial {
+                        base_color: Color::srgb(0.18, 0.42, 0.16),
+                        perceptual_roughness: 0.85,
+                        ..default()
+                    }),
+                    building_body: [
+                        a.add(StandardMaterial {
+                            base_color: Color::srgb(0.92, 0.88, 0.78),
+                            perceptual_roughness: 0.8,
+                            ..default()
+                        }),
+                        a.add(StandardMaterial {
+                            base_color: Color::srgb(0.45, 0.55, 0.68),
+                            perceptual_roughness: 0.8,
+                            ..default()
+                        }),
+                        a.add(StandardMaterial {
+                            base_color: Color::srgb(0.65, 0.35, 0.28),
+                            perceptual_roughness: 0.8,
+                            ..default()
+                        }),
+                    ],
+                    building_roof: [
+                        a.add(StandardMaterial {
+                            base_color: Color::srgb(0.64, 0.62, 0.55),
+                            perceptual_roughness: 0.85,
+                            ..default()
+                        }),
+                        a.add(StandardMaterial {
+                            base_color: Color::srgb(0.32, 0.39, 0.48),
+                            perceptual_roughness: 0.85,
+                            ..default()
+                        }),
+                        a.add(StandardMaterial {
+                            base_color: Color::srgb(0.46, 0.25, 0.20),
+                            perceptual_roughness: 0.85,
+                            ..default()
+                        }),
+                    ],
+                    metal: a.add(StandardMaterial {
+                        base_color: Color::srgb(0.15, 0.15, 0.16),
+                        metallic: 0.8,
+                        perceptual_roughness: 0.4,
+                        ..default()
+                    }),
+                    lamp: a.add(StandardMaterial {
+                        base_color: Color::srgb(1.0, 0.85, 0.4),
+                        emissive: LinearRgba::new(1.5, 1.2, 0.5, 1.0),
+                        ..default()
+                    }),
+                    coin: a.add(StandardMaterial {
+                        base_color: palette::COIN,
+                        metallic: 0.8,
+                        perceptual_roughness: 0.25,
+                        emissive: LinearRgba::rgb(0.9, 0.55, 0.05),
+                        ..default()
+                    }),
+                    cone: a.add(StandardMaterial {
+                        base_color: Color::srgb(0.95, 0.45, 0.05),
+                        perceptual_roughness: 0.7,
+                        emissive: LinearRgba::rgb(0.25, 0.08, 0.0),
+                        ..default()
+                    }),
+                    hydrant: a.add(StandardMaterial {
+                        base_color: Color::srgb(0.85, 0.12, 0.1),
+                        perceptual_roughness: 0.6,
+                        emissive: LinearRgba::rgb(0.18, 0.02, 0.0),
+                        ..default()
+                    }),
+                    bench: a.add(StandardMaterial {
+                        base_color: Color::srgb(0.45, 0.28, 0.14),
+                        perceptual_roughness: 0.9,
+                        ..default()
+                    }),
+                    hedge: a.add(StandardMaterial {
+                        base_color: Color::srgb(0.16, 0.34, 0.14),
+                        perceptual_roughness: 0.9,
+                        ..default()
+                    }),
+                },
+            );
+        Self { meshes, materials }
+    }
 }
 
 pub struct WorldPlugin;
@@ -392,6 +607,7 @@ pub struct WorldPlugin;
 impl Plugin for WorldPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<GridConfig>()
+            .init_resource::<WorldAssets>()
             .add_systems(Startup, spawn_initial_grid)
             // Coin spin + pickup still live here (coins are environment now).
             .add_systems(
@@ -419,8 +635,8 @@ fn spawn_initial_grid(
     mut commands: Commands,
     cfg: Res<GridConfig>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
     textures: Res<TextureAssets>,
+    world_assets: Res<WorldAssets>,
 ) {
     // --- Sun: warm directional light (shadows gated for web) ---
     commands.spawn((
@@ -432,12 +648,12 @@ fn spawn_initial_grid(
         Transform::from_xyz(30.0, 25.0, 15.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));
 
-    spawn_grid_window(&mut commands, &cfg, &mut meshes, &mut materials, &textures);
+    spawn_grid_window(&mut commands, &cfg, &mut meshes, &textures, &world_assets);
 }
 
 /// Spawn the exact count×count grid of blocks centered on the origin. Each
 /// block root is at `((gx+0.5)*block, 0, (gz+0.5)*block)` with
-/// `Block { gx, gz, kind }`, then `populate_block`. Used by both
+/// `Block { gx, gz }`, then `populate_block`. Used by both
 /// `spawn_initial_grid` (Startup) and `reset_grid` (round start).
 ///
 /// Each block's tile is derived deterministically from its (gx,gz) via the
@@ -448,8 +664,8 @@ fn spawn_grid_window(
     commands: &mut Commands,
     cfg: &GridConfig,
     meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<StandardMaterial>,
     textures: &TextureAssets,
+    world_assets: &WorldAssets,
 ) {
     let block = cfg.block;
     for (gx, gz) in desired_grid_coords((0, 0), cfg.count) {
@@ -458,14 +674,14 @@ fn spawn_grid_window(
             .spawn((
                 Transform::from_xyz((gx as f32 + 0.5) * block, 0.0, (gz as f32 + 0.5) * block),
                 Visibility::default(),
-                Block { gx, gz, kind },
+                Block { gx, gz },
             ))
             .id();
         populate_block(
             commands,
             meshes,
-            materials,
             textures,
+            world_assets,
             root,
             gx,
             gz,
@@ -499,8 +715,8 @@ fn seed_for(gx: i32, gz: i32) -> u32 {
 pub fn populate_block(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<StandardMaterial>,
     textures: &TextureAssets,
+    world_assets: &WorldAssets,
     root: Entity,
     gx: i32,
     gz: i32,
@@ -528,21 +744,8 @@ pub fn populate_block(
     let interior_max_z_lo = if road_s { -half + 6.0 } else { -half + 1.0 };
     let interior_max_z_hi = if road_n { half - 6.0 } else { half - 1.0 };
 
-    // Shared blob-shadow material (semi-transparent dark patch, reused by
-    // trees, buildings & lamp posts).
-    let shadow_mat = materials.add(StandardMaterial {
-        base_color: Color::srgba(0.0, 0.0, 0.0, 0.35),
-        alpha_mode: AlphaMode::Blend,
-        ..default()
-    });
-
-    // Park-green ground tint (replaces the grass texture for Park tiles so
-    // parks read as a distinct green space).
-    let park_mat = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.24, 0.52, 0.20),
-        perceptual_roughness: 1.0,
-        ..default()
-    });
+    let shadow_mat = world_assets.materials.shadow.clone();
+    let park_mat = world_assets.materials.park.clone();
 
     let _ = (gx, gz); // available for callers; layout uses the seed instead.
 
@@ -552,13 +755,13 @@ pub fn populate_block(
         // distinct look; for non-park tiles, use the textured grass.
         if is_park {
             p.spawn((
-                Mesh3d(meshes.add(Plane3d::default().mesh().size(block + 2.0, block + 2.0))),
+                Mesh3d(world_assets.meshes.ground.clone()),
                 MeshMaterial3d(park_mat.clone()),
                 Transform::from_xyz(0.0, 0.01, 0.0),
             ));
         } else {
             p.spawn((
-                Mesh3d(meshes.add(Plane3d::default().mesh().size(block + 2.0, block + 2.0))),
+                Mesh3d(world_assets.meshes.ground.clone()),
                 MeshMaterial3d(textures.grass.clone()),
                 Transform::from_xyz(0.0, 0.0, 0.0),
             ));
@@ -568,7 +771,7 @@ pub fn populate_block(
         // W (−X) edge road: runs along Z at local x = −half.
         if road_w {
             p.spawn((
-                Mesh3d(meshes.add(Plane3d::default().mesh().size(8.0, block))),
+                Mesh3d(world_assets.meshes.road_z.clone()),
                 MeshMaterial3d(textures.road.clone()),
                 Transform::from_xyz(-half, 0.02, 0.0),
             ));
@@ -576,7 +779,7 @@ pub fn populate_block(
         // E (+X) edge road: runs along Z at local x = +half.
         if road_e {
             p.spawn((
-                Mesh3d(meshes.add(Plane3d::default().mesh().size(8.0, block))),
+                Mesh3d(world_assets.meshes.road_z.clone()),
                 MeshMaterial3d(textures.road.clone()),
                 Transform::from_xyz(half, 0.02, 0.0),
             ));
@@ -584,7 +787,7 @@ pub fn populate_block(
         // S (−Z) edge road: runs along X at local z = −half.
         if road_s {
             p.spawn((
-                Mesh3d(meshes.add(Plane3d::default().mesh().size(block, 8.0))),
+                Mesh3d(world_assets.meshes.road_x.clone()),
                 MeshMaterial3d(textures.road.clone()),
                 Transform::from_xyz(0.0, 0.02, -half),
             ));
@@ -592,7 +795,7 @@ pub fn populate_block(
         // N (+Z) edge road: runs along X at local z = +half.
         if road_n {
             p.spawn((
-                Mesh3d(meshes.add(Plane3d::default().mesh().size(block, 8.0))),
+                Mesh3d(world_assets.meshes.road_x.clone()),
                 MeshMaterial3d(textures.road.clone()),
                 Transform::from_xyz(0.0, 0.02, half),
             ));
@@ -619,7 +822,8 @@ pub fn populate_block(
             if z_hi > z_lo {
                 let len = z_hi - z_lo;
                 let cz = (z_lo + z_hi) * 0.5;
-                let curb_mesh = meshes.add(Cuboid::new(1.5, 0.18, len));
+                let curb_mesh =
+                    world_assets.meshes.curb_z[(road_s as usize) + (road_n as usize)].clone();
                 p.spawn((
                     Mesh3d(curb_mesh.clone()),
                     MeshMaterial3d(textures.sidewalk.clone()),
@@ -639,7 +843,8 @@ pub fn populate_block(
             if z_hi > z_lo {
                 let len = z_hi - z_lo;
                 let cz = (z_lo + z_hi) * 0.5;
-                let curb_mesh = meshes.add(Cuboid::new(1.5, 0.18, len));
+                let curb_mesh =
+                    world_assets.meshes.curb_z[(road_s as usize) + (road_n as usize)].clone();
                 p.spawn((
                     Mesh3d(curb_mesh.clone()),
                     MeshMaterial3d(textures.sidewalk.clone()),
@@ -660,7 +865,8 @@ pub fn populate_block(
             if x_hi > x_lo {
                 let len = x_hi - x_lo;
                 let cx = (x_lo + x_hi) * 0.5;
-                let curb_mesh = meshes.add(Cuboid::new(len, 0.18, 1.5));
+                let curb_mesh =
+                    world_assets.meshes.curb_x[(road_w as usize) + (road_e as usize)].clone();
                 p.spawn((
                     Mesh3d(curb_mesh.clone()),
                     MeshMaterial3d(textures.sidewalk.clone()),
@@ -681,7 +887,8 @@ pub fn populate_block(
             if x_hi > x_lo {
                 let len = x_hi - x_lo;
                 let cx = (x_lo + x_hi) * 0.5;
-                let curb_mesh = meshes.add(Cuboid::new(len, 0.18, 1.5));
+                let curb_mesh =
+                    world_assets.meshes.curb_x[(road_w as usize) + (road_e as usize)].clone();
                 p.spawn((
                     Mesh3d(curb_mesh.clone()),
                     MeshMaterial3d(textures.sidewalk.clone()),
@@ -696,12 +903,9 @@ pub fn populate_block(
         }
 
         // --- Lane dashes + solid edge lines on each road edge ---
-        let dash_mesh_z = meshes.add(Cuboid::new(0.18, 0.02, 2.0)); // along Z
-        let dash_mesh_x = meshes.add(Cuboid::new(2.0, 0.02, 0.18)); // along X
-        let line_mat = materials.add(StandardMaterial {
-            base_color: palette::LANE_WHITE,
-            ..default()
-        });
+        let dash_mesh_z = world_assets.meshes.dash_z.clone(); // along Z
+        let dash_mesh_x = world_assets.meshes.dash_x.clone(); // along X
+        let line_mat = world_assets.materials.line.clone();
         // Dashes + edge lines on the W road (centered on x = −half, running Z).
         if road_w {
             let z_lo = -half + if road_s { ROAD_HALF } else { 0.0 };
@@ -718,9 +922,9 @@ pub fn populate_block(
             // Edge lines trimmed to the same span as the curbs so they don't
             // overlap into the intersection.
             if z_hi > z_lo {
-                let len = z_hi - z_lo;
                 let cz = (z_lo + z_hi) * 0.5;
-                let edge_mesh = meshes.add(Cuboid::new(0.12, 0.02, len));
+                let edge_mesh =
+                    world_assets.meshes.edge_line_z[(road_s as usize) + (road_n as usize)].clone();
                 for &xo in &[3.75_f32, -3.75] {
                     p.spawn((
                         Mesh3d(edge_mesh.clone()),
@@ -744,9 +948,9 @@ pub fn populate_block(
                 z += 4.0;
             }
             if z_hi > z_lo {
-                let len = z_hi - z_lo;
                 let cz = (z_lo + z_hi) * 0.5;
-                let edge_mesh = meshes.add(Cuboid::new(0.12, 0.02, len));
+                let edge_mesh =
+                    world_assets.meshes.edge_line_z[(road_s as usize) + (road_n as usize)].clone();
                 for &xo in &[3.75_f32, -3.75] {
                     p.spawn((
                         Mesh3d(edge_mesh.clone()),
@@ -770,9 +974,9 @@ pub fn populate_block(
                 x += 4.0;
             }
             if x_hi > x_lo {
-                let len = x_hi - x_lo;
                 let cx = (x_lo + x_hi) * 0.5;
-                let edge_mesh = meshes.add(Cuboid::new(len, 0.02, 0.12));
+                let edge_mesh =
+                    world_assets.meshes.edge_line_x[(road_w as usize) + (road_e as usize)].clone();
                 for &zo in &[3.75_f32, -3.75] {
                     p.spawn((
                         Mesh3d(edge_mesh.clone()),
@@ -796,9 +1000,9 @@ pub fn populate_block(
                 x += 4.0;
             }
             if x_hi > x_lo {
-                let len = x_hi - x_lo;
                 let cx = (x_lo + x_hi) * 0.5;
-                let edge_mesh = meshes.add(Cuboid::new(len, 0.02, 0.12));
+                let edge_mesh =
+                    world_assets.meshes.edge_line_x[(road_w as usize) + (road_e as usize)].clone();
                 for &zo in &[3.75_f32, -3.75] {
                     p.spawn((
                         Mesh3d(edge_mesh.clone()),
@@ -810,136 +1014,38 @@ pub fn populate_block(
         }
 
         // --- Shared obstacle assets ---
-        let trunk_mesh = meshes.add(Cylinder::new(0.18, 0.9));
-        let trunk_mat = materials.add(StandardMaterial {
-            base_color: Color::srgb(0.34, 0.21, 0.11),
-            perceptual_roughness: 0.9,
-            ..default()
-        });
-        let foliage_mesh = meshes.add(Sphere::new(0.75).mesh().uv(12, 8));
-        let foliage_mat = materials.add(StandardMaterial {
-            base_color: Color::srgb(0.18, 0.42, 0.16),
-            perceptual_roughness: 0.85,
-            ..default()
-        });
-        let tree_shadow_mesh = meshes.add(Circle::new(0.9));
-
-        let building_colors = [
-            Color::srgb(0.92, 0.88, 0.78), // cream
-            Color::srgb(0.45, 0.55, 0.68), // steel-blue
-            Color::srgb(0.65, 0.35, 0.28), // brick
-        ];
-        let roof_colors = [
-            Color::srgb(0.64, 0.62, 0.55),
-            Color::srgb(0.32, 0.39, 0.48),
-            Color::srgb(0.46, 0.25, 0.20),
-        ];
-        let body_mats: [Handle<StandardMaterial>; 3] = [
-            materials.add(StandardMaterial {
-                base_color: building_colors[0],
-                perceptual_roughness: 0.8,
-                ..default()
-            }),
-            materials.add(StandardMaterial {
-                base_color: building_colors[1],
-                perceptual_roughness: 0.8,
-                ..default()
-            }),
-            materials.add(StandardMaterial {
-                base_color: building_colors[2],
-                perceptual_roughness: 0.8,
-                ..default()
-            }),
-        ];
-        let roof_mats: [Handle<StandardMaterial>; 3] = [
-            materials.add(StandardMaterial {
-                base_color: roof_colors[0],
-                perceptual_roughness: 0.85,
-                ..default()
-            }),
-            materials.add(StandardMaterial {
-                base_color: roof_colors[1],
-                perceptual_roughness: 0.85,
-                ..default()
-            }),
-            materials.add(StandardMaterial {
-                base_color: roof_colors[2],
-                perceptual_roughness: 0.85,
-                ..default()
-            }),
-        ];
-
-        let pole_mesh = meshes.add(Cylinder::new(0.07, 3.2));
-        let arm_mesh = meshes.add(Cuboid::new(0.8, 0.06, 0.06));
-        let metal_mat = materials.add(StandardMaterial {
-            base_color: Color::srgb(0.15, 0.15, 0.16),
-            metallic: 0.8,
-            perceptual_roughness: 0.4,
-            ..default()
-        });
-        let lamp_mesh = meshes.add(Sphere::new(0.14).mesh().uv(8, 6));
-        let lamp_mat = materials.add(StandardMaterial {
-            base_color: Color::srgb(1.0, 0.85, 0.4),
-            emissive: LinearRgba::new(1.5, 1.2, 0.5, 1.0),
-            ..default()
-        });
-
-        // --- Coins (mesh + mat) ---
-        let coin_mesh = meshes.add(Cylinder::new(0.3, 0.08));
-        let coin_mat = materials.add(StandardMaterial {
-            base_color: palette::COIN,
-            metallic: 0.8,
-            perceptual_roughness: 0.25,
-            // Emissive gold glow so coins pop with bloom (T9 rendering beef-up).
-            emissive: LinearRgba::rgb(0.9, 0.55, 0.05),
-            ..default()
-        });
-
-        // --- T12 obstacle variety: cones, hydrants, benches, hedges ---
-        // Shared assets for the four obstacle types (built from primitives,
-        // each carries a generic `Collider` so `physics_collisions` handles them
-        // automatically). NB: the Bevy `Cone` primitive is fully-qualified
-        // here because this module also declares a `Cone` tag component (T12)
-        // of the same name.
-        let cone_body_mesh = meshes.add(bevy::math::primitives::Cone::new(0.18, 0.4));
-        let cone_base_mesh = meshes.add(Cuboid::new(0.4, 0.04, 0.4));
-        let cone_mat = materials.add(StandardMaterial {
-            base_color: Color::srgb(0.95, 0.45, 0.05),
-            perceptual_roughness: 0.7,
-            // Slight emissive so cones pop under bloom (T9).
-            emissive: LinearRgba::rgb(0.25, 0.08, 0.0),
-            ..default()
-        });
-        let cone_shadow_mesh = meshes.add(Circle::new(0.3));
-
-        let hydrant_body_mesh = meshes.add(Cylinder::new(0.12, 0.3));
-        let hydrant_dome_mesh = meshes.add(Sphere::new(0.1).mesh().uv(10, 6));
-        let hydrant_nub_mesh = meshes.add(Cylinder::new(0.05, 0.12));
-        let hydrant_mat = materials.add(StandardMaterial {
-            base_color: Color::srgb(0.85, 0.12, 0.1),
-            perceptual_roughness: 0.6,
-            emissive: LinearRgba::rgb(0.18, 0.02, 0.0),
-            ..default()
-        });
-        let hydrant_shadow_mesh = meshes.add(Circle::new(0.35));
-
-        let bench_seat_mesh = meshes.add(Cuboid::new(0.9, 0.1, 0.3));
-        let bench_leg_mesh = meshes.add(Cuboid::new(0.08, 0.45, 0.28));
-        let bench_back_mesh = meshes.add(Cuboid::new(0.9, 0.3, 0.06));
-        let bench_mat = materials.add(StandardMaterial {
-            base_color: Color::srgb(0.45, 0.28, 0.14),
-            perceptual_roughness: 0.9,
-            ..default()
-        });
-        let bench_shadow_mesh = meshes.add(Plane3d::default().mesh().size(1.1, 0.45));
-
-        let hedge_box_mesh = meshes.add(Cuboid::new(1.2, 0.5, 0.4));
-        let hedge_mat = materials.add(StandardMaterial {
-            base_color: Color::srgb(0.16, 0.34, 0.14),
-            perceptual_roughness: 0.9,
-            ..default()
-        });
-        let hedge_shadow_mesh = meshes.add(Plane3d::default().mesh().size(1.4, 0.55));
+        let a = world_assets;
+        let trunk_mesh = a.meshes.trunk.clone();
+        let trunk_mat = a.materials.trunk.clone();
+        let foliage_mesh = a.meshes.foliage.clone();
+        let foliage_mat = a.materials.foliage.clone();
+        let tree_shadow_mesh = a.meshes.tree_shadow.clone();
+        let body_mats = &a.materials.building_body;
+        let roof_mats = &a.materials.building_roof;
+        let pole_mesh = a.meshes.pole.clone();
+        let arm_mesh = a.meshes.arm.clone();
+        let metal_mat = a.materials.metal.clone();
+        let lamp_mesh = a.meshes.lamp.clone();
+        let lamp_mat = a.materials.lamp.clone();
+        let coin_mesh = a.meshes.coin.clone();
+        let coin_mat = a.materials.coin.clone();
+        let cone_body_mesh = a.meshes.cone_body.clone();
+        let cone_base_mesh = a.meshes.cone_base.clone();
+        let cone_mat = a.materials.cone.clone();
+        let cone_shadow_mesh = a.meshes.cone_shadow.clone();
+        let hydrant_body_mesh = a.meshes.hydrant_body.clone();
+        let hydrant_dome_mesh = a.meshes.hydrant_dome.clone();
+        let hydrant_nub_mesh = a.meshes.hydrant_nub.clone();
+        let hydrant_mat = a.materials.hydrant.clone();
+        let hydrant_shadow_mesh = a.meshes.hydrant_shadow.clone();
+        let bench_seat_mesh = a.meshes.bench_seat.clone();
+        let bench_leg_mesh = a.meshes.bench_leg.clone();
+        let bench_back_mesh = a.meshes.bench_back.clone();
+        let bench_mat = a.materials.bench.clone();
+        let bench_shadow_mesh = a.meshes.bench_shadow.clone();
+        let hedge_box_mesh = a.meshes.hedge_box.clone();
+        let hedge_mat = a.materials.hedge.clone();
+        let hedge_shadow_mesh = a.meshes.hedge_shadow.clone();
 
         // --- Deterministic per-block LCG for placement variety ---
         let mut s = seed;
@@ -1487,8 +1593,8 @@ fn recycle_grid(
     mut commands: Commands,
     cfg: Res<GridConfig>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
     textures: Res<TextureAssets>,
+    world_assets: Res<WorldAssets>,
     car: Query<&Transform, (With<Car>, Without<Block>)>,
     blocks: Query<(Entity, &Block)>,
 ) {
@@ -1541,8 +1647,8 @@ fn recycle_grid(
         spawn_block_at(
             &mut commands,
             &mut meshes,
-            &mut materials,
             &textures,
+            &world_assets,
             block,
             gx,
             gz,
@@ -1557,8 +1663,8 @@ fn recycle_grid(
 fn spawn_block_at(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<StandardMaterial>,
     textures: &TextureAssets,
+    world_assets: &WorldAssets,
     block: f32,
     gx: i32,
     gz: i32,
@@ -1568,14 +1674,14 @@ fn spawn_block_at(
         .spawn((
             Transform::from_xyz((gx as f32 + 0.5) * block, 0.0, (gz as f32 + 0.5) * block),
             Visibility::default(),
-            Block { gx, gz, kind },
+            Block { gx, gz },
         ))
         .id();
     populate_block(
         commands,
         meshes,
-        materials,
         textures,
+        world_assets,
         root,
         gx,
         gz,
@@ -1593,8 +1699,8 @@ fn reset_grid(
     mut commands: Commands,
     cfg: Res<GridConfig>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
     textures: Res<TextureAssets>,
+    world_assets: Res<WorldAssets>,
     blocks: Query<Entity, With<Block>>,
     round_active: Res<RoundActive>,
 ) {
@@ -1604,7 +1710,7 @@ fn reset_grid(
     for e in &blocks {
         commands.entity(e).despawn();
     }
-    spawn_grid_window(&mut commands, &cfg, &mut meshes, &mut materials, &textures);
+    spawn_grid_window(&mut commands, &cfg, &mut meshes, &textures, &world_assets);
 }
 
 // ---------------------------------------------------------------------------
