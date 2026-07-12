@@ -11,15 +11,10 @@
 //! ever fails to load, the dome is simply invisible and the flat `ClearColor`
 //! remains, so the scene degrades gracefully.
 
-use bevy::asset::RenderAssetUsages;
 use bevy::color::LinearRgba;
 use bevy::prelude::*;
-use bevy::render::render_resource::{
-    AsBindGroup, Extent3d, TextureDimension, TextureFormat, TextureViewDescriptor,
-    TextureViewDimension,
-};
+use bevy::render::render_resource::AsBindGroup;
 use bevy::shader::ShaderRef;
-use half::f16;
 
 pub struct ShaderPlugin;
 
@@ -27,7 +22,6 @@ impl Plugin for ShaderPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(MaterialPlugin::<SkyMaterial>::default())
             .add_plugins(MaterialPlugin::<WaterMaterial>::default())
-            .add_plugins(MaterialPlugin::<CarPaintMaterial>::default())
             .add_systems(Startup, (spawn_sky, spawn_water))
             .add_systems(
                 Update,
@@ -51,28 +45,6 @@ pub struct SkyMaterial {
 impl Material for SkyMaterial {
     fn fragment_shader() -> ShaderRef {
         "shaders/sky.wgsl".into()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Car paint — fake-metallic custom shader
-// ---------------------------------------------------------------------------
-// Bevy's EnvironmentMapLight reflections don't land on WebGL2 for our setup
-// (the car read as flat/dark). This custom material fakes metallic car paint
-// with a hemispherical sky/ground reflection driven by the reflection vector
-// (so it shifts as the car turns), a sharp Blinn-Phong sun glint, and a
-// Fresnel rim. It's our own WGSL, so it works on WebGL2 independent of the
-// env-map pipeline. The camera is a fixed iso angle, so the view direction
-// is a constant (no camera uniform needed).
-#[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
-pub struct CarPaintMaterial {
-    #[uniform(0)]
-    pub color: LinearRgba,
-}
-
-impl Material for CarPaintMaterial {
-    fn fragment_shader() -> ShaderRef {
-        "shaders/car_paint.wgsl".into()
     }
 }
 
@@ -166,137 +138,26 @@ fn update_water(time: Res<Time>, mut water_materials: ResMut<Assets<WaterMateria
 }
 
 // ---------------------------------------------------------------------------
-// T9: Static pre-baked environment map for IBL reflections
+// Static prefiltered image-based lighting
 // ---------------------------------------------------------------------------
-//
-// `EnvironmentMapGenerationPlugin` (runtime cubemap filtering) is disabled on
-// WebGL2 because it needs compute shaders. But a **pre-baked** cubemap works
-// fine — it's just a static `Image` sampled in the PBR shader, no compute.
-// Bevy 0.19 ships `EnvironmentMapLight::hemispherical_gradient` which builds a
-// tiny 1×1×6 cubemap from three colors (sky / horizon / ground) procedurally,
-// so we get IBL diffuse + specular reflections on metallic/glossy surfaces
-// (car paint, lamp poles, coins) on BOTH native and web.
-//
-// `EnvironmentMapLight` is a **view** component (read off the camera entity),
-// so we insert it onto the `Camera3d` here rather than spawning a `LightProbe`
-// entity. This runs every Update but exits early once the camera has the
-// component, so startup ordering with `spawn_camera` doesn't matter.
+// A view environment map is supported on WebGL2. It does not capture the live
+// city: it reflects the static scene baked into these cubemaps. The diffuse
+// file is Lambertian-filtered; the specular file contains the GGX roughness mip
+// chain required by Bevy's split-sum PBR shader. Both files are the known-good
+// Bevy 0.19 Pisa assets, used to validate the real IBL path before replacing
+// them with a similarly prefiltered Palermo Sidewalk pair.
 fn setup_environment_light(
     mut commands: Commands,
     cameras: Query<Entity, (With<Camera3d>, Without<EnvironmentMapLight>)>,
-    mut images: ResMut<Assets<Image>>,
+    asset_server: Res<AssetServer>,
 ) {
-    let Ok(cam) = cameras.single() else {
+    let Ok(camera) = cameras.single() else {
         return;
     };
-    // A procedural HDR cubemap with a sky gradient + a bright sun disc. The
-    // disc gives low-roughness metallic surfaces (car paint) a sharp bright
-    // streak to reflect — the classic metallic cue. The smooth
-    // `hemispherical_gradient` env was too featureless, so the car read as a
-    // flat red surface instead of metal.
-    let cubemap = images.add(sun_disc_cubemap());
-    let env = EnvironmentMapLight {
-        diffuse_map: cubemap.clone(),
-        specular_map: cubemap,
-        // Bright so reflections are obvious (GlobalAmbientLight was lowered to
-        // 40 in Wave 3; the IBL carries the metallic look). High intensity so
-        // the near-full-metal car body clearly reflects the sun disc + sky.
-        intensity: 10.0,
+    commands.entity(camera).insert(EnvironmentMapLight {
+        diffuse_map: asset_server.load("environment_maps/pisa_diffuse_rgb9e5_zstd.ktx2"),
+        specular_map: asset_server.load("environment_maps/pisa_specular_rgb9e5_zstd.ktx2"),
+        intensity: 900.0,
         ..default()
-    };
-    commands.entity(cam).insert(env);
-}
-
-/// Build a small HDR cubemap (`Rgba16Float`, `RES`×`RES`×6 faces) with a sky
-/// gradient and a bright sun disc on the +Y (up) face. Face order is the wgpu
-/// cubemap order: +X, -X, +Y, -Y, +Z, -Z. Each pixel is 4 f16 in linear space.
-/// The sun disc is HDR (>1.0) so it blooms + reflects strongly on metal.
-fn sun_disc_cubemap() -> Image {
-    const RES: u32 = 64;
-    const FACE: usize = 6;
-    let sky = LinearRgba::rgb(0.35, 0.55, 0.85); // sky blue
-    let horizon = LinearRgba::rgb(0.85, 0.88, 0.93); // pale haze (bright band)
-    let ground = LinearRgba::rgb(0.16, 0.14, 0.11); // warm earth
-    let sun = LinearRgba::rgb(20.0, 18.0, 15.0); // HDR sun (>>1.0 -> strong bloom)
-
-    // Cubemap face indices: 0=+X, 1=-X, 2=+Y, 3=-Y, 4=+Z, 5=-Z.
-    let face_dirs: [(f32, f32, f32); FACE] = [
-        (1.0, 0.0, 0.0),
-        (-1.0, 0.0, 0.0),
-        (0.0, 1.0, 0.0),
-        (0.0, -1.0, 0.0),
-        (0.0, 0.0, 1.0),
-        (0.0, 0.0, -1.0),
-    ];
-    // Sun direction (unit), roughly matching the world.rs directional sun at
-    // (30,25,15) -> normalized.
-    let sun_dir = Vec3::new(30.0, 25.0, 15.0).normalize();
-
-    let mut data: Vec<u8> = Vec::with_capacity(FACE * (RES * RES) as usize * 8);
-    for (_, dir) in face_dirs.iter().enumerate() {
-        let face_normal = Vec3::new(dir.0, dir.1, dir.2);
-        // Build an orthonormal basis (right, up) for this face. Use Z as the
-        // reference "up" for the +Y/-Y faces (whose normal is parallel to Y so
-        // the cross with Y is zero).
-        let world_up = if face_normal.abs().dot(Vec3::Y) > 0.9 {
-            Vec3::Z
-        } else {
-            Vec3::Y
-        };
-        let right = face_normal.cross(world_up).normalize_or_zero();
-        let up = right.cross(face_normal).normalize_or_zero();
-        for y in 0..RES {
-            for x in 0..RES {
-                // Map pixel to a direction within the face ([-1,1] in right/up).
-                let u = (x as f32 / (RES - 1) as f32) * 2.0 - 1.0;
-                let v = (y as f32 / (RES - 1) as f32) * 2.0 - 1.0;
-                let sample_dir = (face_normal + right * u + up * v).normalize();
-                // Gradient by vertical (world Y) component.
-                let sy = sample_dir.y;
-                let mut col = if sy > 0.0 {
-                    // Sky: horizon -> sky blue with height.
-                    let t = sy.clamp(0.0, 1.0);
-                    horizon.mix(&sky, t)
-                } else {
-                    // Ground: horizon -> earth with depth.
-                    let t = (-sy).clamp(0.0, 1.0);
-                    horizon.mix(&ground, t)
-                };
-                // Sun disc: bright where the sample direction is near the sun.
-                // Use a relatively LARGE disc (~18 deg) so the reflection on
-                // the car is an obvious bright streak, not a tiny dot.
-                let d = sample_dir.dot(sun_dir).max(0.0);
-                let disc = ((d - 0.95) / 0.05).clamp(0.0, 1.0); // ~18 deg disc
-                if disc > 0.0 {
-                    col = col.mix(&sun, disc);
-                    // Soft halo around the disc.
-                    let halo = ((d - 0.90) / 0.05).clamp(0.0, 1.0) * 0.5;
-                    col = col + sun * halo * 0.25;
-                }
-                let c = [col.red, col.green, col.blue, 1.0f32];
-                for chan in c {
-                    let h = f16::from_f32(chan);
-                    data.extend_from_slice(&h.to_le_bytes());
-                }
-            }
-        }
-    }
-
-    Image {
-        texture_view_descriptor: Some(TextureViewDescriptor {
-            dimension: Some(TextureViewDimension::Cube),
-            ..Default::default()
-        }),
-        ..Image::new(
-            Extent3d {
-                width: RES,
-                height: RES,
-                depth_or_array_layers: FACE as u32,
-            },
-            TextureDimension::D2,
-            data,
-            TextureFormat::Rgba16Float,
-            RenderAssetUsages::RENDER_WORLD,
-        )
-    }
+    });
 }

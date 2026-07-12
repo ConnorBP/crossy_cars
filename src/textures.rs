@@ -29,7 +29,6 @@ const NORMAL_SIZE: u32 = 64;
 const GRASS_SRGB: [f32; 3] = [0.30, 0.60, 0.30]; // palette::GRASS_LIGHT
 const ASPHALT_SRGB: [f32; 3] = [0.13, 0.13, 0.14]; // palette::ASPHALT
 const CONCRETE_SRGB: [f32; 3] = [0.72, 0.71, 0.68]; // palette::CONCRETE
-const CAR_BODY_SRGB: [f32; 3] = [0.90, 0.10, 0.10]; // palette::CAR_BODY
 
 /// Ready-to-use textured `StandardMaterial` handles, inserted as a resource.
 ///
@@ -43,7 +42,7 @@ pub struct TextureAssets {
     pub grass: Handle<StandardMaterial>,
     pub road: Handle<StandardMaterial>,
     pub sidewalk: Handle<StandardMaterial>,
-    pub car_paint: Handle<crate::shaders::CarPaintMaterial>,
+    pub car_paint: Handle<StandardMaterial>,
 }
 
 pub struct TexturesPlugin;
@@ -59,82 +58,79 @@ impl Plugin for TexturesPlugin {
 impl FromWorld for TextureAssets {
     fn from_world(world: &mut World) -> Self {
         world.resource_scope::<Assets<Image>, _>(|world, mut images| {
-            // StandardMaterial assets (grass/road/sidewalk) — borrow dropped at
-            // the end of this block so we can then borrow CarPaintMaterial
-            // assets without a double-mutable-borrow conflict on `world`.
-            let (grass, road, sidewalk) = {
+            let (grass, road, sidewalk, car_paint) = {
                 let mut materials = world.resource_mut::<Assets<StandardMaterial>>();
 
-        // --- Procedural normal maps ---
-        // Road/asphalt gets a gravelly normal map (stronger) so the surface
-        // catches light per-pixel instead of looking like flat paint.
-        let road_normal = images.add(asphalt_normal_map());
-        // Grass gets gentle blade bumps for natural light scatter.
-        let grass_normal = images.add(grass_normal_map());
-        // Sidewalk gets a bumpy normal for concrete texture.
-        let sidewalk_normal = images.add(concrete_normal_map());
+                // --- Procedural normal maps ---
+                // Road/asphalt gets a gravelly normal map (stronger) so the surface
+                // catches light per-pixel instead of looking like flat paint.
+                let road_normal = images.add(asphalt_normal_map());
+                // Grass gets gentle blade bumps for natural light scatter.
+                let grass_normal = images.add(grass_normal_map());
+                // Sidewalk gets a bumpy normal for concrete texture.
+                let sidewalk_normal = images.add(concrete_normal_map());
 
-        // GRASS — multi-tone green + subtle yellow/brown patches + faint
-        // mowing stripes; tile 16×. T15: richer natural variation, fully
-        // rough (matte) with a blade-bump normal map for natural scatter.
-        let grass = materials.add(StandardMaterial {
-            base_color: Color::WHITE,
-            base_color_texture: Some(images.add(grass_texture())),
-            normal_map_texture: Some(grass_normal),
-            perceptual_roughness: 1.0,
-            metallic: 0.0,
-            uv_transform: Affine2::from_scale(Vec2::splat(16.0)),
-            ..default()
-        });
+                // GRASS — multi-tone green + subtle yellow/brown patches + faint
+                // mowing stripes; tile 16×. T15: richer natural variation, fully
+                // rough (matte) with a blade-bump normal map for natural scatter.
+                let grass = materials.add(StandardMaterial {
+                    base_color: Color::WHITE,
+                    base_color_texture: Some(images.add(grass_texture())),
+                    normal_map_texture: Some(grass_normal),
+                    perceptual_roughness: 1.0,
+                    metallic: 0.0,
+                    uv_transform: Affine2::from_scale(Vec2::splat(16.0)),
+                    ..default()
+                });
 
-        // ROAD — dark asphalt with richer gravel/noise; tile 8×. T15: more
-        // gravel specks + multi-frequency noise, near-fully rough with a
-        // gravelly normal map for per-pixel surface detail.
-        let road = materials.add(StandardMaterial {
-            base_color: Color::WHITE,
-            base_color_texture: Some(images.add(road_texture())),
-            normal_map_texture: Some(road_normal),
-            perceptual_roughness: 0.92,
-            metallic: 0.0,
-            uv_transform: Affine2::from_scale(Vec2::splat(8.0)),
-            ..default()
-        });
+                // ROAD — dark asphalt with richer gravel/noise; tile 8×. T15: more
+                // gravel specks + multi-frequency noise, near-fully rough with a
+                // gravelly normal map for per-pixel surface detail.
+                let road = materials.add(StandardMaterial {
+                    base_color: Color::WHITE,
+                    base_color_texture: Some(images.add(road_texture())),
+                    normal_map_texture: Some(road_normal),
+                    perceptual_roughness: 0.92,
+                    metallic: 0.0,
+                    uv_transform: Affine2::from_scale(Vec2::splat(8.0)),
+                    ..default()
+                });
 
-        // SIDEWALK — concrete with a subtle checker + noise + expansion-joint
-        // lines; tile 6×. T15: minor enrichment (joint lines + slightly
-        // stronger noise), rough concrete with a bumpy normal map.
-        let sidewalk = materials.add(StandardMaterial {
-            base_color: Color::WHITE,
-            base_color_texture: Some(images.add(sidewalk_texture())),
-            normal_map_texture: Some(sidewalk_normal),
-            perceptual_roughness: 0.88,
-            metallic: 0.0,
-            uv_transform: Affine2::from_scale(Vec2::splat(6.0)),
-            ..default()
-        });
+                // SIDEWALK — concrete with a subtle checker + noise + expansion-joint
+                // lines; tile 6×. T15: minor enrichment (joint lines + slightly
+                // stronger noise), rough concrete with a bumpy normal map.
+                let sidewalk = materials.add(StandardMaterial {
+                    base_color: Color::WHITE,
+                    base_color_texture: Some(images.add(sidewalk_texture())),
+                    normal_map_texture: Some(sidewalk_normal),
+                    perceptual_roughness: 0.88,
+                    metallic: 0.0,
+                    uv_transform: Affine2::from_scale(Vec2::splat(6.0)),
+                    ..default()
+                });
 
-                (grass, road, sidewalk)
-            }; // `materials` borrow released here.
+                // Real red metallic paint. The rounded body supplies smooth
+                // normals; Bevy's PBR shader samples the camera's prefiltered
+                // diffuse/GGX environment maps. Clearcoat adds a glossy lacquer
+                // lobe over the red metal rather than faking it in custom WGSL.
+                let car_paint = materials.add(StandardMaterial {
+                    base_color: Color::srgb(0.62, 0.025, 0.02),
+                    metallic: 0.9,
+                    perceptual_roughness: 0.16,
+                    clearcoat: 1.0,
+                    clearcoat_perceptual_roughness: 0.10,
+                    ..default()
+                });
 
-        // CAR_PAINT — fake-metallic custom shader (CarPaintMaterial). Bevy's
-        // EnvironmentMapLight reflections don't land on WebGL2 for our setup,
-        // so the car body uses a custom shader (shaders/car_paint.wgsl) that
-        // fakes a metallic look: a hemispherical sky/ground reflection driven
-        // by the reflection vector (shifts as the car turns) + a sharp sun
-        // glint + a Fresnel rim. `color` tints the reflection so it reads as
-        // red painted metal.
-        let car_paint = world
-            .resource_mut::<Assets<crate::shaders::CarPaintMaterial>>()
-            .add(crate::shaders::CarPaintMaterial {
-                color: LinearRgba::new(0.85, 0.12, 0.10, 1.0),
-            });
+                (grass, road, sidewalk, car_paint)
+            };
 
-        TextureAssets {
-            grass,
-            road,
-            sidewalk,
-            car_paint,
-        }
+            TextureAssets {
+                grass,
+                road,
+                sidewalk,
+                car_paint,
+            }
         })
     }
 }
@@ -248,7 +244,11 @@ fn grass_texture() -> Image {
 
         // Faint mowing stripe: alternate bands along Y by a few brightness
         // units. Kept subtle so it reads as mowing, not a checkerboard.
-        let stripe = if ((y / STRIPE_PERIOD) % 2) == 0 { 6 } else { -6 };
+        let stripe = if ((y / STRIPE_PERIOD) % 2) == 0 {
+            6
+        } else {
+            -6
+        };
 
         // Apply variation. Green channel gets the most variation; red/blue
         // get less so the hue stays green-dominant. Dry patches push
@@ -312,26 +312,6 @@ fn sidewalk_texture() -> Image {
     })
 }
 
-/// Car paint: smooth glossy red base_color_texture. T15: kept deliberately
-/// SMOOTH — no high-frequency sparkle/noise (that reads as a crawling
-/// pattern as the car moves because the texels are fixed to the body but
-/// the eye sees the high-frequency pattern shift under reflections). The
-/// metallic micro-surface shimmer comes from the fine orange-peel NORMAL
-/// map (which stays fixed to the body and shimmers via IBL reflections),
-/// not from the color texture. Only very gentle low-amplitude variation
-/// remains so the paint doesn't look like a flat fill.
-fn car_paint_texture() -> Image {
-    let b = srgb_base(CAR_BODY_SRGB);
-    make_image(move |x, y| {
-        // Gentle low-amplitude, low-frequency variation only — smooth paint.
-        let v = signed_noise(x / 2, y / 2) * 6 / 128;
-        let r = clamp_byte(b[0] + v);
-        let g = clamp_byte(b[1] + v / 3);
-        let bl = clamp_byte(b[2] + v / 3);
-        [r, g, bl, 255]
-    })
-}
-
 // ---------------------------------------------------------------------------
 // Procedural normal maps
 // ---------------------------------------------------------------------------
@@ -356,14 +336,14 @@ where
     let mut h = vec![0.0f32; (size * size) as usize];
     for y in 0..size {
         for x in 0..size {
-            h[((y * size + x)) as usize] = height(x, y);
+            h[(y * size + x) as usize] = height(x, y);
         }
     }
     let at = |x: i32, y: i32| -> f32 {
         // Wrap (tileable) indices.
         let x = x.rem_euclid(size as i32) as u32;
         let y = y.rem_euclid(size as i32) as u32;
-        h[((y * size + x)) as usize]
+        h[(y * size + x) as usize]
     };
 
     let mut data = vec![0u8; (size * size * 4) as usize];
@@ -403,28 +383,6 @@ where
     );
     set_repeat(&mut img);
     img
-}
-
-/// Orange-peel / metal-flake normal map for car paint. T15: fine
-/// high-frequency bumps (the metal-flake / orange-peel micro-surface of real
-/// automotive paint) that shimmer under IBL + bloom. The bumps are subtle in
-/// amplitude (so the clearcoat still reads as glossy, not rough) but
-/// high-frequency (so there are many tiny facets for the environment map to
-/// catch). Two octaves: a very fine flake layer + a slightly broader
-/// orange-peel undulation.
-fn orange_peel_normal_map() -> Image {
-    make_normal_map(
-        |x, y| {
-            // Fine metal-flake (high frequency, small amplitude).
-            let flake = signed_noise(x * 4, y * 4) as f32 / 128.0 * 0.55;
-            // Slightly broader orange-peel undulation.
-            let peel = signed_noise2(x * 2, y * 2) as f32 / 128.0 * 0.45;
-            flake + peel
-        },
-        // Modest strength: enough to create micro-facets for shimmer, not
-        // enough to make the clearcoat look rough/bumpy.
-        0.5,
-    )
 }
 
 /// Grass normal map: gentle blade bumps — slightly stronger and with a hint

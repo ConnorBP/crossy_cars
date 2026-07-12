@@ -1943,7 +1943,6 @@ name = "car_game_ai"
 version = "0.1.0"
 dependencies = [
  "bevy",
- "half",
  "web-sys",
 ]
 
