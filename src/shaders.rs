@@ -22,7 +22,7 @@ impl Plugin for ShaderPlugin {
         app.add_plugins(MaterialPlugin::<SkyMaterial>::default())
             .add_plugins(MaterialPlugin::<WaterMaterial>::default())
             .add_systems(Startup, (spawn_sky, spawn_water))
-            .add_systems(Update, update_water);
+            .add_systems(Update, (update_water, update_skydome));
     }
 }
 
@@ -44,6 +44,12 @@ impl Material for SkyMaterial {
     }
 }
 
+/// Tag for the gradient skydome sphere so `update_skydome` can follow the
+/// car and keep the dome centered on it (the car now drives infinitely along
+/// -Z, so a static origin-centered dome would eventually be left behind).
+#[derive(Component)]
+pub struct Skydome;
+
 /// Spawn a giant sphere around the origin and render its inner surface as a
 /// vertical color gradient. Negative-Z scale flips winding so the dome's
 /// interior is visible from the camera (which lives inside it).
@@ -61,7 +67,23 @@ fn spawn_sky(
             bottom_color: LinearRgba::new(0.85, 0.90, 0.95, 1.0),
         })),
         Transform::from_scale(Vec3::new(1.0, 1.0, -1.0)),
+        Skydome,
     ));
+}
+
+/// Keep the skydome centered on the car's XZ position (y=0) so the endless
+/// road never drives out from under the gradient sky.
+fn update_skydome(
+    car: Query<&Transform, (With<crate::car::Car>, Without<Skydome>)>,
+    mut sky: Query<&mut Transform, (With<Skydome>, Without<crate::car::Car>)>,
+) {
+    let Ok(car_t) = car.single() else {
+        return;
+    };
+    let Ok(mut sky_t) = sky.single_mut() else {
+        return;
+    };
+    sky_t.translation = Vec3::new(car_t.translation.x, 0.0, car_t.translation.z);
 }
 
 // ---------------------------------------------------------------------------

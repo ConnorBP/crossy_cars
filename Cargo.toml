@@ -5,6 +5,10 @@ edition = "2024"
 
 [dependencies]
 bevy = { version = "0.19", features = ["webgl2", "wav"] }
+# Used directly by `persist.rs` for localStorage on web. Version MUST match the
+# one Bevy 0.19 pulls transitively (see Cargo.lock) to avoid duplicate crates.
+# Currently Bevy 0.19 -> web-sys 0.3.103.
+web-sys = { version = "0.3.103", features = ["Window", "Storage"] }
 
 # Fast-ish dev builds, decent runtime.
 [profile.dev]

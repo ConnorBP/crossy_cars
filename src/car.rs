@@ -2,17 +2,23 @@ use bevy::prelude::*;
 use bevy::color::LinearRgba;
 use std::f32::consts::FRAC_PI_2;
 
+use crate::game::events::ObstacleHit;
 use crate::game::resources::GameConfig;
 use crate::game::state::GameState;
 use crate::palette;
 use crate::textures::TextureAssets;
-use crate::world::{Curb, Solid};
+use crate::world::{Collider, Curb};
 
 #[derive(Component)]
 pub struct Car {
     pub speed: f32,
     pub heading: f32,
 }
+
+/// Freeze car input (and round-timer burn) while a countdown is active. Set
+/// by T6's countdown plugin; `move_car` early-returns while this is true.
+#[derive(Resource, Default)]
+pub struct InputFrozen(pub bool);
 
 /// Tag for the car's painted body shell. Tilted by `roll_body` for a subtle
 /// weight-shift when cornering; the cabin, glass and lights are nested under
@@ -36,10 +42,11 @@ pub struct CarPlugin;
 
 impl Plugin for CarPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_car)
+        app.init_resource::<InputFrozen>()
+            .add_systems(Startup, spawn_car)
             .add_systems(
                 Update,
-                // move_car first, then resolve curb hops + building collisions,
+                // move_car first, then resolve curb hops + obstacle collisions,
                 // then the juice systems read the fresh speed.
                 (move_car, physics_collisions, spin_wheels, roll_body, brake_lights)
                     .chain()
@@ -184,7 +191,13 @@ fn move_car(
     keys: Res<ButtonInput<KeyCode>>,
     cfg: Res<GameConfig>,
     time: Res<Time>,
+    input_frozen: Res<InputFrozen>,
 ) {
+    // Countdown / freeze gate: the car holds still (and the round timer stops
+    // burning) while a countdown overlay is active.
+    if input_frozen.0 {
+        return;
+    }
     let Ok((mut car, mut tf)) = car.single_mut() else {
         return;
     };
@@ -226,8 +239,9 @@ fn move_car(
 
     let forward = Vec3::new(-car.heading.sin(), 0.0, -car.heading.cos());
     tf.translation += forward * car.speed * dt;
-    tf.translation.x = tf.translation.x.clamp(cfg.arena_min, cfg.arena_max);
-    tf.translation.z = tf.translation.z.clamp(cfg.arena_min, cfg.arena_max);
+    // Infinite road along Z: clamp only X (keep the car on the grass strip
+    // beside the road). Z is unbounded so chunks recycle endlessly.
+    tf.translation.x = tf.translation.x.clamp(-24.0, 24.0);
     tf.rotation = Quat::from_rotation_y(car.heading);
 }
 
@@ -296,12 +310,15 @@ fn brake_lights(
 
 /// Ground-level physics + obstacle collisions, run right after `move_car`:
 /// - hop the car up onto any raised curb it drives over (smoothed Y lerp);
-/// - push the car out of buildings (circle-vs-AABB) and kill speed into the wall.
-fn physics_collisions(
+/// - push the car out of any solid obstacle (buildings / trees / lamp posts)
+///   via circle-vs-AABB and kill speed into the wall, emitting an
+///   `ObstacleHit` message so the health system can apply damage.
+pub fn physics_collisions(
     mut car: Query<(&mut Car, &mut Transform), With<Car>>,
-    curbs: Query<(&Curb, &Transform), (With<Curb>, Without<Car>, Without<Solid>)>,
-    solids: Query<(&Solid, &Transform), (With<Solid>, Without<Car>, Without<Curb>)>,
+    curbs: Query<(&Curb, &Transform), (With<Curb>, Without<Car>, Without<Collider>)>,
+    obstacles: Query<(&Collider, &Transform), (With<Collider>, Without<Car>, Without<Curb>)>,
     time: Res<Time>,
+    mut obstacle_hits: MessageWriter<ObstacleHit>,
 ) {
     let Ok((mut car, mut tf)) = car.single_mut() else {
         return;
@@ -320,13 +337,13 @@ fn physics_collisions(
     }
     tf.translation.y += (target_y - tf.translation.y) * (1.0 - (-10.0 * dt).exp());
 
-    // --- Building collision: circle-vs-AABB pushout + kill speed into wall. ---
+    // --- Obstacle collision: circle-vs-AABB pushout + kill speed into wall. ---
     let forward = Vec3::new(-car.heading.sin(), 0.0, -car.heading.cos());
-    for (solid, st) in &solids {
-        let dx = tf.translation.x - st.translation.x;
-        let dz = tf.translation.z - st.translation.z;
-        let closest_x = dx.clamp(-solid.half_x, solid.half_x);
-        let closest_z = dz.clamp(-solid.half_z, solid.half_z);
+    for (collider, ot) in &obstacles {
+        let dx = tf.translation.x - ot.translation.x;
+        let dz = tf.translation.z - ot.translation.z;
+        let closest_x = dx.clamp(-collider.half_x, collider.half_x);
+        let closest_z = dz.clamp(-collider.half_z, collider.half_z);
         let px = dx - closest_x;
         let pz = dz - closest_z;
         let dist2 = px * px + pz * pz;
@@ -336,8 +353,8 @@ fn physics_collisions(
                 (px / dist, pz / dist, CAR_RADIUS - dist)
             } else {
                 // Center inside the box: eject along the least-penetrated axis.
-                let pen_x = solid.half_x - dx.abs();
-                let pen_z = solid.half_z - dz.abs();
+                let pen_x = collider.half_x - dx.abs();
+                let pen_z = collider.half_z - dz.abs();
                 if pen_x < pen_z {
                     let s = if dx >= 0.0 { 1.0 } else { -1.0 };
                     (s, 0.0, pen_x + CAR_RADIUS)
@@ -350,6 +367,11 @@ fn physics_collisions(
             tf.translation.z += nz * pen;
             let into = forward.x * nx + forward.z * nz;
             if (into < 0.0 && car.speed > 0.0) || (into > 0.0 && car.speed < 0.0) {
+                // The car was driving into the wall: report the impact for
+                // damage, then kill the speed.
+                obstacle_hits.write(ObstacleHit {
+                    impact_speed: car.speed.abs(),
+                });
                 car.speed = 0.0;
             }
         }

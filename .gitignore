@@ -3,3 +3,4 @@
 *.wasm
 *.pdb
 *.profraw
+best_score.txt

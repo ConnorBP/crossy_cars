@@ -3,6 +3,7 @@ mod camera;
 mod car;
 mod game;
 mod palette;
+mod persist;
 mod shaders;
 mod textures;
 mod ui;
@@ -15,6 +16,7 @@ use audio::AudioPlugin;
 use camera::CameraPlugin;
 use car::CarPlugin;
 use game::GamePlugin;
+use persist::PersistPlugin;
 use shaders::ShaderPlugin;
 use textures::TexturesPlugin;
 use ui::UiPlugin;
@@ -47,6 +49,7 @@ fn main() {
             AudioPlugin,
             ShaderPlugin,
             TexturesPlugin,
+            PersistPlugin,
         ))
         .run();
 }

@@ -4,11 +4,18 @@ pub mod state;
 
 use bevy::prelude::*;
 
-use crate::car::Car;
-use crate::game::events::{ChickenHit, CoinCollected};
+use crate::car::{Car, InputFrozen};
+use crate::game::events::{ChickenHit, CoinCollected, ObstacleHit};
 use crate::game::resources::{GameConfig, RoundActive, Score, TimeLeft};
 use crate::game::state::GameState;
-use crate::world::{spawn_chickens, spawn_coins};
+
+/// System set grouping all fresh-round spawn systems that run on
+/// `OnEnter(GameState::Playing)` and must execute BEFORE `reset_run` flips
+/// `RoundActive` on. Later waves (T3 `spawn_chickens`, T6 `start_countdown`)
+/// add their `OnEnter(Playing)` systems to this set so resume-from-Paused /
+/// fresh-round gating stays correct (risk E11).
+#[derive(SystemSet, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct SpawnSet;
 
 pub struct GamePlugin;
 
@@ -19,18 +26,24 @@ impl Plugin for GamePlugin {
             .init_resource::<Score>()
             .init_resource::<TimeLeft>()
             .init_resource::<RoundActive>()
+            .init_resource::<InputFrozen>()
             .add_message::<ChickenHit>()
             .add_message::<CoinCollected>()
+            .add_message::<ObstacleHit>()
+            // Register the spawn-ordering set in the OnEnter(Playing) schedule
+            // so fresh-round spawn systems (added by later waves into
+            // SpawnSet) run before reset_run flips RoundActive.
+            .configure_sets(OnEnter(GameState::Playing), SpawnSet)
             // Start a fresh round on entering Playing ONLY when coming from
             // Menu/GameOver (round inactive). On resume from Paused the round
-            // is still active, so reset+spawn are skipped. `reset_run` runs
-            // after the spawns so it can flip `RoundActive` on for the round.
+            // is still active, so reset is skipped. reset_run runs AFTER all
+            // SpawnSet systems so it can flip RoundActive on for the round.
             .add_systems(
                 OnEnter(GameState::Playing),
-                reset_run.after(spawn_coins).after(spawn_chickens),
+                reset_run.after(SpawnSet),
             )
             // End the round (clear the active flag) when leaving for GameOver
-            // or Menu; the world plugin despawns coins/chickens on these too.
+            // or Menu; the world plugin despawns round entities on these too.
             .add_systems(OnEnter(GameState::GameOver), end_round)
             .add_systems(OnEnter(GameState::Menu), end_round)
             .add_systems(Update, tick_timeleft.run_if(in_state(GameState::Playing)))
@@ -83,7 +96,12 @@ fn tick_timeleft(
     mut t: ResMut<TimeLeft>,
     time: Res<Time>,
     mut next: ResMut<NextState<GameState>>,
+    input_frozen: Res<InputFrozen>,
 ) {
+    // Don't burn the 60s round timer while a countdown overlay is active.
+    if input_frozen.0 {
+        return;
+    }
     t.0 -= time.delta_secs();
     if t.0 <= 0.0 {
         t.0 = 0.0;
