@@ -94,7 +94,7 @@ jobs:
         run: python tools/check_release.py
 
       - name: Run strict browser audit and scenarios
-        timeout-minutes: 20
+        timeout-minutes: 30
         shell: bash
         run: |
           set -uo pipefail

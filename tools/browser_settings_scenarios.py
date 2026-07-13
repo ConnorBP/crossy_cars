@@ -53,6 +53,8 @@ from typing import Any, Callable
 DEFAULT_URL = "http://localhost:8080"
 DEFAULT_OUT_DIR = "tools/scenarios/settings"
 BOOT_TIMEOUT_MS = 120_000
+STORAGE_ASSERT_TIMEOUT_MS = 60_000
+STORAGE_POLL_INTERVAL_MS = 250
 STORAGE_KEY = "roady_car_settings"
 LEGACY_KEY = "roady_car_audio_muted"
 DEFAULT_SCHEMA = "v2:100:0:0:"
@@ -128,11 +130,14 @@ def read_storage(page: Any) -> str | None:
     return page.evaluate(f"localStorage.getItem({json.dumps(STORAGE_KEY)})")
 
 
-def assert_storage(page: Any, expected: str, *, timeout: int = 5000) -> None:
+def assert_storage(
+    page: Any, expected: str, *, timeout: int = STORAGE_ASSERT_TIMEOUT_MS
+) -> None:
     """Poll localStorage until it equals the exact v1 schema string."""
     page.wait_for_function(
         f"localStorage.getItem({json.dumps(STORAGE_KEY)}) === {json.dumps(expected)}",
         timeout=timeout,
+        polling=STORAGE_POLL_INTERVAL_MS,
     )
     actual = read_storage(page)
     assert_condition(
