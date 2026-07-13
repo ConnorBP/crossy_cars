@@ -38,6 +38,9 @@ use crate::objectives::ActiveObjective;
 use crate::palette;
 use crate::settings::Settings;
 use crate::touch::TouchControlsActive;
+#[cfg(test)]
+use crate::ui::pause_content_bounds;
+use crate::ui::{GAMEOVER_STATUS_STRIP_HEIGHT, GameOverCoreRoot, UiBounds, is_mobile_viewport};
 
 // ─── Build-time configuration ───────────────────────────────────────────────
 //
@@ -286,6 +289,46 @@ fn input_suspended(state: SubmissionState) -> bool {
     )
 }
 
+fn interactive_modal(state: SubmissionState) -> bool {
+    matches!(
+        state,
+        SubmissionState::EnteringInitials | SubmissionState::Failed
+    )
+}
+
+/// Desktop retains the established layered presentation. On mobile, an
+/// interaction-owning submission state replaces (rather than collides with)
+/// the normal terminal core.
+fn normal_gameover_core_visible(state: SubmissionState, mobile: bool) -> bool {
+    !(mobile && interactive_modal(state))
+}
+
+fn gameover_status_bounds(width: f32, height: f32, state: SubmissionState) -> UiBounds {
+    if is_mobile_viewport(width, height) && interactive_modal(state) {
+        UiBounds {
+            left: 0.0,
+            top: 0.0,
+            width,
+            height,
+        }
+    } else if is_mobile_viewport(width, height) {
+        UiBounds {
+            left: 0.0,
+            top: (height - GAMEOVER_STATUS_STRIP_HEIGHT).max(0.0),
+            width,
+            height: GAMEOVER_STATUS_STRIP_HEIGHT.min(height.max(0.0)),
+        }
+    } else {
+        // The desktop panel continues to size to its content at bottom + 12.
+        UiBounds {
+            left: 0.0,
+            top: 0.0,
+            width,
+            height: 0.0,
+        }
+    }
+}
+
 /// Initial Game Over submission policy. A remembered valid name is the
 /// durable preference requested by the client flow and submits future scores
 /// automatically; an absent/corrupt name keeps the original opt-in prompt.
@@ -522,10 +565,13 @@ struct LeaderboardBoardText;
 struct LeaderboardGameOverRoot;
 
 #[derive(Component)]
+struct LeaderboardGameOverPanel;
+
+#[derive(Component)]
 struct LeaderboardGameOverText;
 
 #[derive(Component)]
-struct LeaderboardTouchGrid;
+struct LeaderboardTouchGrid(bool);
 
 // ─── Web bridge (wasm32 only) ────────────────────────────────────────────────
 
@@ -1097,8 +1143,33 @@ fn begin_board_fetch(board: &mut LeaderboardBoard) {
     }
 }
 
-fn on_menu_enter(mut commands: Commands, mut board: ResMut<LeaderboardBoard>) {
-    spawn_board_ui(&mut commands, BoardPlacement::Menu);
+#[cfg(test)]
+fn pause_board_bounds(width: f32, height: f32) -> UiBounds {
+    UiBounds {
+        left: 14.0,
+        top: 12.0,
+        width: 560.0_f32.min(width * 0.55),
+        // Title + up to five paired score rows, including panel padding.
+        height: 96.0_f32.min((height - 12.0).max(0.0)),
+    }
+}
+
+fn menu_board_visible(width: f32, height: f32) -> bool {
+    !is_mobile_viewport(width, height)
+}
+
+fn on_menu_enter(
+    mut commands: Commands,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    mut board: ResMut<LeaderboardBoard>,
+) {
+    let desktop = windows
+        .single()
+        .map(|window| menu_board_visible(window.width(), window.height()))
+        .unwrap_or(true);
+    if desktop {
+        spawn_board_ui(&mut commands, BoardPlacement::Menu);
+    }
     begin_board_fetch(&mut board);
 }
 
@@ -1144,6 +1215,7 @@ fn spawn_board_ui(commands: &mut Commands, placement: BoardPlacement) {
             BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.68)),
             GlobalZIndex(50),
             LeaderboardBoardRoot,
+            placement,
         ))
         .with_children(|p| {
             p.spawn((
@@ -1179,6 +1251,29 @@ fn spawn_board_ui(commands: &mut Commands, placement: BoardPlacement) {
                 placement,
             ));
         });
+}
+
+fn update_menu_board_visibility(
+    mut commands: Commands,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    roots: Query<(Entity, &BoardPlacement), With<LeaderboardBoardRoot>>,
+) {
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    let should_exist = menu_board_visible(window.width(), window.height());
+    let menu_roots = roots
+        .iter()
+        .filter(|(_, placement)| **placement == BoardPlacement::Menu)
+        .map(|(entity, _)| entity)
+        .collect::<Vec<_>>();
+    if should_exist && menu_roots.is_empty() {
+        spawn_board_ui(&mut commands, BoardPlacement::Menu);
+    } else if !should_exist {
+        for entity in menu_roots {
+            commands.entity(entity).despawn();
+        }
+    }
 }
 
 fn on_board_exit(mut commands: Commands, q: Query<Entity, With<LeaderboardBoardRoot>>) {
@@ -1374,6 +1469,30 @@ fn on_gameover_enter(
     spawn_gameover_ui(&mut commands);
 }
 
+fn snapshot_condition_name(condition: u8) -> &'static str {
+    match condition {
+        0 => "Standard",
+        1 => "Rush Hour",
+        2 => "Chicken Frenzy",
+        3 => "Stampede",
+        4 => "Glass Cannon",
+        _ => "Unknown",
+    }
+}
+
+fn submission_context(snapshot: &ScoreSnapshot) -> String {
+    format!(
+        "SCORE {}  •  {}  •  {}",
+        snapshot.terminal_total,
+        snapshot_condition_name(snapshot.condition),
+        if snapshot.objective_completed {
+            "OBJECTIVE COMPLETE"
+        } else {
+            "OBJECTIVE INCOMPLETE"
+        }
+    )
+}
+
 fn spawn_gameover_ui(commands: &mut Commands) {
     commands
         .spawn((
@@ -1399,6 +1518,7 @@ fn spawn_gameover_ui(commands: &mut Commands) {
                     ..default()
                 },
                 BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.5)),
+                LeaderboardGameOverPanel,
             ))
             .with_child((
                 Text::new(""),
@@ -1415,7 +1535,7 @@ fn spawn_gameover_ui(commands: &mut Commands) {
 /// Visible controls aligned exactly with [`grid_action_for_normalized`].
 /// Spawned only while touch can opt in or edit/skip initials. Each label
 /// occupies the same normalized rectangle as its raw touch zone.
-fn spawn_touch_initials_grid(commands: &mut Commands) {
+fn spawn_touch_initials_grid(commands: &mut Commands, show_characters: bool) {
     const CHARS: &[char] = &[
         'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R',
         'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
@@ -1431,55 +1551,57 @@ fn spawn_touch_initials_grid(commands: &mut Commands) {
                 ..default()
             },
             GlobalZIndex(55),
-            LeaderboardTouchGrid,
+            LeaderboardTouchGrid(show_characters),
         ))
         .with_children(|root| {
-            // Keep consent details in the touch-only UI's free space above
-            // the keypad so the bottom action buttons cannot obscure them.
-            root.spawn((
-                Node {
-                    position_type: PositionType::Absolute,
-                    left: Val::Percent(5.0),
-                    top: Val::Percent(20.0),
-                    width: Val::Percent(90.0),
-                    height: Val::Percent(18.0),
-                    padding: UiRect::all(px(5.0)),
-                    align_items: AlignItems::Center,
-                    justify_content: JustifyContent::Center,
-                    ..default()
-                },
-                BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.82)),
-                Text::new(SUBMISSION_CONSENT_DISCLOSURE),
-                TextFont {
-                    font_size: FontSize::Px(12.0),
-                    ..default()
-                },
-                TextColor(palette::HUD_TEXT.into()),
-            ));
-            for (index, ch) in CHARS.iter().enumerate() {
-                let col = index % 6;
-                let row = index / 6;
+            if show_characters {
+                // Keep consent details in the touch-only UI's free space above
+                // the keypad so the bottom action buttons cannot obscure them.
                 root.spawn((
                     Node {
                         position_type: PositionType::Absolute,
-                        left: Val::Percent(5.0 + col as f32 * 15.0),
-                        top: Val::Percent(40.0 + row as f32 * 7.5),
-                        width: Val::Percent(15.0),
-                        height: Val::Percent(7.5),
+                        left: Val::Percent(5.0),
+                        top: Val::Percent(20.0),
+                        width: Val::Percent(90.0),
+                        height: Val::Percent(18.0),
+                        padding: UiRect::all(px(5.0)),
                         align_items: AlignItems::Center,
                         justify_content: JustifyContent::Center,
-                        border: UiRect::all(px(1.0)),
                         ..default()
                     },
-                    BorderColor::all(Color::srgba(1.0, 0.78, 0.12, 0.65)),
-                    BackgroundColor(Color::srgba(0.02, 0.02, 0.03, 0.78)),
-                    Text::new(ch.to_string()),
+                    BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.82)),
+                    Text::new(SUBMISSION_CONSENT_DISCLOSURE),
                     TextFont {
-                        font_size: FontSize::Px(16.0),
+                        font_size: FontSize::Px(12.0),
                         ..default()
                     },
                     TextColor(palette::HUD_TEXT.into()),
                 ));
+                for (index, ch) in CHARS.iter().enumerate() {
+                    let col = index % 6;
+                    let row = index / 6;
+                    root.spawn((
+                        Node {
+                            position_type: PositionType::Absolute,
+                            left: Val::Percent(5.0 + col as f32 * 15.0),
+                            top: Val::Percent(40.0 + row as f32 * 7.5),
+                            width: Val::Percent(15.0),
+                            height: Val::Percent(7.5),
+                            align_items: AlignItems::Center,
+                            justify_content: JustifyContent::Center,
+                            border: UiRect::all(px(1.0)),
+                            ..default()
+                        },
+                        BorderColor::all(Color::srgba(1.0, 0.78, 0.12, 0.65)),
+                        BackgroundColor(Color::srgba(0.02, 0.02, 0.03, 0.78)),
+                        Text::new(ch.to_string()),
+                        TextFont {
+                            font_size: FontSize::Px(16.0),
+                            ..default()
+                        },
+                        TextColor(palette::HUD_TEXT.into()),
+                    ));
+                }
             }
             for (label, left) in [("BACK", 5.0), ("SUBMIT", 35.0), ("SKIP", 65.0)] {
                 root.spawn((
@@ -1526,9 +1648,19 @@ fn on_gameover_exit(
 
 fn update_gameover_submission(
     mut commands: Commands,
+    windows: Query<&Window, With<PrimaryWindow>>,
     mut submission: ResMut<LeaderboardSubmission>,
     touch_active: Res<TouchControlsActive>,
-    touch_grid_q: Query<Entity, With<LeaderboardTouchGrid>>,
+    touch_grid_q: Query<(Entity, &LeaderboardTouchGrid)>,
+    mut root_q: Query<&mut Node, With<LeaderboardGameOverRoot>>,
+    mut panel_q: Query<
+        (&mut Node, &mut BackgroundColor),
+        (
+            With<LeaderboardGameOverPanel>,
+            Without<LeaderboardGameOverRoot>,
+        ),
+    >,
+    mut core_q: Query<&mut Visibility, With<GameOverCoreRoot>>,
     mut text_q: Query<&mut Text, With<LeaderboardGameOverText>>,
 ) {
     // Poll for async submission results (web only; native returns None).
@@ -1550,31 +1682,133 @@ fn update_gameover_submission(
         }
     }
 
-    // The touch keypad follows initials entry (and the Ready touch opt-in
-    // target). Remembered-name auto submission and Failed retry messaging do
-    // not obscure themselves with an irrelevant character grid.
+    let (width, height) = windows
+        .single()
+        .map(|window| (window.width(), window.height()))
+        .unwrap_or((1440.0, 900.0));
+    let mobile = is_mobile_viewport(width, height);
+    let modal = mobile && interactive_modal(submission.state);
+    let bounds = gameover_status_bounds(width, height, submission.state);
+    for mut root in &mut root_q {
+        if mobile {
+            root.top = px(bounds.top);
+            root.bottom = Val::Auto;
+            root.left = px(bounds.left);
+            root.width = Val::Percent(100.0);
+            root.height = px(bounds.height);
+            root.align_items = AlignItems::Center;
+        } else {
+            root.top = Val::Auto;
+            root.bottom = px(12.0);
+            root.left = px(0.0);
+            root.width = Val::Percent(100.0);
+            root.height = Val::Auto;
+        }
+    }
+    for (mut panel, mut background) in &mut panel_q {
+        if mobile {
+            panel.width = Val::Percent(100.0);
+            panel.max_width = Val::Percent(100.0);
+            panel.height = Val::Percent(100.0);
+            panel.padding = UiRect::axes(px(10.0), px(if modal { 12.0 } else { 4.0 }));
+            panel.align_items = AlignItems::Center;
+            panel.justify_content = JustifyContent::Center;
+            background.0 = if modal {
+                Color::srgba(0.0, 0.0, 0.0, 0.94)
+            } else {
+                Color::srgba(0.0, 0.0, 0.0, 0.78)
+            };
+        } else {
+            panel.max_width = px(560.0);
+            panel.width = Val::Percent(92.0);
+            panel.height = Val::Auto;
+            panel.padding = UiRect::all(px(10.0));
+            panel.align_items = default();
+            panel.justify_content = default();
+            background.0 = Color::srgba(0.0, 0.0, 0.0, 0.5);
+        }
+    }
+    let visible = normal_gameover_core_visible(submission.state, mobile);
+    for mut visibility in &mut core_q {
+        *visibility = if visible {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+    }
+
+    // Touch initials uses the character grid; the interactive mobile failure
+    // modal keeps only retry/skip actions. Ready itself is the compact strip.
     let needs_touch_grid = touch_active.0
-        && matches!(
-            submission.state,
-            SubmissionState::Ready | SubmissionState::EnteringInitials
-        );
-    if needs_touch_grid && touch_grid_q.is_empty() {
-        spawn_touch_initials_grid(&mut commands);
+        && (submission.state == SubmissionState::EnteringInitials
+            || (mobile && submission.state == SubmissionState::Failed));
+    let show_characters = submission.state == SubmissionState::EnteringInitials;
+    let grid_matches = touch_grid_q
+        .iter()
+        .any(|(_, grid)| grid.0 == show_characters);
+    if needs_touch_grid && !grid_matches {
+        for (entity, _) in &touch_grid_q {
+            commands.entity(entity).despawn();
+        }
+        spawn_touch_initials_grid(&mut commands, show_characters);
     } else if !needs_touch_grid {
-        for entity in &touch_grid_q {
+        for (entity, _) in &touch_grid_q {
             commands.entity(entity).despawn();
         }
     }
 
-    let text = format_submission_text(
+    let mut text = format_submission_text(
         submission.state,
         &submission.initials,
         submission.ranks,
         submission.error.as_deref(),
         touch_active.0,
     );
+    if modal {
+        text = format!("{}\n{}", submission_context(&submission.snapshot), text);
+    } else if mobile {
+        text = mobile_status_text(
+            submission.state,
+            &submission.initials,
+            submission.ranks,
+            touch_active.0,
+        );
+    }
     for mut t in &mut text_q {
         **t = text.clone();
+    }
+}
+
+fn mobile_status_text(
+    state: SubmissionState,
+    initials: &str,
+    ranks: Option<SubmissionRanks>,
+    touch_active: bool,
+) -> String {
+    match state {
+        SubmissionState::Ready => {
+            if touch_active {
+                "LEADERBOARD: tap bottom-center to submit score".to_string()
+            } else {
+                "LEADERBOARD: press L to submit score".to_string()
+            }
+        }
+        SubmissionState::Submitting if !initials.is_empty() => {
+            format!("LEADERBOARD: submitting as {initials}...")
+        }
+        SubmissionState::Submitting => "LEADERBOARD: submitting score...".to_string(),
+        SubmissionState::Submitted => ranks
+            .map(|rank| {
+                format!(
+                    "SUBMITTED  •  GLOBAL #{}  •  CONDITION #{}",
+                    rank.global, rank.condition
+                )
+            })
+            .unwrap_or_else(|| "SUBMITTED!".to_string()),
+        SubmissionState::Unavailable => "Online leaderboard submission unavailable".to_string(),
+        SubmissionState::Idle | SubmissionState::Skipped => String::new(),
+        // Interactive states use the full-screen modal path instead.
+        SubmissionState::EnteringInitials | SubmissionState::Failed => String::new(),
     }
 }
 
@@ -1901,7 +2135,12 @@ impl Plugin for LeaderboardPlugin {
             .add_systems(OnExit(GameState::Paused), on_board_exit)
             .add_systems(
                 Update,
-                update_board.run_if(in_state(GameState::Menu).or_else(in_state(GameState::Paused))),
+                (
+                    update_menu_board_visibility.run_if(in_state(GameState::Menu)),
+                    update_board,
+                )
+                    .chain()
+                    .run_if(in_state(GameState::Menu).or_else(in_state(GameState::Paused))),
             )
             // Game Over: snapshot, initials input, submission polling.
             .add_systems(OnEnter(GameState::GameOver), on_gameover_enter)
@@ -2105,6 +2344,74 @@ mod tests {
         assert_eq!(transition_on_opt_in(Idle), Idle);
         assert_eq!(transition_on_opt_in(Submitting), Submitting);
         assert_eq!(transition_on_opt_in(Skipped), Skipped);
+    }
+
+    #[test]
+    fn shared_mobile_breakpoint_controls_menu_board() {
+        assert!(is_mobile_viewport(844.0, 390.0));
+        assert!(is_mobile_viewport(960.0, 480.0));
+        assert!(!is_mobile_viewport(1440.0, 900.0));
+        assert!(!menu_board_visible(844.0, 390.0));
+        assert!(!menu_board_visible(960.0, 480.0));
+        assert!(menu_board_visible(1440.0, 900.0));
+    }
+
+    #[test]
+    fn mobile_pause_board_stays_disjoint_from_centered_pause_content() {
+        let board = pause_board_bounds(844.0, 390.0);
+        let pause = pause_content_bounds(844.0, 390.0);
+        assert_eq!(board.top + board.height, 108.0);
+        assert_eq!(pause.top, 133.0);
+        assert!(board.is_disjoint(pause));
+    }
+
+    #[test]
+    fn mobile_gameover_core_and_status_strip_are_disjoint() {
+        let core = crate::ui::gameover_core_bounds(844.0, 390.0);
+        let status = gameover_status_bounds(844.0, 390.0, SubmissionState::Ready);
+        assert_eq!(core.height, 338.0);
+        assert_eq!(status.top, 338.0);
+        assert_eq!(status.height, GAMEOVER_STATUS_STRIP_HEIGHT);
+        assert!(core.is_disjoint(status));
+    }
+
+    #[test]
+    fn interactive_mobile_states_replace_core_and_terminal_states_restore_it() {
+        for state in [SubmissionState::EnteringInitials, SubmissionState::Failed] {
+            assert!(!normal_gameover_core_visible(state, true));
+            assert_eq!(gameover_status_bounds(844.0, 390.0, state).height, 390.0);
+        }
+        for state in [
+            SubmissionState::Ready,
+            SubmissionState::Submitting,
+            SubmissionState::Submitted,
+            SubmissionState::Skipped,
+            SubmissionState::Unavailable,
+        ] {
+            assert!(normal_gameover_core_visible(state, true), "{state:?}");
+            assert_eq!(gameover_status_bounds(844.0, 390.0, state).height, 52.0);
+        }
+        // Desktop behavior is never replaced by the mobile modal policy.
+        assert!(normal_gameover_core_visible(
+            SubmissionState::EnteringInitials,
+            false
+        ));
+    }
+
+    #[test]
+    fn resize_policy_switches_in_place_between_mobile_and_desktop() {
+        let mobile_core = crate::ui::gameover_core_bounds(844.0, 390.0);
+        let desktop_core = crate::ui::gameover_core_bounds(1440.0, 900.0);
+        assert_eq!(mobile_core.height, 338.0);
+        assert_eq!(desktop_core.height, 900.0);
+        assert_eq!(
+            gameover_status_bounds(844.0, 390.0, SubmissionState::Ready).height,
+            52.0
+        );
+        assert_eq!(
+            gameover_status_bounds(1440.0, 900.0, SubmissionState::Ready).height,
+            0.0
+        );
     }
 
     #[test]

@@ -11,16 +11,16 @@ This is the durable handoff for resuming work after context compaction. It disti
 
 ## 2026-07-13 current checkpoint (supersedes the historical plan below)
 
-The high-confidence `GAMEPLAY_AUDIT.md` implementation wave is complete locally and ready for publication. It includes deterministic Field/Orchard tiles, corrected obstacle collision/damage semantics, comprehensive Reduced Motion behavior with OS preference inheritance, HUD contrast/layout fixes, event duration/signature feedback, the five-condition medal gallery, compact mobile Game Over presentation, and a coordinated 844×390 touch HUD.
+The high-confidence `GAMEPLAY_AUDIT.md` implementation wave is deployed. A subsequent mobile-control wave ports the companion ghost game's first-touch-owned drag controller: left-side `DRIVE` provides eight-way forward/steering intent, while the single right-side `BRAKE / REVERSE` action brakes through a stop and then reverses. The 844×390 Menu, Playing, Pause, Game Over, leaderboard status, and initials modal compositions are collision-free; desktop keyboard behavior remains unchanged.
 
 Validation at this checkpoint:
 
 ```text
-cargo test --locked                                  PASS — 283 tests
+cargo test --locked                                  PASS — 290 tests
 cargo check --locked                                 PASS — 0 warnings
 cargo check --locked --target wasm32-unknown-unknown PASS — 0 warnings
 trunk build --release --cargo-profile wasm-release   PASS
-python tools/check_release.py --dist dist             PASS — 22.832 MiB WASM
+python tools/check_release.py --dist dist             PASS — 22.859 MiB WASM
 strict browser runtime audit                          PASS — 0 errors
 browser desktop/touch/Settings scenarios              PASS
 ```

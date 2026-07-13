@@ -16,6 +16,60 @@ use crate::touch::{
     TouchControlsActive,
 };
 
+/// One shared breakpoint for every cross-plugin UI decision. Landscape phones
+/// and the 960×480 boundary are mobile; 1440×900 retains the desktop layout.
+pub(crate) fn is_mobile_viewport(width: f32, height: f32) -> bool {
+    height <= 480.0 || width <= 960.0
+}
+
+/// The normal terminal composition owns the area above this leaderboard strip
+/// on mobile. Keeping the value here prevents the two plugins from drifting.
+pub(crate) const GAMEOVER_STATUS_STRIP_HEIGHT: f32 = 52.0;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct UiBounds {
+    pub left: f32,
+    pub top: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+impl UiBounds {
+    #[cfg(test)]
+    pub(crate) fn is_disjoint(self, other: Self) -> bool {
+        self.left + self.width <= other.left
+            || other.left + other.width <= self.left
+            || self.top + self.height <= other.top
+            || other.top + other.height <= self.top
+    }
+}
+
+pub(crate) fn gameover_core_bounds(width: f32, height: f32) -> UiBounds {
+    UiBounds {
+        left: 0.0,
+        top: 0.0,
+        width,
+        height: if is_mobile_viewport(width, height) {
+            (height - GAMEOVER_STATUS_STRIP_HEIGHT).max(0.0)
+        } else {
+            height
+        },
+    }
+}
+
+/// Conservative bounds for the two centered Pause text rows. The Pause root
+/// remains full-screen, but only this central band contains visible content.
+#[cfg(test)]
+pub(crate) fn pause_content_bounds(width: f32, height: f32) -> UiBounds {
+    const CONTENT_HEIGHT: f32 = 124.0;
+    UiBounds {
+        left: 0.0,
+        top: ((height - CONTENT_HEIGHT) * 0.5).max(0.0),
+        width,
+        height: CONTENT_HEIGHT.min(height.max(0.0)),
+    }
+}
+
 const ALL_CONDITIONS: [ModifierKind; 5] = [
     ModifierKind::Standard,
     ModifierKind::RushHour,
@@ -211,34 +265,30 @@ const GAMEOVER_DESKTOP_LAYOUT: GameOverLayout = GameOverLayout {
 };
 
 const GAMEOVER_COMPACT_LAYOUT: GameOverLayout = GameOverLayout {
-    root_padding: 6.0,
+    root_padding: 4.0,
     // Covers the replay prompt and the longest completed objective summary at
     // these font sizes without relying on wrapping for the height budget.
     content_width_budget: 540.0,
-    title: gameover_text(40.0, 4.0),
-    score_label: gameover_text(12.0, 1.0),
-    score: gameover_text(28.0, 3.0),
-    chicken: gameover_text(16.0, 1.0),
-    coins: gameover_text(16.0, 5.0),
-    best: gameover_text(18.0, 3.0),
-    condition: gameover_text(17.0, 2.0),
-    new_condition_best: gameover_text(15.0, 2.0),
-    medal_upgrade: gameover_text(15.0, 4.0),
-    objective: gameover_text(15.0, 4.0),
-    prompt: gameover_text(14.0, 4.0),
+    title: gameover_text(36.0, 2.0),
+    score_label: gameover_text(11.0, 0.0),
+    score: gameover_text(25.0, 1.0),
+    chicken: gameover_text(14.0, 0.0),
+    coins: gameover_text(14.0, 2.0),
+    best: gameover_text(16.0, 1.0),
+    condition: gameover_text(15.0, 1.0),
+    new_condition_best: gameover_text(14.0, 1.0),
+    medal_upgrade: gameover_text(14.0, 2.0),
+    objective: gameover_text(14.0, 2.0),
+    prompt: gameover_text(13.0, 2.0),
 };
 
 /// Default font metrics are below this deliberately conservative multiplier.
 /// Keeping it in the pure budget makes the maximal optional state testable
 /// without coupling tests to Bevy's renderer or an installed font.
+#[cfg(test)]
 const GAMEOVER_LINE_HEIGHT_BUDGET: f32 = 1.4;
-const GAMEOVER_DESKTOP_SAFETY_MARGIN: f32 = 6.0;
-
 fn gameover_layout(viewport_width: f32, viewport_height: f32) -> GameOverLayout {
-    if viewport_height
-        <= maximal_gameover_content_height(GAMEOVER_DESKTOP_LAYOUT) + GAMEOVER_DESKTOP_SAFETY_MARGIN
-        || viewport_width <= GAMEOVER_DESKTOP_LAYOUT.content_width_budget
-    {
+    if is_mobile_viewport(viewport_width, viewport_height) {
         GAMEOVER_COMPACT_LAYOUT
     } else {
         GAMEOVER_DESKTOP_LAYOUT
@@ -254,6 +304,7 @@ fn gameover_title(reason: GameOverReason) -> &'static str {
 
 /// Pure fixed-budget height for the maximal terminal state: both record
 /// notices, the medal upgrade, and the objective summary are all visible.
+#[cfg(test)]
 fn maximal_gameover_content_height(layout: GameOverLayout) -> f32 {
     let rows = [
         layout.title,
@@ -288,7 +339,8 @@ fn maximal_gameover_state_fits(
         gameover_title(reason).chars().count() as f32 * layout.title.font * 0.75;
     let required_width =
         layout.content_width_budget.max(title_width_budget) + layout.root_padding * 2.0;
-    required_width <= viewport_width && maximal_gameover_content_height(layout) <= viewport_height
+    let core = gameover_core_bounds(viewport_width, viewport_height);
+    required_width <= core.width && maximal_gameover_content_height(layout) <= core.height
 }
 
 // --- UI root markers ---
@@ -305,7 +357,22 @@ struct HintRoot;
 #[derive(Component)]
 struct PauseRoot;
 #[derive(Component)]
-struct GameOverRoot;
+pub(crate) struct GameOverCoreRoot;
+
+#[derive(Component, Clone, Copy)]
+enum GameOverTextRole {
+    Title,
+    ScoreLabel,
+    Score,
+    Chicken,
+    Coins,
+    Best,
+    Condition,
+    NewConditionBest,
+    MedalUpgrade,
+    Objective,
+    Prompt,
+}
 
 // --- Dynamic text span markers ---
 #[derive(Component)]
@@ -350,7 +417,14 @@ impl Plugin for UiPlugin {
             .add_systems(OnEnter(GameState::Paused), spawn_pause)
             .add_systems(OnExit(GameState::Paused), despawn_marker::<PauseRoot>)
             .add_systems(OnEnter(GameState::GameOver), spawn_gameover)
-            .add_systems(OnExit(GameState::GameOver), despawn_marker::<GameOverRoot>)
+            .add_systems(
+                OnExit(GameState::GameOver),
+                despawn_marker::<GameOverCoreRoot>,
+            )
+            .add_systems(
+                Update,
+                update_gameover_layout.run_if(in_state(GameState::GameOver)),
+            )
             .add_systems(
                 Update,
                 (
@@ -938,6 +1012,7 @@ fn spawn_gameover(
         .unwrap_or((1440.0, 900.0));
     let layout = gameover_layout(viewport_width, viewport_height);
     let title = gameover_title(*reason);
+    let core_bounds = gameover_core_bounds(viewport_width, viewport_height);
     commands
         .spawn((
             Node {
@@ -945,7 +1020,11 @@ fn spawn_gameover(
                 top: px(0.0),
                 left: px(0.0),
                 width: Val::Percent(100.0),
-                height: Val::Percent(100.0),
+                height: if is_mobile_viewport(viewport_width, viewport_height) {
+                    px(core_bounds.height)
+                } else {
+                    Val::Percent(100.0)
+                },
                 align_items: AlignItems::Center,
                 justify_content: JustifyContent::Center,
                 flex_direction: FlexDirection::Column,
@@ -953,7 +1032,7 @@ fn spawn_gameover(
                 ..default()
             },
             BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.6)),
-            GameOverRoot,
+            GameOverCoreRoot,
         ))
         .with_children(|p| {
             // Title
@@ -968,6 +1047,7 @@ fn spawn_gameover(
                     margin: UiRect::bottom(px(layout.title.margin)),
                     ..default()
                 },
+                GameOverTextRole::Title,
             ));
             // SCORE (label + big accent value)
             p.spawn((
@@ -981,6 +1061,7 @@ fn spawn_gameover(
                     margin: UiRect::bottom(px(layout.score_label.margin)),
                     ..default()
                 },
+                GameOverTextRole::ScoreLabel,
             ));
             p.spawn((
                 Text::new(format!("{}", total)),
@@ -993,6 +1074,7 @@ fn spawn_gameover(
                     margin: UiRect::bottom(px(layout.score.margin)),
                     ..default()
                 },
+                GameOverTextRole::Score,
             ));
             // Chickens
             p.spawn((
@@ -1006,6 +1088,7 @@ fn spawn_gameover(
                     margin: UiRect::bottom(px(layout.chicken.margin)),
                     ..default()
                 },
+                GameOverTextRole::Chicken,
             ));
             // Coins
             p.spawn((
@@ -1019,6 +1102,7 @@ fn spawn_gameover(
                     margin: UiRect::bottom(px(layout.coins.margin)),
                     ..default()
                 },
+                GameOverTextRole::Coins,
             ));
             // Record status uses the pre-round snapshot plus terminal score,
             // independent of persistence-system ordering on this transition.
@@ -1037,6 +1121,7 @@ fn spawn_gameover(
                     margin: UiRect::bottom(px(layout.best.margin)),
                     ..default()
                 },
+                GameOverTextRole::Best,
             ));
             p.spawn((
                 Text::new(condition_summary),
@@ -1049,6 +1134,7 @@ fn spawn_gameover(
                     margin: UiRect::bottom(px(layout.condition.margin)),
                     ..default()
                 },
+                GameOverTextRole::Condition,
             ));
             if condition_result.new_best {
                 p.spawn((
@@ -1062,6 +1148,7 @@ fn spawn_gameover(
                         margin: UiRect::bottom(px(layout.new_condition_best.margin)),
                         ..default()
                     },
+                    GameOverTextRole::NewConditionBest,
                 ));
             }
             if condition_result.medal_upgrade {
@@ -1076,6 +1163,7 @@ fn spawn_gameover(
                         margin: UiRect::bottom(px(layout.medal_upgrade.margin)),
                         ..default()
                     },
+                    GameOverTextRole::MedalUpgrade,
                 ));
             }
             p.spawn((
@@ -1093,6 +1181,7 @@ fn spawn_gameover(
                     margin: UiRect::bottom(px(layout.objective.margin)),
                     ..default()
                 },
+                GameOverTextRole::Objective,
             ));
             // Restart / menu prompt
             p.spawn((
@@ -1106,8 +1195,63 @@ fn spawn_gameover(
                     margin: UiRect::top(px(layout.prompt.margin)),
                     ..default()
                 },
+                GameOverTextRole::Prompt,
             ));
         });
+}
+
+fn gameover_text_spec(layout: GameOverLayout, role: GameOverTextRole) -> GameOverTextSpec {
+    match role {
+        GameOverTextRole::Title => layout.title,
+        GameOverTextRole::ScoreLabel => layout.score_label,
+        GameOverTextRole::Score => layout.score,
+        GameOverTextRole::Chicken => layout.chicken,
+        GameOverTextRole::Coins => layout.coins,
+        GameOverTextRole::Best => layout.best,
+        GameOverTextRole::Condition => layout.condition,
+        GameOverTextRole::NewConditionBest => layout.new_condition_best,
+        GameOverTextRole::MedalUpgrade => layout.medal_upgrade,
+        GameOverTextRole::Objective => layout.objective,
+        GameOverTextRole::Prompt => layout.prompt,
+    }
+}
+
+/// Reflows the existing terminal entities in place. In particular, crossing
+/// the breakpoint does not recreate score/record state or invalidate entity
+/// references held by the leaderboard plugin.
+fn update_gameover_layout(
+    windows: Query<&Window, With<PrimaryWindow>>,
+    mut roots: Query<&mut Node, With<GameOverCoreRoot>>,
+    mut texts: Query<(&GameOverTextRole, &mut TextFont, &mut Node), Without<GameOverCoreRoot>>,
+) {
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    let width = window.width();
+    let height = window.height();
+    let bounds = gameover_core_bounds(width, height);
+    let layout = gameover_layout(width, height);
+
+    for mut node in &mut roots {
+        node.top = px(bounds.top);
+        node.left = px(bounds.left);
+        node.width = Val::Percent(100.0);
+        node.height = if is_mobile_viewport(width, height) {
+            px(bounds.height)
+        } else {
+            Val::Percent(100.0)
+        };
+        node.padding = UiRect::all(px(layout.root_padding));
+    }
+    for (role, mut font, mut node) in &mut texts {
+        let spec = gameover_text_spec(layout, *role);
+        font.font_size = FontSize::Px(spec.font);
+        node.margin = if matches!(role, GameOverTextRole::Prompt) {
+            UiRect::top(px(spec.margin))
+        } else {
+            UiRect::bottom(px(spec.margin))
+        };
+    }
 }
 
 fn despawn_marker<M: Component>(mut commands: Commands, q: Query<Entity, With<M>>) {
@@ -1221,11 +1365,12 @@ fn update_hint(
 #[cfg(test)]
 mod tests {
     use super::{
-        GAMEOVER_COMPACT_LAYOUT, GAMEOVER_DESKTOP_LAYOUT, MENU_CONTENT_HEIGHT, TimerUrgency,
-        condition_summary, gameover_layout, is_medal_upgrade, is_new_best,
+        GAMEOVER_COMPACT_LAYOUT, GAMEOVER_DESKTOP_LAYOUT, GAMEOVER_STATUS_STRIP_HEIGHT,
+        MENU_CONTENT_HEIGHT, TimerUrgency, condition_summary, gameover_core_bounds,
+        gameover_layout, is_medal_upgrade, is_mobile_viewport, is_new_best,
         maximal_gameover_content_height, maximal_gameover_state_fits, medal_gallery_state,
-        medal_points, menu_content_fits, terminal_condition_result, timer_motion_flags,
-        timer_style,
+        medal_points, menu_content_fits, pause_content_bounds, terminal_condition_result,
+        timer_motion_flags, timer_style,
     };
     use crate::game::resources::GameOverReason;
     use crate::modifiers::ModifierKind;
@@ -1339,13 +1484,26 @@ mod tests {
     }
 
     #[test]
+    fn shared_mobile_breakpoint_and_core_reservation_cover_boundaries() {
+        assert!(is_mobile_viewport(844.0, 390.0));
+        assert!(is_mobile_viewport(960.0, 480.0));
+        assert!(!is_mobile_viewport(1440.0, 900.0));
+        assert_eq!(gameover_core_bounds(844.0, 390.0).height, 338.0);
+        assert_eq!(gameover_core_bounds(960.0, 480.0).height, 428.0);
+        assert_eq!(gameover_core_bounds(1440.0, 900.0).height, 900.0);
+        assert_eq!(pause_content_bounds(844.0, 390.0).top, 133.0);
+    }
+
+    #[test]
     fn maximal_gameover_states_fit_target_mobile_viewport() {
         let layout = gameover_layout(844.0, 390.0);
         assert_eq!(layout, GAMEOVER_COMPACT_LAYOUT);
-        assert!(layout.prompt.font >= 14.0);
-        assert!(layout.objective.font >= 15.0);
-        assert!(layout.new_condition_best.font >= 15.0);
-        assert!(maximal_gameover_content_height(layout) <= 390.0);
+        assert!(layout.prompt.font >= 13.0);
+        assert!(layout.objective.font >= 14.0);
+        assert!(layout.new_condition_best.font >= 14.0);
+        assert!(
+            maximal_gameover_content_height(layout) <= gameover_core_bounds(844.0, 390.0).height
+        );
 
         // Exercise both terminal titles with every optional row budgeted:
         // NEW BEST + NEW CONDITION BEST + MEDAL UPGRADE + objective summary.
@@ -1366,7 +1524,7 @@ mod tests {
         let compact_height = maximal_gameover_content_height(GAMEOVER_COMPACT_LAYOUT);
         assert!(!maximal_gameover_state_fits(
             844.0,
-            compact_height - 1.0,
+            compact_height + GAMEOVER_STATUS_STRIP_HEIGHT - 1.0,
             GameOverReason::Wrecked
         ));
         assert!(!maximal_gameover_state_fits(

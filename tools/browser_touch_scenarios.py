@@ -113,16 +113,27 @@ def main() -> int:
             page.wait_for_timeout(3_800)
             shot("01_touch_hud.png")
 
-            # Multi-touch steering + GO, followed by an explicit release.
+            # Start on the left DRIVE pad, drag up-left, then add the right
+            # BRAKE/REVERSE action while retaining the drive touch.
             cdp = context.new_cdp_session(page)
-            touches = [
-                {"x": 80, "y": 335, "radiusX": 8, "radiusY": 8, "force": 1, "id": 1},
-                {"x": 790, "y": 335, "radiusX": 8, "radiusY": 8, "force": 1, "id": 2},
-            ]
-            cdp.send("Input.dispatchTouchEvent", {"type": "touchStart", "touchPoints": touches})
-            page.wait_for_timeout(1_600)
-            touches[0]["x"] = 25
-            cdp.send("Input.dispatchTouchEvent", {"type": "touchMove", "touchPoints": touches})
+            drive = {"x": 100, "y": 335, "radiusX": 8, "radiusY": 8, "force": 1, "id": 1}
+            cdp.send(
+                "Input.dispatchTouchEvent",
+                {"type": "touchStart", "touchPoints": [drive]},
+            )
+            page.wait_for_timeout(600)
+            drive["x"] = 55
+            drive["y"] = 275
+            cdp.send(
+                "Input.dispatchTouchEvent",
+                {"type": "touchMove", "touchPoints": [drive]},
+            )
+            page.wait_for_timeout(1_000)
+            action = {"x": 735, "y": 325, "radiusX": 8, "radiusY": 8, "force": 1, "id": 2}
+            cdp.send(
+                "Input.dispatchTouchEvent",
+                {"type": "touchStart", "touchPoints": [drive, action]},
+            )
             page.wait_for_timeout(800)
             cdp.send("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
             page.wait_for_timeout(400)

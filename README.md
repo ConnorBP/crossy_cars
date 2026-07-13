@@ -59,21 +59,20 @@ Every new round cycles through one of five road conditions:
 
 ### Touch controls
 
-On-screen touch controls appear after the first touch and stay available for the rest of the session; landscape orientation is recommended. The lower portion of the screen is split into driving zones (labeled STEER, BRAKE, GO):
+On-screen touch controls appear after the first touch and stay available for the rest of the session; landscape orientation is recommended. Mobile driving uses the same two-zone drag/action scheme as the companion ghost game:
 
 | Zone | Action |
 | --- | --- |
-| **Steer** (bottom-left) | Press and drag left or right to steer; distance from center sets turn strength |
-| **Brake** (bottom-center) | Hold to brake |
-| **GO** (bottom-right) | Hold to accelerate forward |
+| **DRIVE** (left half) | Drag upward to accelerate and diagonally/sideways to steer. The first left-side finger owns direction until released. |
+| **BRAKE / REVERSE** (right half) | Hold to brake while moving forward; once stopped, keep holding to reverse. |
 
-- Several touches at once are combined, and brake takes priority over GO.
+- Direction and the action button support simultaneous touches. A downward DRIVE drag never bypasses the dedicated brake-to-reverse action.
 - Tap the top-center **PAUSE** button while driving to pause.
 - From the menu, tap anywhere to start a round.
 - On the pause screen, tap the left third to resume, the middle third to restart, or the right third to return to the menu.
 - On the game-over screen, tap the left two-thirds to play again, or the right third to return to the menu.
 
-Mute (`M`) and reverse (`S` / `↓`) are keyboard-only and have no on-screen touch equivalent.
+Mute is available from the touch-accessible Settings panel. Reverse is available by holding **BRAKE / REVERSE** through a complete stop.
 
 ## Run natively
 

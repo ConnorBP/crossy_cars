@@ -1,17 +1,28 @@
 use bevy::{prelude::*, text::FontSize, window::PrimaryWindow};
 
-use crate::car::{Handbrake, InputFrozen, PlayerInput, TouchInputSet};
+use crate::car::{Car, InputFrozen, PlayerInput, TouchInputSet};
 use crate::game::{
     RestartRequested, StateAction, TouchStateSet, apply_state_action, settings_closed,
     state::GameState,
 };
 
 const ACTIVE_Y: f32 = 0.55;
-const STEER_END_X: f32 = 0.45;
-const BRAKE_START_X: f32 = 0.55;
-const BRAKE_END_X: f32 = 0.75;
-const STEER_CENTER_X: f32 = STEER_END_X * 0.5;
-const STEER_DEADZONE: f32 = 0.12;
+const PAUSE_TOP: f32 = 0.14;
+const PAUSE_LEFT: f32 = 0.44;
+const PAUSE_RIGHT: f32 = 0.56;
+const ACTION_BRAKE_SPEED: f32 = 0.15;
+
+// These are intentionally identical to wasm_battle_arena's touch joystick.
+const INPUT_UP: u8 = 1 << 0;
+const INPUT_DOWN: u8 = 1 << 1;
+const INPUT_LEFT: u8 = 1 << 2;
+const INPUT_RIGHT: u8 = 1 << 3;
+const AXIS_DEADZONE: f32 = 0.2;
+const DIAGONAL_NORMALIZED: f32 = 0.707107;
+const UNIT_TL: Vec2 = Vec2::new(DIAGONAL_NORMALIZED, DIAGONAL_NORMALIZED);
+const UNIT_TR: Vec2 = Vec2::new(-DIAGONAL_NORMALIZED, DIAGONAL_NORMALIZED);
+const UNIT_BL: Vec2 = Vec2::new(DIAGONAL_NORMALIZED, -DIAGONAL_NORMALIZED);
+const UNIT_BR: Vec2 = Vec2::new(-DIAGONAL_NORMALIZED, -DIAGONAL_NORMALIZED);
 
 // Fixed touch-only HUD composition. These values are shared by the live
 // nodes in their owning modules and the pure all-panel layout audit below.
@@ -32,14 +43,13 @@ pub(crate) const TOUCH_EVENT_TOP: f32 = 182.0;
 pub(crate) const TOUCH_EVENT_WIDTH: f32 = 250.0;
 pub(crate) const TOUCH_EVENT_HEIGHT: f32 = 30.0;
 
-const CONTROL_LABEL_BOTTOM_PERCENT: f32 = 2.0;
-const CONTROL_LABEL_HEIGHT_PERCENT: f32 = 28.0;
-const CONTROL_LABEL_LAYOUTS: [(&str, f32, f32, f32); 4] = [
-    ("STEER", 2.0, 43.0, 21.0),
-    ("HANDBRAKE", 45.0, 10.0, 13.0),
-    ("BRAKE", 56.0, 21.0, 21.0),
-    ("GO", 78.0, 20.0, 21.0),
-];
+const DRIVE_PAD_LEFT: f32 = 32.0;
+const DRIVE_PAD_BOTTOM: f32 = 10.0;
+const DRIVE_PAD_SIZE: f32 = 136.0;
+const ACTION_PAD_RIGHT: f32 = 32.0;
+const ACTION_PAD_BOTTOM: f32 = 18.0;
+const ACTION_PAD_WIDTH: f32 = 180.0;
+const ACTION_PAD_HEIGHT: f32 = 112.0;
 
 /// Top-left-origin pixel bounds used to verify HUD separation without an ECS
 /// world or renderer. Touch, health, and pickup UI share this representation.
@@ -132,30 +142,39 @@ pub(crate) fn touch_driving_band_bounds(viewport: Vec2) -> ScreenBounds {
 }
 
 #[cfg(test)]
-fn touch_control_zone_bounds(viewport: Vec2) -> [ScreenBounds; 4] {
-    let xs = [
-        (0.0, STEER_END_X),
-        (STEER_END_X, BRAKE_START_X),
-        (BRAKE_START_X, BRAKE_END_X),
-        (BRAKE_END_X, 1.0),
-    ];
-    xs.map(|(left, right)| ScreenBounds {
-        left: viewport.x * left,
-        top: viewport.y * ACTIVE_Y,
-        right: viewport.x * right,
-        bottom: viewport.y,
-    })
+fn touch_control_zone_bounds(viewport: Vec2) -> [ScreenBounds; 2] {
+    [
+        ScreenBounds {
+            left: 0.0,
+            top: viewport.y * ACTIVE_Y,
+            right: viewport.x * 0.5,
+            bottom: viewport.y,
+        },
+        ScreenBounds {
+            left: viewport.x * 0.5,
+            top: viewport.y * ACTIVE_Y,
+            right: viewport.x,
+            bottom: viewport.y,
+        },
+    ]
 }
 
 #[cfg(test)]
-fn touch_control_label_bounds(viewport: Vec2) -> [ScreenBounds; 4] {
-    CONTROL_LABEL_LAYOUTS.map(|(_, left, width, _)| ScreenBounds {
-        left: viewport.x * left / 100.0,
-        top: viewport.y
-            * (1.0 - (CONTROL_LABEL_BOTTOM_PERCENT + CONTROL_LABEL_HEIGHT_PERCENT) / 100.0),
-        right: viewport.x * (left + width) / 100.0,
-        bottom: viewport.y * (1.0 - CONTROL_LABEL_BOTTOM_PERCENT / 100.0),
-    })
+fn touch_control_label_bounds(viewport: Vec2) -> [ScreenBounds; 2] {
+    [
+        ScreenBounds {
+            left: DRIVE_PAD_LEFT,
+            top: viewport.y - DRIVE_PAD_BOTTOM - DRIVE_PAD_SIZE,
+            right: DRIVE_PAD_LEFT + DRIVE_PAD_SIZE,
+            bottom: viewport.y - DRIVE_PAD_BOTTOM,
+        },
+        ScreenBounds {
+            left: viewport.x - ACTION_PAD_RIGHT - ACTION_PAD_WIDTH,
+            top: viewport.y - ACTION_PAD_BOTTOM - ACTION_PAD_HEIGHT,
+            right: viewport.x - ACTION_PAD_RIGHT,
+            bottom: viewport.y - ACTION_PAD_BOTTOM,
+        },
+    ]
 }
 
 /// Becomes sticky after the first touch so touch-only guidance does not appear
@@ -169,18 +188,22 @@ struct TouchHudRoot;
 #[derive(Component)]
 struct TouchGuidanceRoot;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ControlZone {
-    Steering,
-    Handbrake,
-    Brake,
-    Throttle,
-}
+/// The first live touch on the left half owns the drive stick until it is
+/// released/cancelled, matching wasm_battle_arena's `TouchMap` resource.
+#[derive(Resource, Default, Debug, Clone, Copy, PartialEq, Eq)]
+struct DriveTouchOwner(Option<u64>);
 
 #[derive(Debug, Clone, Copy)]
 struct ActiveTouch {
+    id: u64,
     start: Vec2,
     current: Vec2,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TouchIntent {
+    direction: u8,
+    action: bool,
 }
 
 pub struct TouchPlugin;
@@ -188,6 +211,7 @@ pub struct TouchPlugin;
 impl Plugin for TouchPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<TouchControlsActive>()
+            .init_resource::<DriveTouchOwner>()
             .add_systems(
                 Update,
                 touch_state_transitions
@@ -201,7 +225,10 @@ impl Plugin for TouchPlugin {
                     .run_if(in_state(GameState::Playing)),
             )
             .add_systems(OnEnter(GameState::Playing), spawn_touch_hud)
-            .add_systems(OnExit(GameState::Playing), despawn_marker::<TouchHudRoot>)
+            .add_systems(
+                OnExit(GameState::Playing),
+                (despawn_marker::<TouchHudRoot>, reset_drive_touch_owner),
+            )
             .add_systems(OnEnter(GameState::Paused), spawn_paused_guidance)
             .add_systems(
                 OnExit(GameState::Paused),
@@ -234,78 +261,113 @@ fn normalize_position(position: Vec2, window_size: Vec2) -> Option<Vec2> {
     ))
 }
 
-fn classify_zone(start: Vec2) -> Option<ControlZone> {
-    if start.y < ACTIVE_Y {
-        None
-    } else if start.x < STEER_END_X {
-        Some(ControlZone::Steering)
-    } else if start.x < BRAKE_START_X {
-        // Former lower-center dead zone (0.45..0.55) is now the HANDBRAKE pad,
-        // preserving every other zone boundary.
-        Some(ControlZone::Handbrake)
-    } else if start.x < BRAKE_END_X {
-        Some(ControlZone::Brake)
-    } else {
-        Some(ControlZone::Throttle)
-    }
+fn is_pause_hitbox(position: Vec2) -> bool {
+    position.y < PAUSE_TOP && (PAUSE_LEFT..=PAUSE_RIGHT).contains(&position.x)
 }
 
-/// Steering is positive on the left and negative on the right. The deadzone
-/// is centered in the steering pad and the remaining range is rescaled.
-fn steering_value(current_x: f32) -> f32 {
-    let raw = ((STEER_CENTER_X - current_x) / STEER_CENTER_X).clamp(-1.0, 1.0);
-    if raw.abs() <= STEER_DEADZONE {
-        0.0
-    } else {
-        raw.signum() * (raw.abs() - STEER_DEADZONE) / (1.0 - STEER_DEADZONE)
-    }
+fn adaptive_deadzone(window_size: Vec2) -> f32 {
+    (window_size.x.min(window_size.y) * 0.08).clamp(32.0, 72.0)
 }
 
-/// Merge currently active touch controls onto the keyboard snapshot. Zones
-/// that have no active touch leave their keyboard field unchanged. Therefore
-/// an empty active list (including the frame after release/cancel) is identity.
-///
-/// Returns the merged `PlayerInput` plus a frame-fresh touch-handbrake flag.
-/// The handbrake is reported separately (not a `PlayerInput` field) so
-/// `read_touch_input` can OR it with the keyboard `Handbrake` resource without
-/// clobbering Shift.
-fn merge_touch_input(keyboard: PlayerInput, touches: &[ActiveTouch]) -> (PlayerInput, bool) {
-    let mut result = keyboard;
-    let mut steer_sum = 0.0;
-    let mut has_steer = false;
-    let mut touch_brake = false;
-    let mut touch_throttle = false;
-    let mut touch_handbrake = false;
+/// Exact eight-way quantization ported from wasm_battle_arena. `dir` is
+/// start-current, so dragging upward produces UP and dragging left produces
+/// LEFT. A displacement exactly on the pixel deadzone remains idle.
+fn input_from_vec(dir: Vec2, deadzone: f32) -> u8 {
+    if dir.length() <= deadzone {
+        return 0;
+    }
+    let dir = dir.normalize_or_zero();
+    let left = dir.distance_squared(Vec2::X);
+    let top_left = dir.distance_squared(UNIT_TL);
+    let top = dir.distance_squared(Vec2::Y);
+    let top_right = dir.distance_squared(UNIT_TR);
+    let right = dir.distance_squared(-Vec2::X);
+    let bottom_left = dir.distance_squared(UNIT_BL);
+    let bottom = dir.distance_squared(-Vec2::Y);
+    let bottom_right = dir.distance_squared(UNIT_BR);
 
-    for touch in touches {
-        match classify_zone(touch.start) {
-            Some(ControlZone::Steering) => {
-                has_steer = true;
-                steer_sum += steering_value(touch.current.x);
-            }
-            Some(ControlZone::Handbrake) => touch_handbrake = true,
-            Some(ControlZone::Brake) => touch_brake = true,
-            Some(ControlZone::Throttle) => touch_throttle = true,
-            None => {}
+    if top < AXIS_DEADZONE {
+        INPUT_UP
+    } else if bottom < AXIS_DEADZONE {
+        INPUT_DOWN
+    } else if left < right {
+        if left < AXIS_DEADZONE {
+            INPUT_LEFT
+        } else if top_left < left {
+            INPUT_LEFT | INPUT_UP
+        } else if bottom_left < left {
+            INPUT_LEFT | INPUT_DOWN
+        } else {
+            0
         }
+    } else if right < AXIS_DEADZONE {
+        INPUT_RIGHT
+    } else if top_right < right {
+        INPUT_RIGHT | INPUT_UP
+    } else if bottom_right < right {
+        INPUT_RIGHT | INPUT_DOWN
+    } else {
+        0
     }
+}
 
-    if has_steer {
-        result.steer = steer_sum.clamp(-1.0, 1.0);
+fn update_drive_owner(owner: Option<u64>, touches: &[ActiveTouch]) -> Option<u64> {
+    if owner.is_some_and(|id| touches.iter().any(|touch| touch.id == id)) {
+        owner
+    } else {
+        touches
+            .iter()
+            .find(|touch| touch.start.x < 0.5)
+            .map(|touch| touch.id)
     }
-    if touch_brake {
-        result.brake = true;
-    } else if touch_throttle {
+}
+
+fn touch_intent(owner: Option<u64>, touches: &[ActiveTouch], window_size: Vec2) -> TouchIntent {
+    let direction = owner
+        .and_then(|id| touches.iter().find(|touch| touch.id == id))
+        .map(|touch| {
+            let delta = (touch.start - touch.current) * window_size;
+            input_from_vec(delta, adaptive_deadzone(window_size))
+        })
+        .unwrap_or(0);
+    let action = touches
+        .iter()
+        .any(|touch| touch.start.x >= 0.5 && !is_pause_hitbox(touch.start));
+    TouchIntent { direction, action }
+}
+
+/// Merge touch intent onto keyboard input. DOWN never requests reverse; it
+/// zeroes touch steering unless diagonal, where horizontal steering remains.
+/// Action owns throttle/brake, using speed to switch braking to held reverse.
+fn merge_touch_input(keyboard: PlayerInput, intent: TouchIntent, speed: f32) -> PlayerInput {
+    let mut result = keyboard;
+    let horizontal = intent.direction & (INPUT_LEFT | INPUT_RIGHT);
+    if intent.direction != 0 {
+        result.steer = match horizontal {
+            INPUT_LEFT => 1.0,
+            INPUT_RIGHT => -1.0,
+            _ => 0.0,
+        };
+    }
+    if intent.action {
+        if speed > ACTION_BRAKE_SPEED {
+            result.throttle = 0.0;
+            result.brake = true;
+        } else {
+            result.throttle = -1.0;
+            result.brake = false;
+        }
+    } else if intent.direction & INPUT_UP != 0 {
         result.throttle = 1.0;
     }
-    (result, touch_handbrake)
+    result
 }
 
 fn touch_state_action(state: GameState, position: Vec2) -> StateAction {
     match state {
         GameState::Menu => StateAction::Playing,
         GameState::Playing => {
-            if position.y < 0.14 && (0.44..=0.56).contains(&position.x) {
+            if is_pause_hitbox(position) {
                 StateAction::Paused
             } else {
                 StateAction::None
@@ -382,14 +444,13 @@ fn read_touch_input(
     touches: Res<Touches>,
     windows: Query<&Window, With<PrimaryWindow>>,
     frozen: Res<InputFrozen>,
+    car: Query<&Car>,
+    mut owner: ResMut<DriveTouchOwner>,
     mut input: ResMut<PlayerInput>,
-    mut handbrake: ResMut<Handbrake>,
 ) {
     if frozen.0 {
         *input = PlayerInput::default();
-        // The keyboard system already cleared `Handbrake` while frozen; leave
-        // it untouched so touch never clobbers the keyboard's frame-fresh
-        // value.
+        owner.0 = None;
         return;
     }
     let Some(window_size) = primary_window_size(&windows) else {
@@ -400,18 +461,22 @@ fn read_touch_input(
         .iter()
         .filter_map(|touch| {
             Some(ActiveTouch {
+                id: touch.id(),
                 start: normalize_position(touch.start_position(), window_size)?,
                 current: normalize_position(touch.position(), window_size)?,
             })
         })
         .collect();
-    let (merged, touch_handbrake) = merge_touch_input(*input, &active_touches);
-    *input = merged;
-    // OR with the keyboard's frame-fresh Handbrake so a touch handbrake press
-    // engages drift alongside Shift, and touch never clobbers a held Shift.
-    // `active_touches` is rebuilt every frame from live touches, so the touch
-    // handbrake is frame-fresh and releases the instant the touch ends.
-    handbrake.0 = handbrake.0 || touch_handbrake;
+    owner.0 = update_drive_owner(owner.0, &active_touches);
+    let intent = touch_intent(owner.0, &active_touches, window_size);
+    let speed = car.single().map_or(0.0, |car| car.speed);
+    *input = merge_touch_input(*input, intent, speed);
+    // Touch never writes Handbrake: keyboard Shift remains wholly owned by the
+    // keyboard system and cannot be clobbered by touch release/cancel.
+}
+
+fn reset_drive_touch_owner(mut owner: ResMut<DriveTouchOwner>) {
+    owner.0 = None;
 }
 
 fn spawn_touch_hud(mut commands: Commands, active: Res<TouchControlsActive>) {
@@ -433,11 +498,63 @@ fn spawn_touch_hud(mut commands: Commands, active: Res<TouchControlsActive>) {
             TouchHudRoot,
         ))
         .with_children(|root| {
-            // Visual bands are intentionally shorter than their generous
-            // logical touch zones so a short landscape viewport stays clear.
-            for (label, left, width, font_size) in CONTROL_LABEL_LAYOUTS {
-                root.spawn(control_label(label, left, width, font_size));
-            }
+            root.spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: px(DRIVE_PAD_LEFT),
+                    bottom: px(DRIVE_PAD_BOTTOM),
+                    width: px(DRIVE_PAD_SIZE),
+                    height: px(DRIVE_PAD_SIZE),
+                    border: UiRect::all(px(3.0)),
+                    border_radius: BorderRadius::all(Val::Percent(50.0)),
+                    align_items: AlignItems::Center,
+                    justify_content: JustifyContent::Center,
+                    ..default()
+                },
+                BorderColor::all(Color::srgba(1.0, 1.0, 1.0, 0.34)),
+                BackgroundColor(Color::srgba(0.02, 0.02, 0.03, 0.18)),
+                Text::new("DRIVE"),
+                TextFont {
+                    font_size: FontSize::Px(19.0),
+                    ..default()
+                },
+                TextColor(Color::srgba(1.0, 1.0, 1.0, 0.58)),
+            ));
+            root.spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    right: px(ACTION_PAD_RIGHT),
+                    bottom: px(ACTION_PAD_BOTTOM),
+                    width: px(ACTION_PAD_WIDTH),
+                    height: px(ACTION_PAD_HEIGHT),
+                    border: UiRect::all(px(3.0)),
+                    border_radius: BorderRadius::all(px(24.0)),
+                    flex_direction: FlexDirection::Column,
+                    align_items: AlignItems::Center,
+                    justify_content: JustifyContent::Center,
+                    ..default()
+                },
+                BorderColor::all(Color::srgba(1.0, 0.55, 0.4, 0.44)),
+                BackgroundColor(Color::srgba(0.08, 0.02, 0.02, 0.24)),
+            ))
+            .with_children(|button| {
+                button.spawn((
+                    Text::new("BRAKE"),
+                    TextFont {
+                        font_size: FontSize::Px(23.0),
+                        ..default()
+                    },
+                    TextColor(Color::srgba(1.0, 0.86, 0.8, 0.72)),
+                ));
+                button.spawn((
+                    Text::new("REVERSE"),
+                    TextFont {
+                        font_size: FontSize::Px(13.0),
+                        ..default()
+                    },
+                    TextColor(Color::srgba(1.0, 1.0, 1.0, 0.48)),
+                ));
+            });
             root.spawn((
                 Node {
                     position_type: PositionType::Absolute,
@@ -458,33 +575,6 @@ fn spawn_touch_hud(mut commands: Commands, active: Res<TouchControlsActive>) {
                 TextColor(Color::srgba(1.0, 1.0, 1.0, 0.58)),
             ));
         });
-}
-
-fn control_label(
-    label: &'static str,
-    left_percent: f32,
-    width_percent: f32,
-    font_size: f32,
-) -> impl Bundle {
-    (
-        Node {
-            position_type: PositionType::Absolute,
-            bottom: Val::Percent(CONTROL_LABEL_BOTTOM_PERCENT),
-            left: Val::Percent(left_percent),
-            width: Val::Percent(width_percent),
-            height: Val::Percent(CONTROL_LABEL_HEIGHT_PERCENT),
-            align_items: AlignItems::Center,
-            justify_content: JustifyContent::Center,
-            ..default()
-        },
-        BackgroundColor(Color::srgba(0.02, 0.02, 0.03, 0.18)),
-        Text::new(label),
-        TextFont {
-            font_size: FontSize::Px(font_size),
-            ..default()
-        },
-        TextColor(Color::srgba(1.0, 1.0, 1.0, 0.52)),
-    )
 }
 
 fn spawn_paused_guidance(mut commands: Commands, active: Res<TouchControlsActive>) {
@@ -547,8 +637,12 @@ fn despawn_marker<M: Component>(mut commands: Commands, roots: Query<Entity, Wit
 mod tests {
     use super::*;
 
-    fn touch(start: Vec2, current: Vec2) -> ActiveTouch {
-        ActiveTouch { start, current }
+    fn touch(id: u64, start: Vec2, current: Vec2) -> ActiveTouch {
+        ActiveTouch { id, start, current }
+    }
+
+    fn intent(direction: u8, action: bool) -> TouchIntent {
+        TouchIntent { direction, action }
     }
 
     #[test]
@@ -616,84 +710,149 @@ mod tests {
     }
 
     #[test]
-    fn control_zone_boundaries_leave_safe_gaps() {
-        assert_eq!(classify_zone(Vec2::new(0.1, 0.549)), None);
+    fn control_visuals_are_disjoint_at_844x390() {
+        let [drive, action] = touch_control_label_bounds(Vec2::new(844.0, 390.0));
+        assert!(!drive.overlaps(action));
+        assert!(drive.right <= 844.0 * 0.5);
+        assert!(action.left >= 844.0 * 0.5);
+    }
+
+    #[test]
+    fn exact_eight_way_quantization_and_adaptive_deadzone() {
+        assert_eq!(adaptive_deadzone(Vec2::new(844.0, 390.0)), 32.0);
+        assert_eq!(adaptive_deadzone(Vec2::new(1440.0, 900.0)), 72.0);
+        for deadzone in [32.0, 72.0] {
+            assert_eq!(input_from_vec(Vec2::X * deadzone, deadzone), 0);
+            let d = deadzone + 1.0;
+            assert_eq!(input_from_vec(Vec2::Y * d, deadzone), INPUT_UP);
+            assert_eq!(input_from_vec(-Vec2::Y * d, deadzone), INPUT_DOWN);
+            assert_eq!(input_from_vec(Vec2::X * d, deadzone), INPUT_LEFT);
+            assert_eq!(input_from_vec(-Vec2::X * d, deadzone), INPUT_RIGHT);
+            assert_eq!(
+                input_from_vec(Vec2::splat(d), deadzone),
+                INPUT_LEFT | INPUT_UP
+            );
+            assert_eq!(
+                input_from_vec(Vec2::new(-d, d), deadzone),
+                INPUT_RIGHT | INPUT_UP
+            );
+            assert_eq!(
+                input_from_vec(Vec2::new(d, -d), deadzone),
+                INPUT_LEFT | INPUT_DOWN
+            );
+            assert_eq!(
+                input_from_vec(Vec2::splat(-d), deadzone),
+                INPUT_RIGHT | INPUT_DOWN
+            );
+        }
+    }
+
+    #[test]
+    fn drive_owner_resets_across_playing_state_exit() {
+        let mut app = App::new();
+        app.init_resource::<DriveTouchOwner>()
+            .add_systems(Update, reset_drive_touch_owner);
+        app.world_mut().resource_mut::<DriveTouchOwner>().0 = Some(42);
+        app.update();
+        assert_eq!(app.world().resource::<DriveTouchOwner>().0, None);
+    }
+
+    #[test]
+    fn first_left_touch_owns_until_release_then_hands_off() {
+        let first = touch(70, Vec2::new(0.2, 0.8), Vec2::new(0.2, 0.6));
+        let second = touch(9, Vec2::new(0.3, 0.8), Vec2::new(0.1, 0.8));
+        assert_eq!(update_drive_owner(None, &[first, second]), Some(70));
+        assert_eq!(update_drive_owner(Some(70), &[second, first]), Some(70));
+        assert_eq!(update_drive_owner(Some(70), &[second]), Some(9));
+        assert_eq!(update_drive_owner(Some(70), &[]), None);
         assert_eq!(
-            classify_zone(Vec2::new(0.449, 0.55)),
-            Some(ControlZone::Steering)
-        );
-        // The former lower-center dead zone (0.45..0.55) is now HANDBRAKE.
-        assert_eq!(
-            classify_zone(Vec2::new(0.45, 0.8)),
-            Some(ControlZone::Handbrake)
-        );
-        assert_eq!(
-            classify_zone(Vec2::new(0.549, 0.8)),
-            Some(ControlZone::Handbrake)
-        );
-        assert_eq!(
-            classify_zone(Vec2::new(0.55, 0.8)),
-            Some(ControlZone::Brake)
-        );
-        assert_eq!(
-            classify_zone(Vec2::new(0.749, 0.8)),
-            Some(ControlZone::Brake)
-        );
-        assert_eq!(
-            classify_zone(Vec2::new(0.75, 0.8)),
-            Some(ControlZone::Throttle)
+            update_drive_owner(None, &[touch(1, Vec2::new(0.8, 0.8), Vec2::ZERO)]),
+            None
         );
     }
 
     #[test]
-    fn steering_has_left_positive_right_negative_deadzone_and_clamp() {
-        assert_eq!(steering_value(-1.0), 1.0);
-        assert_eq!(steering_value(2.0), -1.0);
-        assert_eq!(steering_value(STEER_CENTER_X), 0.0);
-        assert_eq!(steering_value(STEER_CENTER_X + 0.01), 0.0);
-        assert!(steering_value(0.0) > 0.99);
-        assert!(steering_value(STEER_END_X) < -0.99);
-    }
-
-    #[test]
-    fn simultaneous_touches_merge_controls_and_brake_overrides_touch_go() {
+    fn down_never_reverses_but_diagonals_steer() {
         let keyboard = PlayerInput {
-            throttle: -1.0,
-            steer: -0.5,
+            throttle: 0.3,
+            steer: 0.2,
             brake: false,
         };
-        let (merged, handbrake) = merge_touch_input(
-            keyboard,
-            &[
-                touch(Vec2::new(0.1, 0.8), Vec2::new(0.0, 0.8)),
-                touch(Vec2::new(0.6, 0.8), Vec2::new(0.6, 0.8)),
-                touch(Vec2::new(0.9, 0.8), Vec2::new(0.9, 0.8)),
-            ],
-        );
-        assert_eq!(merged.steer, 1.0);
-        assert!(merged.brake);
-        // The brake wins over touch GO; the keyboard snapshot is not erased.
-        assert_eq!(merged.throttle, -1.0);
-        // No touch in the HANDBRAKE zone, so touch handbrake is idle.
-        assert!(!handbrake);
+        let down = merge_touch_input(keyboard, intent(INPUT_DOWN, false), 0.0);
+        assert_eq!(down.throttle, keyboard.throttle);
+        assert_eq!(down.steer, 0.0);
+        assert_eq!(down.brake, keyboard.brake);
+        let left_down = merge_touch_input(keyboard, intent(INPUT_LEFT | INPUT_DOWN, false), 0.0);
+        assert_eq!(left_down.throttle, keyboard.throttle);
+        assert_eq!(left_down.steer, 1.0);
+        let right_down = merge_touch_input(keyboard, intent(INPUT_RIGHT | INPUT_DOWN, false), 0.0);
+        assert_eq!(right_down.steer, -1.0);
     }
 
     #[test]
-    fn untouched_keyboard_fields_and_empty_release_frame_are_preserved() {
+    fn action_brakes_forward_then_holds_reverse_at_boundary() {
+        let keyboard = PlayerInput {
+            throttle: 1.0,
+            steer: 0.4,
+            brake: false,
+        };
+        let braking = merge_touch_input(keyboard, intent(INPUT_UP, true), 0.150_01);
+        assert_eq!(
+            braking,
+            PlayerInput {
+                throttle: 0.0,
+                steer: 0.0,
+                brake: true
+            }
+        );
+        for speed in [0.15, 0.0, -2.0] {
+            let reverse = merge_touch_input(keyboard, intent(INPUT_UP, true), speed);
+            assert_eq!(
+                reverse,
+                PlayerInput {
+                    throttle: -1.0,
+                    steer: 0.0,
+                    brake: false
+                }
+            );
+        }
+        assert_eq!(merge_touch_input(keyboard, intent(0, false), 0.0), keyboard);
+        assert_eq!(
+            merge_touch_input(PlayerInput::default(), intent(0, false), -1.0),
+            PlayerInput::default(),
+            "releasing action coasts when no keyboard control is held"
+        );
+    }
+
+    #[test]
+    fn simultaneous_drive_and_action_and_keyboard_preservation() {
+        let size = Vec2::new(844.0, 390.0);
+        let touches = [
+            touch(1, Vec2::new(0.25, 0.85), Vec2::new(0.15, 0.65)),
+            touch(2, Vec2::new(0.8, 0.85), Vec2::new(0.8, 0.85)),
+        ];
+        let touch_intent = touch_intent(Some(1), &touches, size);
+        assert_eq!(touch_intent.direction, INPUT_LEFT | INPUT_UP);
+        assert!(touch_intent.action);
         let keyboard = PlayerInput {
             throttle: 0.4,
             steer: -0.3,
-            brake: true,
+            brake: false,
         };
-        let (merged, handbrake) = merge_touch_input(keyboard, &[]);
-        assert_eq!(merged, keyboard);
-        assert!(!handbrake);
-        let (throttle_only, handbrake_2) =
-            merge_touch_input(keyboard, &[touch(Vec2::new(0.9, 0.8), Vec2::new(0.9, 0.8))]);
-        assert_eq!(throttle_only.steer, keyboard.steer);
-        assert_eq!(throttle_only.brake, keyboard.brake);
-        assert_eq!(throttle_only.throttle, 1.0);
-        assert!(!handbrake_2);
+        let merged = merge_touch_input(keyboard, touch_intent, 4.0);
+        assert_eq!(
+            merged,
+            PlayerInput {
+                throttle: 0.0,
+                steer: 1.0,
+                brake: true
+            }
+        );
+
+        let up_only = merge_touch_input(keyboard, intent(INPUT_UP, false), 0.0);
+        assert_eq!(up_only.steer, 0.0);
+        assert_eq!(up_only.brake, keyboard.brake);
+        assert_eq!(up_only.throttle, 1.0);
     }
 
     #[test]
@@ -753,48 +912,11 @@ mod tests {
     }
 
     #[test]
-    fn handbrake_touch_zone_engages_handbrake_without_clobbering_keyboard() {
-        // A touch in the former lower-center dead zone (now HANDBRAKE) reports
-        // a frame-fresh handbrake flag without mutating throttle/steer/brake,
-        // so `read_touch_input` can OR it onto the keyboard Handbrake without
-        // clobbering Shift.
-        let keyboard = PlayerInput {
-            throttle: 1.0,
-            steer: 0.0,
-            brake: false,
-        };
-        let (merged, handbrake) =
-            merge_touch_input(keyboard, &[touch(Vec2::new(0.5, 0.8), Vec2::new(0.5, 0.8))]);
-        assert!(handbrake, "center touch engages handbrake");
-        assert_eq!(merged.throttle, 1.0);
-        assert_eq!(merged.steer, 0.0);
-        assert!(!merged.brake);
-    }
-
-    #[test]
-    fn handbrake_and_brake_can_be_held_simultaneously() {
-        // Multi-touch priority is preserved: HANDBRAKE is independent of the
-        // brake/throttle/steer merge, so a player can hold both at once.
-        let keyboard = PlayerInput::default();
-        let (merged, handbrake) = merge_touch_input(
-            keyboard,
-            &[
-                touch(Vec2::new(0.5, 0.8), Vec2::new(0.5, 0.8)),
-                touch(Vec2::new(0.6, 0.8), Vec2::new(0.6, 0.8)),
-            ],
-        );
-        assert!(handbrake);
-        assert!(merged.brake);
-    }
-
-    #[test]
-    fn empty_touch_list_releases_handbrake_flag() {
-        // The touch handbrake flag is frame-fresh: an empty touch list (the
-        // frame after a handbrake touch ends) reports no handbrake, so only the
-        // keyboard Shift value remains via the OR in `read_touch_input`.
-        let keyboard = PlayerInput::default();
-        let (merged, handbrake) = merge_touch_input(keyboard, &[]);
-        assert!(!handbrake);
-        assert_eq!(merged, keyboard);
+    fn right_half_is_action_except_pause_hitbox() {
+        let size = Vec2::new(844.0, 390.0);
+        let action = touch(1, Vec2::new(0.7, 0.2), Vec2::new(0.7, 0.2));
+        assert!(touch_intent(None, &[action], size).action);
+        let pause = touch(2, Vec2::new(0.5, 0.1), Vec2::new(0.5, 0.1));
+        assert!(!touch_intent(None, &[pause], size).action);
     }
 }

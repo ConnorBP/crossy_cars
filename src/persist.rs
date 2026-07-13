@@ -12,6 +12,7 @@ use crate::game::resources::Score;
 use crate::game::state::GameState;
 use crate::modifiers::{ActiveModifier, ModifierKind};
 use crate::palette;
+use crate::touch::TouchControlsActive;
 
 /// localStorage key (web).
 #[cfg(target_arch = "wasm32")]
@@ -144,7 +145,10 @@ impl Plugin for PersistPlugin {
             .init_resource::<PersistedConditionBests>()
             .init_resource::<PendingBests>()
             .add_systems(Startup, (load_best_score, spawn_best_score_ui).chain())
-            .add_systems(Update, update_best_score_text)
+            .add_systems(
+                Update,
+                (update_best_score_text, update_best_score_visibility),
+            )
             // Only GameOver completes a round. Menu entry (including startup
             // and paused restart/quit) may retry a failed completed-round
             // write, but never applies an in-progress score.
@@ -170,6 +174,25 @@ fn load_best_score(
 /// Spawn the "BEST: N" UI node (bottom-left, absolute). Lives for the whole
 /// app lifetime; the number span is refreshed each frame by
 /// `update_best_score_text`.
+const fn best_score_visible(state: GameState, touch_active: bool) -> bool {
+    !(touch_active && matches!(state, GameState::Playing | GameState::Paused))
+}
+
+fn update_best_score_visibility(
+    state: Res<State<GameState>>,
+    touch: Res<TouchControlsActive>,
+    mut roots: Query<&mut Visibility, With<BestScoreRoot>>,
+) {
+    let visibility = if best_score_visible(*state.get(), touch.0) {
+        Visibility::Visible
+    } else {
+        Visibility::Hidden
+    };
+    for mut current in &mut roots {
+        *current = visibility;
+    }
+}
+
 fn spawn_best_score_ui(mut commands: Commands) {
     commands
         .spawn((
@@ -578,6 +601,22 @@ mod tests {
         assert_eq!(completed.global, 18);
         assert_eq!(completed.by_kind[ModifierKind::Standard.index()], 18);
         assert_ne!(completed.global, peak_during_play);
+    }
+
+    #[test]
+    fn touch_best_score_visibility_avoids_playing_and_pause_controls() {
+        for state in [
+            GameState::Menu,
+            GameState::Playing,
+            GameState::Paused,
+            GameState::GameOver,
+        ] {
+            assert!(best_score_visible(state, false), "desktop {state:?}");
+        }
+        assert!(best_score_visible(GameState::Menu, true));
+        assert!(!best_score_visible(GameState::Playing, true));
+        assert!(!best_score_visible(GameState::Paused, true));
+        assert!(best_score_visible(GameState::GameOver, true));
     }
 
     #[test]

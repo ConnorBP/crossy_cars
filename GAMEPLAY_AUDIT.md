@@ -15,11 +15,11 @@ The findings below intentionally preserve the audited source snapshot. The follo
 - Timer and combo contrast panels were added; objective, combo, event, minimap, and level-label bands were separated.
 - The event banner now includes a non-color signature, explicit seconds remaining, and segmented duration progress.
 - The Menu now includes a five-condition medal gallery, and maximal Game Over content has a compact mobile layout.
-- The touch HUD now uses a coordinated compact cockpit, health, power-up, event, minimap, and driving-control layout at the 844×390 target viewport.
+- The touch HUD now uses a coordinated compact cockpit, health, power-up, event, minimap, and driving-control layout at the 844×390 target viewport. A later mobile wave replaced the legacy STEER/BRAKE/GO split with a first-touch-owned `DRIVE` drag pad and one `BRAKE / REVERSE` action that brakes through a stop before reversing; the mobile Menu and terminal leaderboard/modal layouts are also collision-free.
 - Static-obstacle damage now requires impact strictly above 5 u/s, uses a 0.5 s cooldown, and deterministically applies only the strongest qualifying contact per frame. Sub-threshold closing contacts still stop inward motion.
 - Deterministic Field and Orchard tile variants and conservative rotation-independent farm-prop colliders were added without changing road socket compatibility.
 
-Current validation for this implementation wave: **283 Rust tests**, zero native/WASM warnings, strict desktop/touch/Settings browser scenarios passed, and release WASM **22.832 MiB** (25 MiB limit). Telemetry-dependent balance proposals remain intentionally unimplemented.
+Current validation after the mobile-control follow-up: **290 Rust tests**, zero native/WASM warnings, strict desktop/touch/Settings browser scenarios passed, and release WASM **22.859 MiB** (25 MiB limit). Telemetry-dependent balance proposals remain intentionally unimplemented.
 
 ---
 
