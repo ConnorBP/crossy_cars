@@ -2,9 +2,9 @@
 //!
 //! Objectives are deliberately process-local: they are selected for each fresh
 //! round, survive a pause/resume, and are never persisted. Gameplay messages
-//! may be observed one frame after their producer because this plugin does not
-//! impose ordering on the independent chicken/coin systems; Bevy messages keep
-//! each reader's cursor independent, so no hit is consumed by another feature.
+//! are consumed in `PostUpdate`, after their `Update` producers and before the
+//! next state transition is applied; Bevy messages keep each reader's cursor
+//! independent, so no hit is consumed by another feature.
 
 use bevy::prelude::*;
 use bevy::text::FontSize;
@@ -232,9 +232,10 @@ impl Plugin for ObjectivesPlugin {
                 despawn_marker::<ObjectiveHudRoot>,
             )
             .add_systems(
-                Update,
-                // Award reads this system's completion message in the same
-                // frame; gameplay hit messages may arrive on the next frame.
+                PostUpdate,
+                // Update owns the chicken/coin producers and may also request
+                // GameOver. Consume those messages and award the completion
+                // bonus before the state transition and its OnEnter snapshot.
                 (tick_objective, award_objective_bonus)
                     .chain()
                     .run_if(in_state(GameState::Playing)),
@@ -242,7 +243,6 @@ impl Plugin for ObjectivesPlugin {
             .add_systems(
                 Update,
                 update_objective_hud
-                    .after(award_objective_bonus)
                     .run_if(in_state(GameState::Playing))
                     .run_if(resource_changed::<ActiveObjective>),
             );
@@ -370,6 +370,95 @@ mod tests {
             coins_collected: coins,
             combo_multiplier: combo,
         }
+    }
+
+    #[derive(Resource, Debug, Default, PartialEq, Eq)]
+    struct TerminalSnapshot {
+        captures: u32,
+        objective: Option<ActiveObjective>,
+        chicken_score: u32,
+    }
+
+    fn produce_timeout_chicken_hit(
+        mut produced: Local<bool>,
+        mut score: ResMut<Score>,
+        mut hits: MessageWriter<ChickenHit>,
+        mut reason: ResMut<crate::game::resources::GameOverReason>,
+        mut next: ResMut<NextState<GameState>>,
+    ) {
+        if *produced {
+            return;
+        }
+        *produced = true;
+        score.chickens = score.chickens.saturating_add(1);
+        hits.write(ChickenHit);
+        *reason = crate::game::resources::GameOverReason::TimeUp;
+        next.set(GameState::GameOver);
+    }
+
+    fn capture_terminal_snapshot(
+        objective: Res<ActiveObjective>,
+        score: Res<Score>,
+        mut snapshot: ResMut<TerminalSnapshot>,
+    ) {
+        snapshot.captures += 1;
+        snapshot.objective = Some(*objective);
+        snapshot.chicken_score = score.chickens;
+    }
+
+    #[test]
+    fn terminal_update_completes_and_rewards_before_gameover_snapshot() {
+        let mut app = App::new();
+        app.add_plugins(bevy::state::app::StatesPlugin)
+            .init_state::<GameState>()
+            .init_resource::<Score>()
+            .init_resource::<Combo>()
+            .init_resource::<RoundActive>()
+            .init_resource::<crate::game::resources::GameOverReason>()
+            .init_resource::<ActiveModifier>()
+            .init_resource::<TerminalSnapshot>()
+            .add_message::<ChickenHit>()
+            .add_message::<CoinCollected>()
+            .add_plugins(ObjectivesPlugin)
+            .add_systems(
+                Update,
+                produce_timeout_chicken_hit.run_if(in_state(GameState::Playing)),
+            )
+            .add_systems(OnEnter(GameState::GameOver), capture_terminal_snapshot);
+
+        app.world_mut()
+            .insert_resource(ActiveObjective::new(ObjectiveKind::HitChickens {
+                target: 1,
+            }));
+        app.world_mut().resource_mut::<RoundActive>().0 = true;
+        app.world_mut()
+            .resource_mut::<NextState<GameState>>()
+            .set(GameState::Playing);
+        app.update();
+        app.update();
+
+        let snapshot = app.world().resource::<TerminalSnapshot>();
+        let objective = snapshot
+            .objective
+            .expect("GameOver entry must capture the terminal objective");
+        assert_eq!(snapshot.captures, 1);
+        assert_eq!(objective.progress, 1);
+        assert!(objective.completed);
+        assert!(objective.reward_awarded);
+        assert_eq!(snapshot.chicken_score, 1 + OBJECTIVE_BONUS);
+        assert_eq!(
+            app.world().resource::<Score>().chickens,
+            1 + OBJECTIVE_BONUS
+        );
+
+        app.update();
+        let snapshot = app.world().resource::<TerminalSnapshot>();
+        assert_eq!(snapshot.captures, 1);
+        assert_eq!(snapshot.chicken_score, 1 + OBJECTIVE_BONUS);
+        assert_eq!(
+            app.world().resource::<Score>().chickens,
+            1 + OBJECTIVE_BONUS
+        );
     }
 
     #[test]
