@@ -379,9 +379,44 @@ enum GridAction {
     Skip,
 }
 
-/// 6×6 grid of A–Z + 0–9 (36 chars), then a bottom row with BACK / SUBMIT /
-/// SKIP. Normalized coordinates (0..1, origin top-left). This is a pure
-/// function testable without a window.
+type GridBottomControl = (&'static str, GridAction);
+
+const INITIALS_BOTTOM_CONTROLS: &[GridBottomControl] = &[
+    ("BACK", GridAction::Backspace),
+    ("SUBMIT", GridAction::Submit),
+    ("SKIP", GridAction::Skip),
+];
+const FAILED_BOTTOM_CONTROLS: &[GridBottomControl] =
+    &[("RETRY", GridAction::Submit), ("SKIP", GridAction::Skip)];
+
+/// Bottom controls shown for each interactive submission state. Keeping this
+/// separate from character-grid visibility prevents a Failed modal from
+/// displaying actions that its input handler does not accept.
+fn grid_bottom_controls(state: SubmissionState) -> &'static [GridBottomControl] {
+    match state {
+        SubmissionState::EnteringInitials => INITIALS_BOTTOM_CONTROLS,
+        SubmissionState::Failed => FAILED_BOTTOM_CONTROLS,
+        _ => &[],
+    }
+}
+
+fn grid_shows_characters(state: SubmissionState) -> bool {
+    state == SubmissionState::EnteringInitials
+}
+
+/// Map a Failed modal action to its retry/skip transition. `None` means the
+/// action is not a control in that modal.
+fn failed_grid_transition(action: GridAction) -> Option<SubmissionState> {
+    match action {
+        GridAction::Submit => Some(transition_on_retry(SubmissionState::Failed)),
+        GridAction::Skip => Some(transition_on_skip(SubmissionState::Failed)),
+        GridAction::Char(_) | GridAction::Backspace => None,
+    }
+}
+
+/// 6×6 grid of A–Z + 0–9 (36 chars), then bottom action zones. Normalized
+/// coordinates (0..1, origin top-left). This is a pure function testable
+/// without a window.
 fn grid_action_for_normalized(x: f32, y: f32) -> Option<GridAction> {
     // Character grid: y [0.40, 0.85], x [0.05, 0.95], 6 cols × 6 rows.
     if (0.40..=0.85).contains(&y) && (0.05..=0.95).contains(&x) {
@@ -1554,9 +1589,10 @@ fn spawn_gameover_ui(commands: &mut Commands) {
 }
 
 /// Visible controls aligned exactly with [`grid_action_for_normalized`].
-/// Spawned only while touch can opt in or edit/skip initials. Each label
-/// occupies the same normalized rectangle as its raw touch zone.
-fn spawn_touch_initials_grid(commands: &mut Commands, show_characters: bool) {
+/// Spawned only while touch can edit/retry/skip. Character visibility and the
+/// state-specific bottom actions are selected independently by pure helpers.
+fn spawn_touch_initials_grid(commands: &mut Commands, state: SubmissionState) {
+    let show_characters = grid_shows_characters(state);
     const CHARS: &[char] = &[
         'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R',
         'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
@@ -1624,13 +1660,19 @@ fn spawn_touch_initials_grid(commands: &mut Commands, show_characters: bool) {
                     ));
                 }
             }
-            for (label, left) in [("BACK", 5.0), ("SUBMIT", 35.0), ("SKIP", 65.0)] {
+            for &(label, action) in grid_bottom_controls(state) {
+                let (left, width) = match action {
+                    GridAction::Backspace => (5.0, 25.0),
+                    GridAction::Submit => (35.0, 30.0),
+                    GridAction::Skip => (70.0, 25.0),
+                    GridAction::Char(_) => continue,
+                };
                 root.spawn((
                     Node {
                         position_type: PositionType::Absolute,
                         left: Val::Percent(left),
                         top: Val::Percent(87.0),
-                        width: Val::Percent(30.0),
+                        width: Val::Percent(width),
                         height: Val::Percent(10.0),
                         align_items: AlignItems::Center,
                         justify_content: JustifyContent::Center,
@@ -1767,7 +1809,7 @@ fn update_gameover_submission(
     let needs_touch_grid = touch_active.0
         && (submission.state == SubmissionState::EnteringInitials
             || (mobile && submission.state == SubmissionState::Failed));
-    let show_characters = submission.state == SubmissionState::EnteringInitials;
+    let show_characters = grid_shows_characters(submission.state);
     let grid_matches = touch_grid_q
         .iter()
         .any(|(_, grid)| grid.0 == show_characters);
@@ -1775,7 +1817,7 @@ fn update_gameover_submission(
         for (entity, _) in &touch_grid_q {
             commands.entity(entity).despawn();
         }
-        spawn_touch_initials_grid(&mut commands, show_characters);
+        spawn_touch_initials_grid(&mut commands, submission.state);
     } else if !needs_touch_grid {
         for (entity, _) in &touch_grid_q {
             commands.entity(entity).despawn();
@@ -2059,19 +2101,19 @@ fn leaderboard_gameover_input(
                 submission.state = transition_on_skip(submission.state);
             }
 
-            // Touch: SUBMIT zone → retry, SKIP zone → skip.
+            // Touch: RETRY (the SUBMIT action zone) → retry, SKIP → skip.
             let mut handled_touch = false;
             if let Ok(window) = windows.single() {
                 for touch in touches.iter_just_pressed() {
                     touch_active.0 = true;
                     handled_touch = true;
-                    if let Some(GridAction::Submit) = touch_grid_action(touch.position(), window) {
-                        submission.state = transition_on_retry(submission.state);
-                        submission.error = None;
-                    } else if let Some(GridAction::Skip) =
-                        touch_grid_action(touch.position(), window)
-                    {
-                        submission.state = transition_on_skip(submission.state);
+                    if let Some(action) = touch_grid_action(touch.position(), window) {
+                        if let Some(next) = failed_grid_transition(action) {
+                            submission.state = next;
+                            if next == SubmissionState::EnteringInitials {
+                                submission.error = None;
+                            }
+                        }
                     }
                 }
             }
@@ -2579,6 +2621,40 @@ mod tests {
             grid_action_for_normalized(0.85, 0.92),
             Some(GridAction::Skip)
         );
+    }
+
+    #[test]
+    fn bottom_controls_have_exact_state_specific_labels_and_actions() {
+        assert_eq!(
+            grid_bottom_controls(SubmissionState::EnteringInitials),
+            &[
+                ("BACK", GridAction::Backspace),
+                ("SUBMIT", GridAction::Submit),
+                ("SKIP", GridAction::Skip),
+            ]
+        );
+        assert_eq!(
+            grid_bottom_controls(SubmissionState::Failed),
+            &[("RETRY", GridAction::Submit), ("SKIP", GridAction::Skip),]
+        );
+        assert!(grid_shows_characters(SubmissionState::EnteringInitials));
+        assert!(!grid_shows_characters(SubmissionState::Failed));
+    }
+
+    #[test]
+    fn failed_bottom_controls_are_all_live_and_take_expected_transitions() {
+        for &(_, action) in grid_bottom_controls(SubmissionState::Failed) {
+            assert!(failed_grid_transition(action).is_some(), "{action:?}");
+        }
+        assert_eq!(
+            failed_grid_transition(GridAction::Submit),
+            Some(SubmissionState::EnteringInitials)
+        );
+        assert_eq!(
+            failed_grid_transition(GridAction::Skip),
+            Some(SubmissionState::Skipped)
+        );
+        assert_eq!(failed_grid_transition(GridAction::Backspace), None);
     }
 
     #[test]
