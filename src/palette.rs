@@ -4,7 +4,6 @@ use bevy::prelude::Color;
 pub const SKY: Color = Color::srgb(0.53, 0.81, 0.92);
 pub const LANE_WHITE: Color = Color::srgb(0.9, 0.9, 0.85);
 
-pub const CAR_CABIN: Color = Color::srgb(0.10, 0.10, 0.20);
 pub const CAR_WHEEL: Color = Color::srgb(0.05, 0.05, 0.05);
 
 pub const COIN: Color = Color::srgb(1.00, 0.84, 0.10);
