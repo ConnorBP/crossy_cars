@@ -164,6 +164,8 @@ jobs:
               python tools/browser_audit.py \
                 http://127.0.0.1:8080 \
                 --browser-channel chromium
+              python tools/browser_turnstile_bridge.py \
+                --browser-channel chromium
               ;;
             desktop)
               python tools/browser_scenarios.py \

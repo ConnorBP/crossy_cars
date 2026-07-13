@@ -600,6 +600,19 @@ mod web_bridge {
         SUBMIT_RESULTS.with(|s| s.borrow_mut().clear());
     }
 
+    /// Cancel every pending JS Turnstile challenge. The bridge settles each
+    /// associated Promise, allowing its Rust future to finish and be discarded
+    /// by the submission epoch after Game Over exits.
+    pub fn cancel_turnstile_requests() {
+        let Ok(api) = js_api() else {
+            return;
+        };
+        let Ok(func) = js_fn(&api, "cancelTurnstileRequests") else {
+            return;
+        };
+        let _ = func.call0(&api);
+    }
+
     pub fn take_board() -> Option<(u64, Result<Vec<BoardEntry>, String>)> {
         BOARD_RESULTS.with(|s| s.borrow_mut().pop())
     }
@@ -1041,6 +1054,14 @@ fn clear_submit_result() {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn clear_submit_result() {}
+
+#[cfg(target_arch = "wasm32")]
+fn cancel_turnstile_requests() {
+    web_bridge::cancel_turnstile_requests();
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn cancel_turnstile_requests() {}
 
 #[cfg(target_arch = "wasm32")]
 fn poll_board_result() -> Option<(u64, Result<Vec<BoardEntry>, String>)> {
@@ -1637,6 +1658,10 @@ fn on_gameover_exit(
     for e in &q {
         commands.entity(e).despawn();
     }
+    // Bound the JS challenge lifecycle to Game Over. This must happen before
+    // clearing the result queue/state so the challenge Promise is settled and
+    // its temporary widget/container are removed immediately.
+    cancel_turnstile_requests();
     submission.state = SubmissionState::Idle;
     submission.initials.clear();
     submission.ranks = None;

@@ -259,13 +259,15 @@
 
       The game-facing UI lives entirely in Bevy. Fetch uses raw `web-sys`
       bindings in Rust (architecture §12 recommends this to preserve WASM
-      size). This bridge provides two async functions on
-      `window.roadyLeaderboard` that the Rust WASM client calls via `js_sys` /
-      `wasm_bindgen_futures`:
+      size). This bridge provides async functions on `window.roadyLeaderboard`
+      that the Rust WASM client calls via `js_sys` / `wasm_bindgen_futures`,
+      plus a synchronous cancellation hook:
 
         - getTurnstileToken(siteKey)
-            Renders a Cloudflare Turnstile widget on demand and resolves with
-            { ok: true, token } or { ok: false, error }.
+            Renders a bounded Cloudflare Turnstile widget on demand and resolves
+            with { ok: true, token } or { ok: false, error }.
+        - cancelTurnstileRequests()
+            Settles and cleans up every active challenge when Game Over exits.
         - hmacSha256Base64Url(keyUtf8, dataUtf8)
             WebCrypto HMAC-SHA-256, returning unpadded base64url.
 
@@ -304,6 +306,35 @@
         };
 
         // ── Turnstile token ────────────────────────────────────────────
+        // Every request is bounded and independently cancellable. Request IDs
+        // are monotonic so cancelling an old challenge can never target a
+        // later request, even after the active Map becomes empty.
+        var activeTurnstileRequests = new Map();
+        var nextTurnstileRequestId = 1;
+        var TURNSTILE_TIMEOUT_MS = 30000;
+
+        function turnstileTimeoutMs() {
+          // Tests may shorten the bound without changing the production value.
+          var override = window.__roadyTurnstileTimeoutMs;
+          return typeof override === "number" && isFinite(override) && override >= 0
+            ? override
+            : TURNSTILE_TIMEOUT_MS;
+        }
+
+        function removeTurnstileWidget(request) {
+          if (
+            request.widgetRemoved ||
+            request.widgetId === null ||
+            typeof request.widgetId === "undefined"
+          ) return;
+          request.widgetRemoved = true;
+          try {
+            if (typeof request.turnstile.remove === "function") {
+              request.turnstile.remove(request.widgetId);
+            }
+          } catch (e) {}
+        }
+
         // Renders a widget in a temporary container and resolves with the
         // token. Only called when the player chooses to submit a score.
         api.getTurnstileToken = function (siteKey) {
@@ -312,30 +343,77 @@
               resolve({ ok: false, error: "Turnstile not loaded" });
               return;
             }
-            var container = document.createElement("div");
-            container.style.cssText =
-              "position:fixed;bottom:10px;left:10px;z-index:200;";
-            document.body.appendChild(container);
-            var settled = false;
-            function done(result) {
-              if (settled) return;
-              settled = true;
+
+            var requestId = nextTurnstileRequestId++;
+            var request = {
+              id: requestId,
+              turnstile: window.turnstile,
+              container: null,
+              widgetId: null,
+              widgetRemoved: false,
+              timeoutId: null,
+              settled: false,
+              settle: null,
+            };
+
+            function settle(result) {
+              if (request.settled) return;
+              request.settled = true;
+              if (request.timeoutId !== null) {
+                clearTimeout(request.timeoutId);
+                request.timeoutId = null;
+              }
+              removeTurnstileWidget(request);
+              try {
+                if (request.container && request.container.parentNode) {
+                  request.container.parentNode.removeChild(request.container);
+                }
+              } catch (e) {}
+              activeTurnstileRequests.delete(requestId);
               resolve(result);
-              setTimeout(function () {
-                if (container.parentNode) container.parentNode.removeChild(container);
-              }, 200);
             }
+
+            request.settle = settle;
+            activeTurnstileRequests.set(requestId, request);
+            request.timeoutId = setTimeout(function () {
+              settle({ ok: false, error: "Challenge timed out" });
+            }, turnstileTimeoutMs());
+
             try {
-              window.turnstile.render(container, {
+              var container = document.createElement("div");
+              container.setAttribute("data-roady-turnstile-request", String(requestId));
+              container.style.cssText =
+                "position:fixed;bottom:10px;left:10px;z-index:200;";
+              request.container = container;
+              document.body.appendChild(container);
+
+              var widgetId = request.turnstile.render(container, {
                 sitekey: siteKey,
                 action: "roady_score_session",
-                callback: function (token) { done({ ok: true, token: token }); },
-                "error-callback": function () { done({ ok: false, error: "Turnstile error" }); },
-                "expired-callback": function () { done({ ok: false, error: "Turnstile expired" }); },
+                callback: function (token) {
+                  settle({ ok: true, token: token });
+                },
+                "error-callback": function () {
+                  settle({ ok: false, error: "Turnstile error" });
+                },
+                "expired-callback": function () {
+                  settle({ ok: false, error: "Turnstile expired" });
+                },
               });
+              request.widgetId = widgetId;
+              // A synchronous callback (or cancellation from inside render)
+              // can settle before render returns its widget ID.
+              if (request.settled) removeTurnstileWidget(request);
             } catch (e) {
-              done({ ok: false, error: String(e) });
+              settle({ ok: false, error: String(e) });
             }
+          });
+        };
+
+        api.cancelTurnstileRequests = function () {
+          // Snapshot because settle removes each request from the active Map.
+          Array.from(activeTurnstileRequests.values()).forEach(function (request) {
+            request.settle({ ok: false, error: "Challenge cancelled" });
           });
         };
 
