@@ -1,6 +1,16 @@
 // Shared HTTP response + CORS helpers for the Roady Car leaderboard Worker.
 // See LEADERBOARD_ARCHITECTURE.md §4 (error shape) and §11 (CORS).
 
+import {
+  fromBase64Url,
+  isExactOriginAllowed,
+  parseExactOrigins,
+  randomBase64Url,
+  toBase64Url,
+} from "../vendor/cloudflare-game-common/src/index";
+
+export { fromBase64Url, toBase64Url };
+
 export interface ErrorBody {
   error: {
     code: string;
@@ -15,44 +25,17 @@ const COMMON_HEADERS: Record<string, string> = {
 
 /** Generate a short, opaque request id for error correlation. */
 export function newRequestId(): string {
-  const bytes = new Uint8Array(8);
-  crypto.getRandomValues(bytes);
-  return toBase64Url(bytes);
+  return randomBase64Url(8);
 }
 
-/** Encode bytes as unpadded base64url (RFC 4648 §5, no `=`). */
-export function toBase64Url(bytes: ArrayBuffer | Uint8Array): string {
-  const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-  let s = "";
-  for (let i = 0; i < view.length; i++) s += String.fromCharCode(view[i]!);
-  const b64 = btoa(s);
-  return b64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-}
-
-/** Decode an unpadded base64url string into bytes. Throws on invalid input. */
-export function fromBase64Url(s: string): Uint8Array {
-  if (!/^[A-Za-z0-9_-]*$/.test(s)) {
-    throw new Error("invalid base64url");
-  }
-  const padded = s.replace(/-/g, "+").replace(/_/g, "/").padEnd(
-    Math.ceil(s.length / 4) * 4,
-    "=",
-  );
-  const bin = atob(padded);
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
-}
-
-/** Parse a comma-separated ALLOWED_ORIGINS var into a trimmed set. */
+/**
+ * Parse a comma-separated ALLOWED_ORIGINS value. Any malformed, wildcard, or
+ * non-canonical entry rejects the complete list (represented as an empty set)
+ * rather than silently broadening or partially applying configuration.
+ */
 export function parseAllowedOrigins(raw: string | undefined): Set<string> {
-  if (!raw) return new Set();
-  return new Set(
-    raw
-      .split(",")
-      .map((o) => o.trim())
-      .filter((o) => o.length > 0),
-  );
+  const parsed = parseExactOrigins(raw);
+  return parsed === null ? new Set() : new Set(parsed);
 }
 
 /**
@@ -64,7 +47,7 @@ export function corsHeaders(
   origin: string | null | undefined,
   allowed: Set<string>,
 ): Record<string, string> | null {
-  if (!origin || !allowed.has(origin)) return null;
+  if (!isExactOriginAllowed(origin, allowed)) return null;
   return {
     "Access-Control-Allow-Origin": origin,
     "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
@@ -101,10 +84,9 @@ export function applyCors(
   response: Response,
   cors: Record<string, string> | null,
 ): Response {
-  if (!cors) return response;
   const headers = new Headers(response.headers);
   for (const key of CORS_HEADER_KEYS) headers.delete(key);
-  for (const [k, v] of Object.entries(cors)) headers.set(k, v);
+  if (cors) for (const [k, v] of Object.entries(cors)) headers.set(k, v);
   return new Response(response.body, {
     status: response.status,
     statusText: response.statusText,

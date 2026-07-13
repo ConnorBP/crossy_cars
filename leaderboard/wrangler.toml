@@ -28,9 +28,9 @@ migrations_dir = "migrations"
 # Each binding is an independent anonymous pool with a `simple` limit (limit
 # requests per `period` seconds; period must be 10 or 60). The per-IP keys are
 # constructed in src/index.ts from CF-Connecting-IP. Limits match the
-# architecture §9 recommendations. Read endpoints fail open if a binding is
-# unavailable; write endpoints (session/submit) fail closed so a missing or
-# erroring binding cannot bypass the throttle.
+# architecture §9 recommendations. A deliberately absent read binding is
+# tolerated for standalone tests/unsupported runtimes, but configured binding
+# errors and all write binding failures deny the request.
 # ────────────────────────────────────────────────────────────────────────────
 [[unsafe.bindings]]
 name = "RATE_LIMIT_READ"

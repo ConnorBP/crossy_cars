@@ -24,6 +24,7 @@ import {
   validateSessionBody,
 } from "../src/validation";
 import { escapeXml } from "../src/svg";
+import { parseExactOrigin, utf8ByteLength } from "../vendor/cloudflare-game-common/src/index";
 import {
   FakeD1,
   SCORE_CAPS,
@@ -221,6 +222,18 @@ describe("SVG XML escaping", () => {
 
 // ─── Name normalization ──────────────────────────────────────────────────────
 
+describe("shared Worker adapter", () => {
+  it("requires canonical exact origins", () => {
+    expect(parseExactOrigin("https://car.segfault.site")).toBe("https://car.segfault.site");
+    expect(parseExactOrigin("https://car.segfault.site/")).toBeNull();
+    expect(parseExactOrigin("https://*.segfault.site")).toBeNull();
+  });
+
+  it("counts UTF-8 bytes rather than UTF-16 code units", () => {
+    expect(utf8ByteLength("é🙂")).toBe(6);
+  });
+});
+
 describe("name normalization", () => {
   it("uppercases and accepts 3–5 chars from [A-Z0-9]", () => {
     expect(normalizeName("abc")).toBe("ABC");
@@ -304,6 +317,12 @@ describe("score validation", () => {
     expect(r.ok).toBe(false);
   });
 
+  it("enforces build limits in UTF-8 bytes", () => {
+    const r = validateScoreBody(sampleScoreBody({ build: "🙂".repeat(17) }), SCORE_CAPS);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.code).toBe("invalid_build");
+  });
+
   it("rejects non-object body", () => {
     const r = validateScoreBody("nope", SCORE_CAPS);
     expect(r.ok).toBe(false);
@@ -319,6 +338,13 @@ describe("plausibility caps", () => {
     expect(caps.get(0)).toBe(3000);
     expect(caps.get(2)).toBe(4000);
     expect(caps.get(4)).toBe(6000);
+  });
+
+  it("parseScoreCaps rejects unsafe root shapes and entries", () => {
+    expect(() => parseScoreCaps("null")).toThrow();
+    expect(() => parseScoreCaps("[]")).toThrow();
+    expect(() => parseScoreCaps('{"0":1.5}')).toThrow();
+    expect(() => parseScoreCaps('{"unexpected":100}')).toThrow();
   });
 
   it("hard-rejects above-cap totals", () => {

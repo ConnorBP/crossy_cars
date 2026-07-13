@@ -2,16 +2,24 @@
 // Roady Car leaderboard. See LEADERBOARD_ARCHITECTURE.md §3 (names), §4
 // (request shapes), and §8 (score invariants & caps).
 
+import { boundedString, isPlainObject } from "../vendor/cloudflare-game-common/src/index";
+
 /** Parse SCORE_CAPS_JSON into a condition→cap map. Invalid JSON is fatal. */
 export function parseScoreCaps(raw: string | undefined): Map<number, number> {
   const caps = new Map<number, number>();
   if (!raw) return caps;
-  const parsed = JSON.parse(raw) as Record<string, number>;
-  for (const [k, v] of Object.entries(parsed)) {
-    const cond = Number(k);
-    if (Number.isInteger(cond) && Number.isFinite(v)) {
-      caps.set(cond, Math.floor(v));
+  const parsed: unknown = JSON.parse(raw);
+  if (!isPlainObject(parsed)) throw new TypeError("score caps must be a plain object");
+  for (const [key, value] of Object.entries(parsed)) {
+    if (
+      !/^(0|1|2|3|4)$/.test(key) ||
+      typeof value !== "number" ||
+      !Number.isInteger(value) ||
+      value <= 0
+    ) {
+      throw new TypeError("score caps contain an invalid entry");
     }
+    caps.set(Number(key), value);
   }
   return caps;
 }
@@ -45,7 +53,7 @@ export const MAX_COMBO_MIN_TOTAL: ReadonlyMap<number, number> = new Map([
 
 /** Maximum request body size accepted by the Worker (bytes). */
 export const MAX_REQUEST_BODY_BYTES = 16 * 1024; // 16 KiB
-/** Maximum string field length for free-text score fields. */
+/** Maximum UTF-8 byte length for free-text score fields. */
 export const MAX_BUILD_LENGTH = 64;
 export const GAME_OVER_REASONS = new Set(["time_up", "wrecked"]);
 
@@ -92,24 +100,24 @@ export function validateScoreBody(
 ): ValidationResult {
   if (!isObject(body)) return fail("invalid_body", "Malformed JSON body");
 
-  const sessionId = (body as Record<string, unknown>).sessionId;
-  const proof = (body as Record<string, unknown>).proof;
-  const nameRaw = (body as Record<string, unknown>).name;
-  const condition = (body as Record<string, unknown>).condition;
-  const terminalTotal = (body as Record<string, unknown>).terminal_total;
-  const chickens = (body as Record<string, unknown>).chickens;
-  const coins = (body as Record<string, unknown>).coins;
-  const objectiveCompleted = (body as Record<string, unknown>).objective_completed;
-  const maxCombo = (body as Record<string, unknown>).max_combo;
-  const roundDurationMs = (body as Record<string, unknown>).round_duration_ms;
-  const timeLeftMs = (body as Record<string, unknown>).time_left_ms;
-  const gameOverReason = (body as Record<string, unknown>).game_over_reason;
-  const build = (body as Record<string, unknown>).build;
-  const platform = (body as Record<string, unknown>).platform;
+  const sessionId = boundedString(body.sessionId, { minBytes: 1, maxBytes: 256 });
+  const proof = boundedString(body.proof, { minBytes: 1, maxBytes: 256 });
+  const nameRaw = body.name;
+  const condition = body.condition;
+  const terminalTotal = body.terminal_total;
+  const chickens = body.chickens;
+  const coins = body.coins;
+  const objectiveCompleted = body.objective_completed;
+  const maxCombo = body.max_combo;
+  const roundDurationMs = body.round_duration_ms;
+  const timeLeftMs = body.time_left_ms;
+  const gameOverReason = body.game_over_reason;
+  const build = boundedString(body.build, { minBytes: 1, maxBytes: MAX_BUILD_LENGTH });
+  const platform = body.platform;
 
-  if (typeof sessionId !== "string" || sessionId.length === 0 || sessionId.length > 256)
+  if (sessionId === null)
     return fail("invalid_session", "Missing or oversized sessionId");
-  if (typeof proof !== "string" || proof.length === 0 || proof.length > 256)
+  if (proof === null)
     return fail("invalid_proof", "Missing or oversized proof");
 
   const name = normalizeName(nameRaw as string);
@@ -147,8 +155,8 @@ export function validateScoreBody(
 
   if (typeof gameOverReason !== "string" || !GAME_OVER_REASONS.has(gameOverReason))
     return fail("invalid_reason", "game_over_reason must be 'time_up' or 'wrecked'");
-  if (typeof build !== "string" || build.length === 0 || build.length > MAX_BUILD_LENGTH)
-    return fail("invalid_build", "build must be a non-empty string (<= 64 chars)");
+  if (build === null)
+    return fail("invalid_build", "build must be a non-empty UTF-8 string (<= 64 bytes)");
   if (typeof platform !== "string" || !PLATFORMS.has(platform))
     return fail("invalid_platform", "platform must be 'web' or 'native'");
 
@@ -193,9 +201,7 @@ export function shouldFlagForModeration(
   return total >= Math.floor(cap * 0.8);
 }
 
-function isObject(x: unknown): x is Record<string, unknown> {
-  return typeof x === "object" && x !== null && !Array.isArray(x);
-}
+const isObject = isPlainObject;
 
 function fail(code: string, message: string): { ok: false; code: string; message: string } {
   return { ok: false, code, message };
@@ -209,10 +215,10 @@ export function validateSessionBody(body: unknown): {
 } | { ok: false; code: string; message: string } {
   if (!isObject(body)) return fail("invalid_body", "Malformed JSON body");
   const condition = body.condition;
-  const token = body.turnstileToken;
+  const token = boundedString(body.turnstileToken, { minBytes: 1, maxBytes: 4096 });
   if (typeof condition !== "number" || !CONDITIONS.has(condition))
     return fail("invalid_condition", "condition must be 0–4");
-  if (typeof token !== "string" || token.length === 0 || token.length > 4096)
-    return fail("invalid_turnstile", "turnstileToken required");
+  if (token === null)
+    return fail("invalid_turnstile", "turnstileToken required (<= 4096 UTF-8 bytes)");
   return { ok: true, condition, turnstileToken: token };
 }

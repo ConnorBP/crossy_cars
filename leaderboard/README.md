@@ -31,8 +31,10 @@ leaderboard/
     index.ts             # router, endpoints, D1 queries, rate limiting, cron
     security.ts          # HMAC, canonical bytes, IP hash, constant-time compare
     validation.ts        # name normalization, score invariants, plausibility caps
-    responses.ts         # JSON/CORS/error helpers, base64url
+    responses.ts         # JSON/CORS/error helpers; strict shared origins
     svg.ts               # accessible dark/gold SVG renderer + XML escaping
+  vendor/
+    cloudflare-game-common/ # local adapter for unpublished shared package
   test/
     index.test.ts        # pure helpers: canonical bytes, HMAC, XML escape, replay
     routes.test.ts       # fetch-route integration tests, including SVG/cache/CORS
@@ -80,7 +82,7 @@ curl 'http://localhost:8787/v1/leaderboard.svg?condition=0&limit=10'
 ## Tests
 
 ```bash
-npm test                 # vitest run — 41 unit + replay-ordering tests
+npm test                 # vitest run — unit, route, and replay-ordering tests
 npm run test:watch       # watch mode
 npm run typecheck        # tsc --noEmit
 ```
@@ -275,8 +277,9 @@ but not existing leaderboard rows.
    update it to the real production site origin so CORS allows submissions.
 7. **Rate limit bindings use the `unsafe.bindings` form.** Confirm your
    Wrangler version / account supports anonymous rate-limit namespaces, or
-   switch to named namespaces. The Worker fails open if a binding errors, so
-   a missing binding degrades to "no rate limit" rather than an outage.
+   switch to named namespaces. Session and submit bindings fail closed when
+   missing or errored. Public reads tolerate an absent binding for standalone
+   tests/unsupported runtimes, but a configured binding error fails closed.
 
 ## Security notes
 
@@ -288,3 +291,11 @@ but not existing leaderboard rows.
   extraction. If offline-verifiable snapshots are needed later, use asymmetric
   (Ed25519/P-256) signatures with a Worker-only private key.
 - Raw IP addresses are never stored; only `ip_hash` is persisted.
+- Shared Worker primitives are vendored under
+  `vendor/cloudflare-game-common` until the separate package is published.
+  See its README for source provenance and synchronization policy.
+- `ALLOWED_ORIGINS` entries must be canonical exact HTTP(S) origins (for
+  example `https://car.segfault.site`, with no trailing slash/path/wildcard).
+  One malformed entry invalidates the full list and configuration fails closed.
+- Body and free-text limits are measured as encoded UTF-8 bytes, not JavaScript
+  UTF-16 code units.

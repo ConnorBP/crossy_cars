@@ -38,13 +38,18 @@ import {
   type ValidatedScore,
 } from "./validation";
 import { renderLeaderboardSvg } from "./svg";
+import {
+  checkRateLimit,
+  readBoundedJson,
+  type RateLimitBinding,
+} from "../vendor/cloudflare-game-common/src/index";
 
 // ─── Bindings ────────────────────────────────────────────────────────────────
 
 export interface Env {
   DB: D1Database;
-  // Rate limit bindings (Cloudflare Rate Limiting). Optional so tests that
-  // exercise pure logic can run without them.
+  // Rate limit bindings (Cloudflare Rate Limiting). Optional at the type level
+  // for standalone tests; write endpoints require them and fail closed.
   RATE_LIMIT_READ?: RateLimit;
   RATE_LIMIT_SESSION?: RateLimit;
   RATE_LIMIT_SUBMIT?: RateLimit;
@@ -61,9 +66,7 @@ export interface Env {
   LB_CLIENT_HMAC_KEY: string;
 }
 
-interface RateLimit {
-  limit: (input: { key: string }) => Promise<{ success: boolean }>;
-}
+type RateLimit = RateLimitBinding;
 
 // ─── Tunables ────────────────────────────────────────────────────────────────
 
@@ -114,11 +117,11 @@ function isDevBuild(build: string | undefined): boolean {
  */
 function configError(env: Env): string | null {
   // Non-secret vars.
-  if (!env.ALLOWED_ORIGINS || env.ALLOWED_ORIGINS.trim().length === 0) {
-    return "ALLOWED_ORIGINS is not configured";
+  if (parseAllowedOrigins(env.ALLOWED_ORIGINS).size === 0) {
+    return "ALLOWED_ORIGINS is missing or contains a non-canonical origin";
   }
 
-  // Score caps: all five conditions must be present and positive integers.
+  // Score caps: require a plain JSON object with only integer condition keys.
   let caps: Map<number, number>;
   try {
     caps = parseScoreCaps(env.SCORE_CAPS_JSON);
@@ -246,49 +249,23 @@ function clientIp(request: Request): string {
 }
 
 /**
- * Check a rate-limit binding. Returns true if allowed, false if limited.
- *
- * `failClosed` controls behavior when the binding is absent or throws:
- *  - Read endpoints (leaderboard, rank) fail **open** — a missing binding
- *    degrades to "no rate limit" rather than an outage, since rate limiting
- *    is a nuisance control on public reads.
- *  - Write endpoints (session, submit) fail **closed** — if the rate limiter
- *    is unavailable, the write is rejected with 429 and logged. This prevents
- *    an attacker from bypassing the submit/session throttle by triggering a
- *    binding error.
+ * Check a rate-limit binding. The shared primitive always fails closed.
+ * Public reads explicitly opt into availability by treating a missing binding
+ * as allowed; configured binding errors still fail closed to avoid bypasses.
  */
 async function rateLimit(
   binding: RateLimit | undefined,
   key: string,
   category: "read" | "session" | "submit" | "rank",
-  failClosed = false,
+  requireBinding = false,
 ): Promise<boolean> {
-  if (!binding) {
-    if (failClosed) {
-      // Never log `key`: it contains the raw client IP.
-      console.error("rate_limit_missing", { category, failClosed });
-      return false;
-    }
-    return true; // absent in tests / unsupported runtimes
-  }
-  try {
-    const res = await binding.limit({ key });
-    return res.success;
-  } catch {
-    // Binding errors may echo their input, so log only a safe endpoint label.
-    console.error("rate_limit_error", { category, failClosed });
-    return !failClosed;
-  }
+  if (!binding && !requireBinding) return true;
+  return checkRateLimit(binding, key, category);
 }
 
-/** Read and parse a JSON body, enforcing a maximum byte size. */
+/** Read and parse a JSON body, enforcing its encoded UTF-8 byte size. */
 async function readJson(request: Request, maxBytes = MAX_REQUEST_BODY_BYTES): Promise<unknown> {
-  const text = await request.text();
-  if (text.length === 0) return null;
-  if (text.length > maxBytes) {
-    throw new Error(`body exceeds ${maxBytes} bytes`);
-  }
-  return JSON.parse(text);
+  return readBoundedJson(request, maxBytes);
 }
 
 function nowMs(): number {
@@ -621,11 +598,9 @@ async function verifyTurnstile(
     // Validate the hostname against the configured browser origins so a token
     // minted for another site cannot be replayed here. URL.hostname strips
     // schemes, ports, and paths; local origins therefore match `localhost`.
-    const allowedHosts = Array.from(parseAllowedOrigins(allowedOrigins))
-      .map((origin) => {
-        try { return new URL(origin).hostname; } catch { return ""; }
-      })
-      .filter(Boolean);
+    const allowedHosts = Array.from(parseAllowedOrigins(allowedOrigins), (origin) =>
+      new URL(origin).hostname,
+    );
     if (typeof data.hostname !== "string" || !allowedHosts.includes(data.hostname)) {
       console.error("turnstile_hostname_mismatch", { hostname: data.hostname });
       return false;

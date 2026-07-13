@@ -77,7 +77,7 @@ async function fetchRoute(
   opts: {
     body?: unknown;
     headers?: Record<string, string>;
-    origin?: string;
+    origin?: string | null;
   } = {},
 ): Promise<{ response: Response; ctx: FakeCtx }> {
   const url = new URL(`https://roady-leaderboard.test${path}`);
@@ -181,6 +181,14 @@ describe("fetch-route: CORS", () => {
 // ─── Config fail-closed tests ────────────────────────────────────────────────
 
 describe("fetch-route: fail-closed config", () => {
+  it("returns 503 config_error when an origin is non-canonical", async () => {
+    const env = makeEnv({ ALLOWED_ORIGINS: "https://car.segfault.site/" }) as unknown as Env;
+    const { response } = await fetchRoute(env, "GET", "/v1/leaderboard");
+    expect(response.status).toBe(503);
+    const body = await readJson<{ error: { code: string } }>(response);
+    expect(body.error.code).toBe("config_error");
+  });
+
   it("returns 503 config_error when a secret is a placeholder", async () => {
     const env = makeEnv({ LB_ADMIN_TOKEN: "REPLACE_WITH_RANDOM" }) as unknown as Env;
     const { response } = await fetchRoute(env, "GET", "/v1/leaderboard");
@@ -377,6 +385,15 @@ describe("fetch-route: SVG leaderboard", () => {
     expect(second.response.status).toBe(429);
     const body = await readJson<{ error: { code: string } }>(second.response);
     expect(body.error.code).toBe("rate_limited");
+  });
+
+  it("strips stale CORS headers when no current origin is allowed", async () => {
+    const env = makeEnv() as unknown as Env;
+    const first = await fetchRoute(env, "GET", "/v1/leaderboard", { origin: ORIGIN });
+    expect(first.response.headers.get("Access-Control-Allow-Origin")).toBe(ORIGIN);
+
+    const second = await fetchRoute(env, "GET", "/v1/leaderboard", { origin: null });
+    expect(second.response.headers.get("Access-Control-Allow-Origin")).toBeNull();
   });
 
   it("caches origin-agnostic SVG bytes and reapplies CORS for each origin", async () => {
@@ -905,6 +922,12 @@ describe("fetch-route: rate limiting", () => {
     expect(r2.response.status).toBe(429);
     const body = await readJson<{ error: { code: string } }>(r2.response);
     expect(body.error.code).toBe("rate_limited");
+  });
+
+  it("configured read rate limiter fails closed when binding errors", async () => {
+    const env = makeEnv({ RATE_LIMIT_READ: new FakeRateLimit(30, true) }) as unknown as Env;
+    const { response } = await fetchRoute(env, "GET", "/v1/leaderboard");
+    expect(response.status).toBe(429);
   });
 
   it("write rate limiter fails closed when binding errors", async () => {

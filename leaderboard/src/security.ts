@@ -6,7 +6,13 @@
 // Worker secret bindings (base64 or raw string) once per request; Workers are
 // stateless so there is no benefit to caching an imported key across requests.
 
-import { fromBase64Url, toBase64Url } from "./responses";
+import {
+  fromBase64Url,
+  randomBase64Url,
+  sha256,
+  sha256Base64Url,
+  toBase64Url,
+} from "../vendor/cloudflare-game-common/src/index";
 
 /**
  * Import a secret string as a Web Crypto HMAC key.
@@ -55,19 +61,12 @@ export function constantTimeEquals(a: Uint8Array, b: Uint8Array): boolean {
   return diff === 0;
 }
 
-/** SHA-256 hash, returned as bytes. */
-export async function sha256(data: Uint8Array): Promise<Uint8Array> {
-  const digest = await crypto.subtle.digest("SHA-256", data);
-  return new Uint8Array(digest);
-}
-
 /**
  * Hashed IP attribution: base64url(SHA-256(clientIP + pepper)).
  * Never store raw IP addresses (architecture §9).
  */
 export async function ipHash(clientIp: string, pepper: string): Promise<string> {
-  const data = new TextEncoder().encode(clientIp + pepper);
-  return toBase64Url(await sha256(data));
+  return sha256Base64Url(clientIp + pepper);
 }
 
 // ─── Canonical byte construction ─────────────────────────────────────────────
@@ -157,11 +156,4 @@ export function canonicalSessionBytes(input: {
   return new TextEncoder().encode(fields.join("\n"));
 }
 
-/** Generate `n` random bytes as unpadded base64url. */
-export function randomBase64Url(byteLen: number): string {
-  const bytes = new Uint8Array(byteLen);
-  crypto.getRandomValues(bytes);
-  return toBase64Url(bytes);
-}
-
-export { fromBase64Url, toBase64Url };
+export { fromBase64Url, randomBase64Url, sha256, toBase64Url };
