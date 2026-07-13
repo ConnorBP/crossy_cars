@@ -13,15 +13,13 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  strict-qa:
-    name: Rust, release, and browser QA
+  build:
+    name: Rust tests and production release
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
       CARGO_TERM_COLOR: always
-      BROWSER_CHANNEL: chromium
       TRUNK_VERSION: 0.21.14
-      PLAYWRIGHT_VERSION: 1.52.0
 
     steps:
       - name: Check out repository
@@ -61,18 +59,6 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Cache Playwright Chromium
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/ms-playwright
-          key: ${{ runner.os }}-playwright-${{ env.PLAYWRIGHT_VERSION }}-chromium
-
-      - name: Install Python Playwright and Chromium
-        timeout-minutes: 10
-        run: |
-          python -m pip install --disable-pip-version-check "playwright==$PLAYWRIGHT_VERSION"
-          python -m playwright install --with-deps chromium
-
       - name: Check formatting
         timeout-minutes: 3
         run: cargo fmt --all -- --check
@@ -93,11 +79,59 @@ jobs:
         timeout-minutes: 3
         run: python tools/check_release.py
 
-      - name: Run strict browser audit and scenarios
-        timeout-minutes: 30
+      - name: Upload production release
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-release-${{ github.sha }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  browser-qa:
+    name: Browser QA (${{ matrix.suite }})
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [audit, desktop, touch, settings]
+    env:
+      BROWSER_CHANNEL: chromium
+      PLAYWRIGHT_VERSION: 1.52.0
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Download production release
+        uses: actions/download-artifact@v4
+        with:
+          name: web-release-${{ github.sha }}
+          path: dist/
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Cache Playwright Chromium
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ env.PLAYWRIGHT_VERSION }}-chromium
+
+      - name: Install Python Playwright and Chromium
+        timeout-minutes: 10
+        run: |
+          python -m pip install --disable-pip-version-check "playwright==$PLAYWRIGHT_VERSION"
+          python -m playwright install --with-deps chromium
+
+      - name: Run strict ${{ matrix.suite }} browser QA
+        timeout-minutes: 35
         shell: bash
         run: |
-          set -uo pipefail
+          set -euo pipefail
           python -m http.server 8080 --bind 127.0.0.1 --directory dist > /tmp/roady-car-server.log 2>&1 &
           server_pid=$!
           cleanup() {
@@ -125,44 +159,41 @@ jobs:
             exit 1
           fi
 
-          audit_status=0
-          scenario_status=0
-          python tools/browser_audit.py http://127.0.0.1:8080 --browser-channel chromium || audit_status=$?
-          python tools/browser_scenarios.py \
-            --url http://127.0.0.1:8080 \
-            --browser-channel chromium \
-            --out-dir tools/scenarios/desktop || scenario_status=$?
-          touch_status=0
-          python tools/browser_touch_scenarios.py \
-            --url http://127.0.0.1:8080 \
-            --browser-channel chromium \
-            --out-dir tools/scenarios/touch || touch_status=$?
-          settings_status=0
-          python tools/browser_settings_scenarios.py \
-            --url http://127.0.0.1:8080 \
-            --browser-channel chromium \
-            --out-dir tools/scenarios/settings || settings_status=$?
-
-          if [ "$audit_status" -ne 0 ] || [ "$scenario_status" -ne 0 ] || [ "$touch_status" -ne 0 ] || [ "$settings_status" -ne 0 ]; then
-            echo "Browser QA failed (audit=$audit_status, desktop=$scenario_status, touch=$touch_status, settings=$settings_status)" >&2
-            cat /tmp/roady-car-server.log >&2
-            exit 1
-          fi
-
-      - name: Upload production release
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: web-release-${{ github.sha }}
-          path: dist/
-          if-no-files-found: warn
-          retention-days: 7
+          case "${{ matrix.suite }}" in
+            audit)
+              python tools/browser_audit.py \
+                http://127.0.0.1:8080 \
+                --browser-channel chromium
+              ;;
+            desktop)
+              python tools/browser_scenarios.py \
+                --url http://127.0.0.1:8080 \
+                --browser-channel chromium \
+                --out-dir tools/scenarios/desktop
+              ;;
+            touch)
+              python tools/browser_touch_scenarios.py \
+                --url http://127.0.0.1:8080 \
+                --browser-channel chromium \
+                --out-dir tools/scenarios/touch
+              ;;
+            settings)
+              python tools/browser_settings_scenarios.py \
+                --url http://127.0.0.1:8080 \
+                --browser-channel chromium \
+                --out-dir tools/scenarios/settings
+              ;;
+            *)
+              echo "Unknown browser QA suite: ${{ matrix.suite }}" >&2
+              exit 2
+              ;;
+          esac
 
       - name: Upload browser screenshots on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: browser-scenarios-${{ github.sha }}
+          name: browser-${{ matrix.suite }}-${{ github.sha }}
           path: tools/scenarios/
           if-no-files-found: ignore
           retention-days: 7
