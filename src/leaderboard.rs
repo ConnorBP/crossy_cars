@@ -389,6 +389,66 @@ const INITIALS_BOTTOM_CONTROLS: &[GridBottomControl] = &[
 const FAILED_BOTTOM_CONTROLS: &[GridBottomControl] =
     &[("RETRY", GridAction::Submit), ("SKIP", GridAction::Skip)];
 
+/// Normalized full-window regions used by both the mobile modal's absolute UI
+/// nodes and structural overlap tests. Adjacent regions deliberately retain a
+/// 2% vertical gap so borders and wrapped glyphs cannot collide.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ModalRegion {
+    left: f32,
+    top: f32,
+    width: f32,
+    height: f32,
+}
+
+impl ModalRegion {
+    fn right(self) -> f32 {
+        self.left + self.width
+    }
+
+    fn bottom(self) -> f32 {
+        self.top + self.height
+    }
+
+    #[cfg(test)]
+    fn is_disjoint(self, other: Self) -> bool {
+        self.right() <= other.left
+            || other.right() <= self.left
+            || self.bottom() <= other.top
+            || other.bottom() <= self.top
+    }
+}
+
+const MOBILE_INITIALS_HEADER_REGION: ModalRegion = ModalRegion {
+    left: 0.05,
+    top: 0.02,
+    width: 0.90,
+    height: 0.16,
+};
+const MOBILE_CONSENT_REGION: ModalRegion = ModalRegion {
+    left: 0.05,
+    top: 0.20,
+    width: 0.90,
+    height: 0.18,
+};
+const MOBILE_CHARACTERS_REGION: ModalRegion = ModalRegion {
+    left: 0.05,
+    top: 0.40,
+    width: 0.90,
+    height: 0.45,
+};
+const MOBILE_ACTIONS_REGION: ModalRegion = ModalRegion {
+    left: 0.05,
+    top: 0.87,
+    width: 0.90,
+    height: 0.10,
+};
+const MOBILE_FAILED_HEADER_REGION: ModalRegion = ModalRegion {
+    left: 0.05,
+    top: 0.05,
+    width: 0.90,
+    height: 0.77,
+};
+
 /// Bottom controls shown for each interactive submission state. Keeping this
 /// separate from character-grid visibility prevents a Failed modal from
 /// displaying actions that its input handler does not accept.
@@ -418,13 +478,16 @@ fn failed_grid_transition(action: GridAction) -> Option<SubmissionState> {
 /// coordinates (0..1, origin top-left). This is a pure function testable
 /// without a window.
 fn grid_action_for_normalized(x: f32, y: f32) -> Option<GridAction> {
-    // Character grid: y [0.40, 0.85], x [0.05, 0.95], 6 cols × 6 rows.
-    if (0.40..=0.85).contains(&y) && (0.05..=0.95).contains(&x) {
-        let col = ((x - 0.05) / 0.15).floor() as i32;
-        let row = ((y - 0.40) / 0.075).floor() as i32;
-        if !(0..=5).contains(&col) || !(0..=5).contains(&row) {
-            return None;
-        }
+    // Character grid uses the exact visible region, including its outer edge.
+    if (MOBILE_CHARACTERS_REGION.top..=MOBILE_CHARACTERS_REGION.bottom()).contains(&y)
+        && (MOBILE_CHARACTERS_REGION.left..=MOBILE_CHARACTERS_REGION.right()).contains(&x)
+    {
+        let col = (((x - MOBILE_CHARACTERS_REGION.left) / (MOBILE_CHARACTERS_REGION.width / 6.0))
+            .floor() as usize)
+            .min(5);
+        let row = (((y - MOBILE_CHARACTERS_REGION.top) / (MOBILE_CHARACTERS_REGION.height / 6.0))
+            .floor() as usize)
+            .min(5);
         const CHARS: &[char] = &[
             'A', 'B', 'C', 'D', 'E', 'F', //
             'G', 'H', 'I', 'J', 'K', 'L', //
@@ -433,12 +496,12 @@ fn grid_action_for_normalized(x: f32, y: f32) -> Option<GridAction> {
             'Y', 'Z', '0', '1', '2', '3', //
             '4', '5', '6', '7', '8', '9', //
         ];
-        let idx = (row * 6 + col) as usize;
+        let idx = row * 6 + col;
         let ch = *CHARS.get(idx)?;
         return Some(GridAction::Char(ch));
     }
-    // Bottom buttons: y [0.87, 0.97].
-    if (0.87..=0.97).contains(&y) {
+    // Bottom buttons use the exact visible action-region height.
+    if (MOBILE_ACTIONS_REGION.top..=MOBILE_ACTIONS_REGION.bottom()).contains(&y) {
         if (0.05..=0.30).contains(&x) {
             return Some(GridAction::Backspace);
         }
@@ -1398,7 +1461,7 @@ fn format_board_text(board: &LeaderboardBoard) -> String {
     match &board.status {
         BoardStatus::Idle => cached_board_text(&board.cached_entries, "Cached")
             .unwrap_or_else(|| "Loading...".to_string()),
-        BoardStatus::Fetching => cached_board_text(&board.cached_entries, "Refreshing — cached")
+        BoardStatus::Fetching => cached_board_text(&board.cached_entries, "Refreshing - cached")
             .unwrap_or_else(|| "Loading...".to_string()),
         BoardStatus::Fetched => {
             if board.entries.is_empty() {
@@ -1414,7 +1477,7 @@ fn format_board_text(board: &LeaderboardBoard) -> String {
             }
         }
         BoardStatus::Error(_) => cached_board_text(&board.cached_entries, "Offline (cached)")
-            .unwrap_or_else(|| "Offline — no cached data".to_string()),
+            .unwrap_or_else(|| "Offline - no cached data".to_string()),
         BoardStatus::Unavailable => {
             cached_board_text(&board.cached_entries, "Unavailable (cached)")
                 .unwrap_or_else(|| "Online leaderboard\nunavailable".to_string())
@@ -1439,7 +1502,7 @@ fn format_pause_board_text(board: &LeaderboardBoard) -> String {
     let (label, entries): (Option<&str>, &[BoardEntry]) = match &board.status {
         BoardStatus::Fetched => (None, &board.entries),
         BoardStatus::Fetching if !board.cached_entries.is_empty() => {
-            (Some("Refreshing — cached"), &board.cached_entries)
+            (Some("Refreshing - cached"), &board.cached_entries)
         }
         BoardStatus::Error(_) if !board.cached_entries.is_empty() => {
             (Some("Offline (cached)"), &board.cached_entries)
@@ -1538,7 +1601,7 @@ fn snapshot_condition_name(condition: u8) -> &'static str {
 
 fn submission_context(snapshot: &ScoreSnapshot) -> String {
     format!(
-        "SCORE {}  •  {}  •  {}",
+        "SCORE {}  |  {}  |  {}",
         snapshot.terminal_total,
         snapshot_condition_name(snapshot.condition),
         if snapshot.objective_completed {
@@ -1583,6 +1646,7 @@ fn spawn_gameover_ui(commands: &mut Commands) {
                     ..default()
                 },
                 TextColor(palette::HUD_TEXT.into()),
+                Node::default(),
                 LeaderboardGameOverText,
             ));
         });
@@ -1617,10 +1681,10 @@ fn spawn_touch_initials_grid(commands: &mut Commands, state: SubmissionState) {
                 root.spawn((
                     Node {
                         position_type: PositionType::Absolute,
-                        left: Val::Percent(5.0),
-                        top: Val::Percent(20.0),
-                        width: Val::Percent(90.0),
-                        height: Val::Percent(18.0),
+                        left: Val::Percent(MOBILE_CONSENT_REGION.left * 100.0),
+                        top: Val::Percent(MOBILE_CONSENT_REGION.top * 100.0),
+                        width: Val::Percent(MOBILE_CONSENT_REGION.width * 100.0),
+                        height: Val::Percent(MOBILE_CONSENT_REGION.height * 100.0),
                         padding: UiRect::all(px(5.0)),
                         align_items: AlignItems::Center,
                         justify_content: JustifyContent::Center,
@@ -1640,10 +1704,18 @@ fn spawn_touch_initials_grid(commands: &mut Commands, state: SubmissionState) {
                     root.spawn((
                         Node {
                             position_type: PositionType::Absolute,
-                            left: Val::Percent(5.0 + col as f32 * 15.0),
-                            top: Val::Percent(40.0 + row as f32 * 7.5),
-                            width: Val::Percent(15.0),
-                            height: Val::Percent(7.5),
+                            left: Val::Percent(
+                                (MOBILE_CHARACTERS_REGION.left
+                                    + col as f32 * MOBILE_CHARACTERS_REGION.width / 6.0)
+                                    * 100.0,
+                            ),
+                            top: Val::Percent(
+                                (MOBILE_CHARACTERS_REGION.top
+                                    + row as f32 * MOBILE_CHARACTERS_REGION.height / 6.0)
+                                    * 100.0,
+                            ),
+                            width: Val::Percent(MOBILE_CHARACTERS_REGION.width / 6.0 * 100.0),
+                            height: Val::Percent(MOBILE_CHARACTERS_REGION.height / 6.0 * 100.0),
                             align_items: AlignItems::Center,
                             justify_content: JustifyContent::Center,
                             border: UiRect::all(px(1.0)),
@@ -1671,9 +1743,9 @@ fn spawn_touch_initials_grid(commands: &mut Commands, state: SubmissionState) {
                     Node {
                         position_type: PositionType::Absolute,
                         left: Val::Percent(left),
-                        top: Val::Percent(87.0),
+                        top: Val::Percent(MOBILE_ACTIONS_REGION.top * 100.0),
                         width: Val::Percent(width),
-                        height: Val::Percent(10.0),
+                        height: Val::Percent(MOBILE_ACTIONS_REGION.height * 100.0),
                         align_items: AlignItems::Center,
                         justify_content: JustifyContent::Center,
                         border: UiRect::all(px(1.0)),
@@ -1728,7 +1800,14 @@ fn update_gameover_submission(
         ),
     >,
     mut core_q: Query<&mut Visibility, With<GameOverCoreRoot>>,
-    mut text_q: Query<&mut Text, With<LeaderboardGameOverText>>,
+    mut text_q: Query<
+        (&mut Text, &mut Node),
+        (
+            With<LeaderboardGameOverText>,
+            Without<LeaderboardGameOverRoot>,
+            Without<LeaderboardGameOverPanel>,
+        ),
+    >,
 ) {
     // Poll for async submission results (web only; native returns None).
     // Drain stale epochs until this submission's result is found (e.g. a chain
@@ -1777,7 +1856,11 @@ fn update_gameover_submission(
             panel.width = Val::Percent(100.0);
             panel.max_width = Val::Percent(100.0);
             panel.height = Val::Percent(100.0);
-            panel.padding = UiRect::axes(px(10.0), px(if modal { 12.0 } else { 4.0 }));
+            panel.padding = if modal {
+                UiRect::all(px(0.0))
+            } else {
+                UiRect::axes(px(10.0), px(4.0))
+            };
             panel.align_items = AlignItems::Center;
             panel.justify_content = JustifyContent::Center;
             background.0 = if modal {
@@ -1824,16 +1907,28 @@ fn update_gameover_submission(
         }
     }
 
-    let mut text = format_submission_text(
-        submission.state,
-        &submission.initials,
-        submission.ranks,
-        submission.error.as_deref(),
-        touch_active.0,
-    );
-    if modal {
+    // A touch entry grid may also be shown on desktop. Only the mobile modal
+    // needs the reserved absolute header; desktop keeps its established text.
+    let touch_modal = modal && touch_active.0;
+    let mut text = if touch_modal {
+        mobile_touch_modal_header_text(
+            submission.state,
+            &submission.snapshot,
+            &submission.initials,
+            submission.error.as_deref(),
+        )
+    } else {
+        format_submission_text(
+            submission.state,
+            &submission.initials,
+            submission.ranks,
+            submission.error.as_deref(),
+            touch_active.0,
+        )
+    };
+    if modal && !touch_modal {
         text = format!("{}\n{}", submission_context(&submission.snapshot), text);
-    } else if mobile {
+    } else if mobile && !modal {
         text = mobile_status_text(
             submission.state,
             &submission.initials,
@@ -1841,8 +1936,58 @@ fn update_gameover_submission(
             touch_active.0,
         );
     }
-    for mut t in &mut text_q {
+    for (mut t, mut node) in &mut text_q {
         **t = text.clone();
+        if touch_modal {
+            let region = mobile_modal_header_region(submission.state);
+            node.position_type = PositionType::Absolute;
+            node.left = Val::Percent(region.left * 100.0);
+            node.top = Val::Percent(region.top * 100.0);
+            node.width = Val::Percent(region.width * 100.0);
+            node.height = Val::Percent(region.height * 100.0);
+            node.align_items = AlignItems::Center;
+            node.justify_content = JustifyContent::Center;
+        } else {
+            node.position_type = PositionType::Relative;
+            node.left = Val::Auto;
+            node.top = Val::Auto;
+            node.width = Val::Auto;
+            node.height = Val::Auto;
+            node.align_items = default();
+            node.justify_content = default();
+        }
+    }
+}
+
+fn mobile_modal_header_region(state: SubmissionState) -> ModalRegion {
+    if state == SubmissionState::Failed {
+        MOBILE_FAILED_HEADER_REGION
+    } else {
+        MOBILE_INITIALS_HEADER_REGION
+    }
+}
+
+/// Touch modals render only context/initials or failure copy in the reserved
+/// header. Consent is owned exclusively by the grid's consent node, avoiding
+/// duplicate disclosure/instructions behind the character cells.
+fn mobile_touch_modal_header_text(
+    state: SubmissionState,
+    snapshot: &ScoreSnapshot,
+    initials: &str,
+    error: Option<&str>,
+) -> String {
+    match state {
+        SubmissionState::EnteringInitials => format!(
+            "SUBMIT TO LEADERBOARD\n{}\nINITIALS: [{}]",
+            submission_context(snapshot),
+            format_initials_display(initials)
+        ),
+        SubmissionState::Failed => format!(
+            "SUBMISSION FAILED\n{}\n{}\nSaved name remains active; clear it in Settings to stop future auto-submit.",
+            submission_context(snapshot),
+            error.unwrap_or("Unknown error")
+        ),
+        _ => String::new(),
     }
 }
 
@@ -1867,7 +2012,7 @@ fn mobile_status_text(
         SubmissionState::Submitted => ranks
             .map(|rank| {
                 format!(
-                    "SUBMITTED  •  GLOBAL #{}  •  CONDITION #{}",
+                    "SUBMITTED  |  GLOBAL #{}  |  CONDITION #{}",
                     rank.global, rank.condition
                 )
             })
@@ -1894,14 +2039,14 @@ fn format_submission_text(
                 "SUBMIT TO LEADERBOARD\n{SUBMISSION_CONSENT_DISCLOSURE}\nPress L to enter initials"
             );
             if touch_active {
-                text.push_str(" · tap SUBMIT");
+                text.push_str(" | tap SUBMIT");
             }
             text
         }
         SubmissionState::EnteringInitials => {
             let display = format_initials_display(initials);
             let mut text = format!(
-                "SUBMIT TO LEADERBOARD\nINITIALS: [{}]\n{SUBMISSION_CONSENT_DISCLOSURE}\nA-Z 0-9 type · BKSP delete · ENTER submit · ESC skip",
+                "SUBMIT TO LEADERBOARD\nINITIALS: [{}]\n{SUBMISSION_CONSENT_DISCLOSURE}\nA-Z 0-9 type | BKSP delete | ENTER submit | ESC skip",
                 display
             );
             if touch_active {
@@ -1918,7 +2063,7 @@ fn format_submission_text(
         }
         SubmissionState::Submitted => match ranks {
             Some(r) => format!(
-                "SUBMITTED!  GLOBAL #{}  •  CONDITION #{}",
+                "SUBMITTED!  GLOBAL #{}  |  CONDITION #{}",
                 r.global, r.condition
             ),
             None => "SUBMITTED!".to_string(),
@@ -1926,11 +2071,11 @@ fn format_submission_text(
         SubmissionState::Failed => {
             let msg = error.unwrap_or("Unknown error");
             let mut text = format!(
-                "SUBMISSION FAILED\n{msg}\nENTER/SPACE/R: edit initials, then submit again · ESC/Q: skip this round\nSaved name remains active; clear it in Settings to stop future auto-submit."
+                "SUBMISSION FAILED\n{msg}\nENTER/SPACE/R: edit initials, then submit again | ESC/Q: skip this round\nSaved name remains active; clear it in Settings to stop future auto-submit."
             );
             if touch_active {
                 text.push_str(
-                    "\nTouch: bottom-center edits initials; submit again after editing · bottom-right skips",
+                    "\nTouch: bottom-center edits initials; submit again after editing | bottom-right skips",
                 );
             }
             text
@@ -2589,15 +2734,84 @@ mod tests {
     // ── Touch grid mapping ───────────────────────────────────────────────
 
     #[test]
+    fn mobile_modal_regions_are_structurally_disjoint() {
+        let initials_regions = [
+            MOBILE_INITIALS_HEADER_REGION,
+            MOBILE_CONSENT_REGION,
+            MOBILE_CHARACTERS_REGION,
+            MOBILE_ACTIONS_REGION,
+        ];
+        for (index, region) in initials_regions.iter().enumerate() {
+            assert!(region.left >= 0.0 && region.top >= 0.0);
+            assert!(region.right() <= 1.0 && region.bottom() <= 1.0);
+            for other in &initials_regions[index + 1..] {
+                assert!(region.is_disjoint(*other), "{region:?} overlaps {other:?}");
+            }
+        }
+        assert!(MOBILE_FAILED_HEADER_REGION.is_disjoint(MOBILE_ACTIONS_REGION));
+        assert!((MOBILE_CONSENT_REGION.top - 0.20).abs() < 0.000_001);
+        assert!((MOBILE_CONSENT_REGION.bottom() - 0.38).abs() < 0.000_001);
+        assert!((MOBILE_CHARACTERS_REGION.top - 0.40).abs() < 0.000_001);
+        assert!((MOBILE_CHARACTERS_REGION.bottom() - 0.85).abs() < 0.000_001);
+        assert!((MOBILE_ACTIONS_REGION.top - 0.87).abs() < 0.000_001);
+        assert!((MOBILE_ACTIONS_REGION.bottom() - 0.97).abs() < 0.000_001);
+    }
+
+    #[test]
+    fn mobile_touch_headers_do_not_duplicate_grid_consent_or_instructions() {
+        let snapshot = ScoreSnapshot {
+            terminal_total: 42,
+            condition: 1,
+            objective_completed: true,
+            ..default()
+        };
+        let entering = mobile_touch_modal_header_text(
+            SubmissionState::EnteringInitials,
+            &snapshot,
+            "ABC",
+            None,
+        );
+        assert!(entering.contains("SCORE 42"));
+        assert!(entering.contains("INITIALS: [ABC__]"));
+        assert!(!entering.contains("stores this name"));
+        assert!(!entering.contains("Tap the aligned keypad"));
+
+        let failed = mobile_touch_modal_header_text(
+            SubmissionState::Failed,
+            &snapshot,
+            "ABC",
+            Some("Offline"),
+        );
+        assert!(failed.contains("SUBMISSION FAILED"));
+        assert!(failed.contains("Offline"));
+        assert!(!failed.contains("bottom-center"));
+        assert_eq!(
+            mobile_modal_header_region(SubmissionState::Failed),
+            MOBILE_FAILED_HEADER_REGION
+        );
+    }
+
+    #[test]
     fn grid_maps_corners_and_center_to_correct_chars() {
-        // Top-left cell → 'A'.
+        // Top-left cell and exact outer edge → 'A'.
         assert_eq!(
             grid_action_for_normalized(0.10, 0.42),
             Some(GridAction::Char('A'))
         );
-        // Bottom-right cell → '9'.
+        assert_eq!(
+            grid_action_for_normalized(MOBILE_CHARACTERS_REGION.left, MOBILE_CHARACTERS_REGION.top,),
+            Some(GridAction::Char('A'))
+        );
+        // Bottom-right cell and exact outer edge → '9'.
         assert_eq!(
             grid_action_for_normalized(0.90, 0.82),
+            Some(GridAction::Char('9'))
+        );
+        assert_eq!(
+            grid_action_for_normalized(
+                MOBILE_CHARACTERS_REGION.right(),
+                MOBILE_CHARACTERS_REGION.bottom(),
+            ),
             Some(GridAction::Char('9'))
         );
         // Middle-ish → 'O' (row 2, col 2 → index 14 → 'O').
@@ -2708,6 +2922,38 @@ mod tests {
         assert_eq!(format_initials_display("A"), "A____");
         assert_eq!(format_initials_display("ABC"), "ABC__");
         assert_eq!(format_initials_display("ABCDE"), "ABCDE");
+    }
+
+    #[test]
+    fn rendered_leaderboard_labels_are_ascii() {
+        let ranks = Some(SubmissionRanks {
+            global: 17,
+            condition: 4,
+        });
+        for state in [
+            SubmissionState::Ready,
+            SubmissionState::EnteringInitials,
+            SubmissionState::Submitting,
+            SubmissionState::Submitted,
+            SubmissionState::Failed,
+            SubmissionState::Unavailable,
+        ] {
+            assert!(
+                format_submission_text(state, "ABC", ranks, Some("Offline"), true).is_ascii(),
+                "{state:?}"
+            );
+            assert!(mobile_status_text(state, "ABC", ranks, true).is_ascii());
+        }
+        assert!(SUBMISSION_CONSENT_DISCLOSURE.is_ascii());
+        assert!(
+            submission_context(&ScoreSnapshot {
+                terminal_total: 42,
+                condition: 1,
+                objective_completed: true,
+                ..default()
+            })
+            .is_ascii()
+        );
     }
 
     // ── Error formatting ─────────────────────────────────────────────────

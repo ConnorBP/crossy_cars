@@ -11,10 +11,14 @@ use bevy::text::FontSize;
 
 use crate::combos::Combo;
 use crate::game::SpawnSet;
+use crate::game::TouchStateSet;
 use crate::game::events::{ChickenHit, CoinCollected};
 use crate::game::resources::{RoundActive, Score};
 use crate::game::state::GameState;
 use crate::modifiers::{ActiveModifier, ModifierKind};
+use crate::touch::{
+    TOUCH_OBJECTIVE_HEIGHT, TOUCH_OBJECTIVE_TOP, TOUCH_OBJECTIVE_WIDTH, TouchControlsActive,
+};
 
 /// Score added once when the current objective is completed.
 pub const OBJECTIVE_BONUS: u32 = 10;
@@ -80,7 +84,7 @@ impl ActiveObjective {
     pub fn summary(&self) -> String {
         let base = self.kind.summary(self.progress);
         if self.completed {
-            format!("{base} · COMPLETE +{OBJECTIVE_BONUS}")
+            format!("{base} | COMPLETE +{OBJECTIVE_BONUS}")
         } else {
             base
         }
@@ -245,6 +249,12 @@ impl Plugin for ObjectivesPlugin {
                 update_objective_hud
                     .run_if(in_state(GameState::Playing))
                     .run_if(resource_changed::<ActiveObjective>),
+            )
+            .add_systems(
+                Update,
+                update_objective_layout
+                    .after(TouchStateSet)
+                    .run_if(in_state(GameState::Playing)),
             );
     }
 }
@@ -304,35 +314,78 @@ fn award_objective_bonus(
     }
 }
 
-fn spawn_objective_hud(mut commands: Commands, objective: Res<ActiveObjective>) {
+fn spawn_objective_hud(
+    mut commands: Commands,
+    objective: Res<ActiveObjective>,
+    touch: Res<TouchControlsActive>,
+) {
     commands
-        .spawn((
-            Node {
-                position_type: PositionType::Absolute,
-                // Leave the top strip clear for the touch PAUSE affordance
-                // and the timer on short landscape viewports.
-                top: px(54.0),
-                left: px(0.0),
-                width: Val::Percent(100.0),
-                justify_content: JustifyContent::Center,
-                ..default()
-            },
-            ObjectiveHudRoot,
-        ))
+        .spawn((objective_root_node(touch.0), ObjectiveHudRoot))
         .with_child((
-            Text::new(format!("OBJECTIVE · {}", objective.summary())),
-            TextFont {
-                font_size: FontSize::Px(17.0),
-                ..default()
-            },
+            Text::new(format!("OBJECTIVE | {}", objective.summary())),
+            objective_font(touch.0),
             TextColor(Color::srgb(1.0, 0.86, 0.22)),
-            Node {
-                padding: UiRect::axes(px(9.0), px(4.0)),
-                ..default()
-            },
+            objective_panel_node(touch.0),
             BackgroundColor(Color::srgba(0.015, 0.02, 0.035, 0.72)),
             ObjectiveHudText,
         ));
+}
+
+fn objective_root_node(touch_active: bool) -> Node {
+    Node {
+        position_type: PositionType::Absolute,
+        top: px(if touch_active {
+            TOUCH_OBJECTIVE_TOP
+        } else {
+            54.0
+        }),
+        left: px(0.0),
+        width: Val::Percent(100.0),
+        justify_content: JustifyContent::Center,
+        ..default()
+    }
+}
+
+fn objective_panel_node(touch_active: bool) -> Node {
+    if touch_active {
+        Node {
+            width: px(TOUCH_OBJECTIVE_WIDTH),
+            height: px(TOUCH_OBJECTIVE_HEIGHT),
+            align_items: AlignItems::Center,
+            justify_content: JustifyContent::Center,
+            padding: UiRect::axes(px(6.0), px(3.0)),
+            ..default()
+        }
+    } else {
+        Node {
+            padding: UiRect::axes(px(9.0), px(4.0)),
+            ..default()
+        }
+    }
+}
+
+fn objective_font(touch_active: bool) -> TextFont {
+    TextFont {
+        font_size: FontSize::Px(if touch_active { 12.0 } else { 17.0 }),
+        ..default()
+    }
+}
+
+fn update_objective_layout(
+    touch: Res<TouchControlsActive>,
+    mut roots: Query<&mut Node, (With<ObjectiveHudRoot>, Without<ObjectiveHudText>)>,
+    mut labels: Query<(&mut Node, &mut TextFont), With<ObjectiveHudText>>,
+) {
+    if !touch.0 {
+        return;
+    }
+    for mut node in &mut roots {
+        *node = objective_root_node(true);
+    }
+    for (mut node, mut font) in &mut labels {
+        *node = objective_panel_node(true);
+        *font = objective_font(true);
+    }
 }
 
 /// Change-filtered HUD refresh; no UI entity is rebuilt as progress advances.
@@ -340,7 +393,7 @@ fn update_objective_hud(
     objective: Res<ActiveObjective>,
     mut labels: Query<&mut Text, With<ObjectiveHudText>>,
 ) {
-    let summary = format!("OBJECTIVE · {}", objective.summary());
+    let summary = format!("OBJECTIVE | {}", objective.summary());
     for mut label in &mut labels {
         **label = summary.clone();
     }
@@ -417,6 +470,7 @@ mod tests {
             .init_resource::<crate::game::resources::GameOverReason>()
             .init_resource::<ActiveModifier>()
             .init_resource::<TerminalSnapshot>()
+            .init_resource::<TouchControlsActive>()
             .add_message::<ChickenHit>()
             .add_message::<CoinCollected>()
             .add_plugins(ObjectivesPlugin)
@@ -649,6 +703,8 @@ mod tests {
         assert_eq!(objective.summary(), "Reach combo 2/3");
         objective.progress = 3;
         objective.completed = true;
-        assert_eq!(objective.summary(), "Reach combo 3/3 · COMPLETE +10");
+        assert_eq!(objective.summary(), "Reach combo 3/3 | COMPLETE +10");
+        assert!(objective.summary().is_ascii());
+        assert!(format!("OBJECTIVE | {}", objective.summary()).is_ascii());
     }
 }

@@ -4,8 +4,8 @@
 Uses Playwright touch emulation plus Chrome DevTools multi-touch dispatch.
 State transitions are behaviorally probed through touch-accessible Settings and
 exact localStorage changes. The scenario also asserts responsive canvas fit,
-exercises every touch path, captures screenshots, and fails on browser/network/
-runtime errors.
+exercises every touch path (including analog diagonal desired-heading steering),
+captures screenshots, and fails on browser/network/runtime errors.
 """
 
 from __future__ import annotations
@@ -19,6 +19,19 @@ import traceback
 from pathlib import Path
 from typing import Any
 
+try:  # Direct script execution puts tools/ on sys.path.
+    from browser_scenarios import (
+        FailureScreenshotRecorder,
+        discard_pre_cleanup_screenshot,
+        promote_pre_cleanup_screenshot,
+    )
+except ImportError:  # Package-style imports used by helper self-tests.
+    from .browser_scenarios import (
+        FailureScreenshotRecorder,
+        discard_pre_cleanup_screenshot,
+        promote_pre_cleanup_screenshot,
+    )
+
 
 STORAGE_KEY = "roady_car_settings"
 LEGACY_KEY = "roady_car_audio_muted"
@@ -26,6 +39,18 @@ INITIAL_SETTINGS = "v2:100:0:0:"
 STORAGE_ASSERT_TIMEOUT_MS = 60_000
 STORAGE_POLL_INTERVAL_MS = 250
 UNCHANGED_ASSERT_WAIT_MS = 2_000
+SCREENSHOT_POLICIES = {"all", "failure"}
+
+
+def parse_screenshot_policy(value: str | None) -> str:
+    """Parse ROADY_SCREENSHOTS without requiring Playwright."""
+    policy = "all" if value is None else value
+    if policy not in SCREENSHOT_POLICIES:
+        raise ValueError(
+            "ROADY_SCREENSHOTS must be either 'all' or 'failure' "
+            f"(got {value!r})"
+        )
+    return policy
 
 
 def args() -> argparse.Namespace:
@@ -36,7 +61,14 @@ def args() -> argparse.Namespace:
         "--browser-channel",
         default=os.environ.get("BROWSER_CHANNEL", "chrome"),
     )
-    return parser.parse_args()
+    parsed = parser.parse_args()
+    try:
+        parsed.screenshot_policy = parse_screenshot_policy(
+            os.environ.get("ROADY_SCREENSHOTS")
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
+    return parsed
 
 
 def channel(value: str) -> str | None:
@@ -92,13 +124,32 @@ def main() -> int:
         "page_errors": [],
         "network_failures": [],
         "http_errors": [],
+        "cleanup_errors": [],
     }
     started = time.monotonic()
+    browser = None
+    context = None
+    page = None
+    playwright_instance = None
+    recorder = FailureScreenshotRecorder(
+        options.screenshot_policy, out_dir.resolve(), summary["screenshots"]
+    )
+
+    def capture_failure_screenshot() -> None:
+        """Try every live page, then promote the pre-cleanup fallback."""
+        recorder.capture(page, context, browser)
+
+    def assert_no_browser_errors() -> None:
+        for key in ("console_errors", "page_errors", "network_failures", "http_errors"):
+            if summary[key]:
+                raise AssertionError(f"{key}: {summary[key]}")
 
     try:
         from playwright.sync_api import sync_playwright
 
-        with sync_playwright() as playwright:
+        playwright_instance = sync_playwright().start()
+        playwright = playwright_instance
+        try:
             launch = {"headless": True}
             selected = channel(options.browser_channel)
             if selected:
@@ -150,6 +201,8 @@ def main() -> int:
             )
 
             def shot(name: str) -> None:
+                if options.screenshot_policy == "failure":
+                    return
                 path = out_dir / name
                 page.screenshot(path=str(path))
                 summary["screenshots"].append(str(path))
@@ -180,9 +233,9 @@ def main() -> int:
                 """Open Settings, tap Volume -, close Back, and require the change."""
                 # These are the mobile row coordinates proven by
                 # browser_settings_scenarios.py: opener, Volume left, Back.
-                settings_tap(0.88, 0.12)
-                settings_tap(0.20, 0.26)
-                settings_tap(0.50, 0.77)
+                settings_tap(0.92, 0.07)
+                settings_tap(0.20, 0.234)
+                settings_tap(0.50, 0.704)
                 # Assert only after Back so a failed checkpoint cannot leave a
                 # successfully opened modal covering the game.
                 wait_for_exact_settings(page, expected, checkpoint)
@@ -191,9 +244,9 @@ def main() -> int:
                 expected: str, checkpoint: str
             ) -> None:
                 """Try the same touch path where Settings must be inaccessible."""
-                settings_tap(0.88, 0.12)
-                settings_tap(0.20, 0.26)
-                settings_tap(0.50, 0.77)
+                settings_tap(0.92, 0.07)
+                settings_tap(0.20, 0.234)
+                settings_tap(0.50, 0.704)
                 # Two seconds allows delayed frame/event processing to expose an
                 # accidental modal opening or settings mutation.
                 assert_settings_unchanged(page, expected, checkpoint)
@@ -209,22 +262,25 @@ def main() -> int:
             )
             shot("01_touch_hud.png")
 
-            # The first eligible touch owns direction regardless of position:
-            # begin on the right, drag up-left, then add action on the left.
+            # The first eligible touch owns desired heading regardless of
+            # position. Use an intentionally unequal down-right diagonal (not
+            # the old straight-up gesture), hold it long enough for the car's
+            # directional response to be visible, then add action on the left.
             cdp = context.new_cdp_session(page)
-            drive = {"x": 735, "y": 325, "radiusX": 8, "radiusY": 8, "force": 1, "id": 1}
+            drive = {"x": 640, "y": 230, "radiusX": 8, "radiusY": 8, "force": 1, "id": 1}
             cdp.send(
                 "Input.dispatchTouchEvent",
                 {"type": "touchStart", "touchPoints": [drive]},
             )
             page.wait_for_timeout(600)
-            drive["x"] = 690
-            drive["y"] = 265
+            drive["x"] = 735
+            drive["y"] = 290
             cdp.send(
                 "Input.dispatchTouchEvent",
                 {"type": "touchMove", "touchPoints": [drive]},
             )
-            page.wait_for_timeout(1_000)
+            page.wait_for_timeout(1_600)
+            shot("02_directional_diagonal.png")
             action = {"x": 100, "y": 325, "radiusX": 8, "radiusY": 8, "force": 1, "id": 2}
             cdp.send(
                 "Input.dispatchTouchEvent",
@@ -233,13 +289,13 @@ def main() -> int:
             page.wait_for_timeout(800)
             cdp.send("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
             page.wait_for_timeout(400)
-            shot("02_after_multitouch.png")
+            shot("03_after_multitouch.png")
 
             # Pause zone; Settings is touch-accessible only because state is
             # Paused. The helper closes the modal through its Back row.
             page.touchscreen.tap(422, 25)
             page.wait_for_timeout(500)
-            shot("03_paused.png")
+            shot("04_paused.png")
             settings_volume_minus(
                 "v2:90:0:0:",
                 "first pause: Paused must allow Settings volume 100 -> 90",
@@ -253,14 +309,14 @@ def main() -> int:
                 "v2:90:0:0:",
                 "after resume: Playing must reject Settings adjustment",
             )
-            shot("04_resumed.png")
+            shot("05_resumed.png")
 
             # Middle third performs restart through Menu and a fresh countdown.
             page.touchscreen.tap(422, 25)
             page.wait_for_timeout(350)
             page.touchscreen.tap(422, 195)
             page.wait_for_timeout(800)
-            shot("05_touch_restart_countdown.png")
+            shot("06_touch_restart_countdown.png")
             page.wait_for_timeout(3_200)
             settings_volume_minus_must_not_change(
                 "v2:90:0:0:",
@@ -282,7 +338,7 @@ def main() -> int:
                 "v2:70:0:0:",
                 "right-third return: Menu must allow Settings volume 80 -> 70",
             )
-            shot("06_touch_menu.png")
+            shot("07_touch_menu.png")
 
             # Distinguish Menu from Paused rather than treating both as the
             # same Settings-accessible state. In Menu this touch starts a round;
@@ -297,14 +353,65 @@ def main() -> int:
             )
             page.wait_for_timeout(300)
 
-            for key in ("console_errors", "page_errors", "network_failures", "http_errors"):
-                if summary[key]:
-                    raise AssertionError(f"{key}: {summary[key]}")
+            assert_no_browser_errors()
+        except Exception:
+            capture_failure_screenshot()
+            raise
+        finally:
+            # Save one cheap fallback while the page is known-live. It is removed
+            # on success and promoted if close/stop or a late event is the failure.
+            original_failure_active = sys.exc_info()[0] is not None
+            cleanup_failure: tuple[Exception, Any] | None = None
+            if context is not None:
+                recorder.snapshot_before_cleanup(page, context, browser)
+                try:
+                    context.close()
+                except Exception as exc:
+                    summary["cleanup_errors"].append(
+                        f"context.close: {type(exc).__name__}: {exc}"
+                    )
+                    capture_failure_screenshot()
+                    cleanup_failure = (exc, exc.__traceback__)
+            if browser is not None:
+                try:
+                    browser.close()
+                except Exception as exc:
+                    summary["cleanup_errors"].append(
+                        f"browser.close: {type(exc).__name__}: {exc}"
+                    )
+                    capture_failure_screenshot()
+                    if cleanup_failure is None:
+                        cleanup_failure = (exc, exc.__traceback__)
+            if playwright_instance is not None:
+                try:
+                    playwright_instance.stop()
+                except Exception as exc:
+                    summary["cleanup_errors"].append(
+                        f"playwright.stop: {type(exc).__name__}: {exc}"
+                    )
+                    capture_failure_screenshot()
+                    if cleanup_failure is None:
+                        cleanup_failure = (exc, exc.__traceback__)
 
-            context.close()
-            browser.close()
-            summary["status"] = "passed"
+            if not original_failure_active:
+                if cleanup_failure is not None:
+                    capture_failure_screenshot()
+                    exc, tb = cleanup_failure
+                    raise exc.with_traceback(tb)
+                try:
+                    assert_no_browser_errors()
+                except Exception:
+                    capture_failure_screenshot()
+                    raise
+            else:
+                capture_failure_screenshot()
+
+        summary["status"] = "passed"
+        discard_pre_cleanup_screenshot(options.screenshot_policy, out_dir.resolve())
     except Exception as exc:  # noqa: BLE001
+        promote_pre_cleanup_screenshot(
+            options.screenshot_policy, out_dir.resolve(), summary["screenshots"]
+        )
         summary["status"] = "failed"
         summary["failure"] = {
             "type": type(exc).__name__,

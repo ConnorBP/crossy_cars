@@ -63,11 +63,11 @@ On-screen touch controls appear after the first touch and stay available for the
 
 | Touch | Action |
 | --- | --- |
-| **1ST TOUCH: DRAG TO DRIVE** | The first eligible live touch anywhere owns direction until released. Drag upward to accelerate and diagonally/sideways to steer. |
-| **2ND TOUCH: BRAKE / REVERSE** | Any other eligible live touch anywhere brakes at speed >0.15 and holds reverse at speed ≤0.15. |
+| **1ST TOUCH: DRAG TO DRIVE** | The first eligible live touch anywhere always holds the gas. Drag in any screen direction and the car steers toward that camera-relative direction. |
+| **2ND TOUCH: BRAKE / REVERSE** | Any other eligible live touch anywhere brakes at speed >0.15 and holds reverse at speed <=0.15. |
 
-- The direction owner remains fixed while live. When it is released, the remaining eligible touch is promoted to direction and brake/reverse clears if only one touch remains. Simultaneous touches are resolved deterministically by lowest touch ID.
-- Touches that start inside the top-center **PAUSE** hitbox are excluded from both driving roles. A second touch never changes direction, and a downward direction drag never bypasses the brake-to-reverse action.
+- The direction owner remains fixed while live. A stationary hold still accelerates; movement beyond a small 6px jitter threshold supplies smooth analog steering rather than directional zones. When the owner is released, the remaining eligible touch is promoted to direction and brake/reverse clears if only one touch remains.
+- Touches that start inside the top-center **PAUSE** hitbox are excluded from both driving roles. A second touch never changes direction.
 - Tap the top-center **PAUSE** button while driving to pause.
 - From the menu, tap anywhere to start a round.
 - On the pause screen, tap the left third to resume, the middle third to restart, or the right third to return to the menu.

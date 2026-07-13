@@ -99,6 +99,7 @@ jobs:
     env:
       BROWSER_CHANNEL: chromium
       PLAYWRIGHT_VERSION: 1.52.0
+      ROADY_SCREENSHOTS: failure
 
     steps:
       - name: Check out repository
@@ -114,6 +115,31 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+
+      - name: Test browser screenshot policy parsers
+        run: |
+          python - <<'PY'
+          from tools import browser_scenarios
+          from tools import browser_settings_scenarios
+          from tools import browser_touch_scenarios
+
+          parsers = (
+              browser_scenarios.parse_screenshot_policy,
+              browser_settings_scenarios.parse_screenshot_policy,
+              browser_touch_scenarios.parse_screenshot_policy,
+          )
+          for parse in parsers:
+              assert parse(None) == "all"
+              assert parse("all") == "all"
+              assert parse("failure") == "failure"
+              for invalid in ("", "ALL", "failures", " failure "):
+                  try:
+                      parse(invalid)
+                  except ValueError:
+                      pass
+                  else:
+                      raise AssertionError(f"accepted invalid policy {invalid!r}")
+          PY
 
       - name: Cache Playwright Chromium
         uses: actions/cache@v4

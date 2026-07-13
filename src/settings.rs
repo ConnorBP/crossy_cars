@@ -19,12 +19,25 @@ const LEGACY_MUTE_STORAGE_KEY: &str = "roady_car_audio_muted";
 const FILE_PATH: &str = "settings.txt";
 
 const VOLUME_STEP: u8 = 10;
-const OPENER_LEFT: f32 = 0.67;
-const OPENER_TOP: f32 = 0.03;
-const OPENER_RIGHT: f32 = 0.97;
-const OPENER_BOTTOM: f32 = 0.18;
+const OPENER_DESKTOP_WIDTH: f32 = 126.0;
+const OPENER_DESKTOP_HEIGHT: f32 = 42.0;
+const OPENER_DESKTOP_TOP: f32 = 14.0;
+const OPENER_DESKTOP_RIGHT: f32 = 16.0;
+const OPENER_DESKTOP_FONT_SIZE: f32 = 19.0;
+const OPENER_MOBILE_WIDTH: f32 = 104.0;
+const OPENER_MOBILE_HEIGHT: f32 = 34.0;
+const OPENER_MOBILE_TOP: f32 = 10.0;
+const OPENER_MOBILE_RIGHT: f32 = 12.0;
+const OPENER_MOBILE_FONT_SIZE: f32 = 15.0;
+const SETTINGS_OPENER_LABEL: &str = "SETTINGS";
+const SETTINGS_DEFAULT_FOOTER: &str = "Up/Down select | Left/Right change | Enter toggle | Esc/O back\nTouch/click: row center toggles; sides change";
+const SETTINGS_NAME_FOOTER: &str = "Type A-Z/0-9 (3-5) | Backspace delete | Left clear\nTouch: center adds A | right cycles | left clears\nClearing revokes consent and stops future automatic submissions";
 const SETTINGS_PANEL_WIDTH_RATIO: f32 = 0.88;
+const SETTINGS_PANEL_HEIGHT_RATIO: f32 = 0.88;
 const SETTINGS_PANEL_MAX_WIDTH: f32 = 760.0;
+const SETTINGS_PANEL_INSET: f32 = 14.0;
+const SETTINGS_ACTION_LEFT_END: f32 = 1.0 / 3.0;
+const SETTINGS_ACTION_RIGHT_START: f32 = 2.0 / 3.0;
 const MAX_INITIALS: usize = 5;
 
 const INITIAL_KEYS: [(KeyCode, char); 36] = [
@@ -117,6 +130,12 @@ struct SettingsOverlayRoot;
 
 #[derive(Component)]
 struct SettingsOpenerRoot;
+
+#[derive(Component)]
+struct SettingsPanel;
+
+#[derive(Component)]
+struct SettingsHeader;
 
 #[derive(Component)]
 struct SettingsFooter;
@@ -315,61 +334,231 @@ fn normalized_touch(position: Vec2, window: &Window) -> Option<Vec2> {
     ))
 }
 
-fn opener_hit(position: Vec2) -> bool {
-    (OPENER_LEFT..=OPENER_RIGHT).contains(&position.x)
-        && (OPENER_TOP..=OPENER_BOTTOM).contains(&position.y)
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct OpenerLayout {
+    top: f32,
+    right: f32,
+    width: f32,
+    height: f32,
+    font_size: f32,
 }
 
-/// Horizontal bounds of the centered settings panel in normalized window
-/// coordinates. The UI panel is `min(88vw, 760px)` wide.
-fn settings_panel_x_bounds(window_width: f32) -> Option<(f32, f32)> {
-    if !window_width.is_finite() || window_width <= 0.0 {
+fn opener_layout(window_width: f32, window_height: f32) -> Option<OpenerLayout> {
+    if window_width <= 0.0
+        || window_height <= 0.0
+        || !window_width.is_finite()
+        || !window_height.is_finite()
+    {
         return None;
     }
+    let mobile = window_height <= 480.0 || window_width <= 960.0;
+    Some(if mobile {
+        OpenerLayout {
+            top: OPENER_MOBILE_TOP,
+            right: OPENER_MOBILE_RIGHT,
+            width: OPENER_MOBILE_WIDTH,
+            height: OPENER_MOBILE_HEIGHT,
+            font_size: OPENER_MOBILE_FONT_SIZE,
+        }
+    } else {
+        OpenerLayout {
+            top: OPENER_DESKTOP_TOP,
+            right: OPENER_DESKTOP_RIGHT,
+            width: OPENER_DESKTOP_WIDTH,
+            height: OPENER_DESKTOP_HEIGHT,
+            font_size: OPENER_DESKTOP_FONT_SIZE,
+        }
+    })
+}
+
+fn opener_hit(position: Vec2, window_width: f32, window_height: f32) -> bool {
+    let Some(layout) = opener_layout(window_width, window_height) else {
+        return false;
+    };
+    let left = (window_width - layout.right - layout.width) / window_width;
+    let right = (window_width - layout.right) / window_width;
+    let top = layout.top / window_height;
+    let bottom = (layout.top + layout.height) / window_height;
+    (left..=right).contains(&position.x) && (top..=bottom).contains(&position.y)
+}
+
+/// Pixel bounds in top-left window coordinates. The same values are assigned
+/// to the absolute Bevy UI nodes and used for pointer hit-testing.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct SettingsRect {
+    left: f32,
+    top: f32,
+    width: f32,
+    height: f32,
+}
+
+impl SettingsRect {
+    fn right(self) -> f32 {
+        self.left + self.width
+    }
+
+    fn bottom(self) -> f32 {
+        self.top + self.height
+    }
+
+    fn contains(self, point: Vec2) -> bool {
+        (self.left..=self.right()).contains(&point.x)
+            && (self.top..=self.bottom()).contains(&point.y)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct SettingsLayout {
+    panel: SettingsRect,
+    header: SettingsRect,
+    rows: [SettingsRect; 5],
+    footer: SettingsRect,
+}
+
+/// Build one deterministic responsive geometry model. Child bounds are local
+/// to `panel`; `row_window_rect` converts them to window coordinates.
+fn settings_layout(window_width: f32, window_height: f32) -> Option<SettingsLayout> {
+    if window_width <= 0.0
+        || window_height <= 0.0
+        || !window_width.is_finite()
+        || !window_height.is_finite()
+    {
+        return None;
+    }
+
+    let mobile = window_height <= 480.0 || window_width <= 960.0;
     let panel_width = (window_width * SETTINGS_PANEL_WIDTH_RATIO).min(SETTINGS_PANEL_MAX_WIDTH);
-    let half_normalized_width = panel_width / window_width / 2.0;
-    Some((0.5 - half_normalized_width, 0.5 + half_normalized_width))
+    let panel_height = window_height * SETTINGS_PANEL_HEIGHT_RATIO;
+    let panel = SettingsRect {
+        left: (window_width - panel_width) / 2.0,
+        top: (window_height - panel_height) / 2.0,
+        width: panel_width,
+        height: panel_height,
+    };
+    let content_width = (panel_width - SETTINGS_PANEL_INSET * 2.0).max(0.0);
+    let header = SettingsRect {
+        left: SETTINGS_PANEL_INSET,
+        top: if mobile { 8.0 } else { 18.0 },
+        width: content_width,
+        height: if mobile { 36.0 } else { 44.0 },
+    };
+    let footer_height = if mobile { 60.0 } else { 42.0 };
+    let footer_bottom = if mobile { 8.0 } else { 18.0 };
+    let footer = SettingsRect {
+        left: SETTINGS_PANEL_INSET,
+        top: (panel_height - footer_bottom - footer_height).max(0.0),
+        width: content_width,
+        height: footer_height,
+    };
+
+    let vertical_inset = if mobile { 6.0 } else { 24.0 };
+    let rows_top = header.bottom() + vertical_inset;
+    let rows_bottom = (footer.top - vertical_inset).max(rows_top);
+    let available = rows_bottom - rows_top;
+    let row_count = SettingRow::ALL.len() as f32;
+    let preferred_row_height: f32 = if mobile { 36.0 } else { 52.0 };
+    let row_height = preferred_row_height.min(available / row_count);
+    let gap = if SettingRow::ALL.len() > 1 {
+        ((available - row_height * row_count) / (row_count - 1.0))
+            .max(0.0)
+            .min(if mobile { 10.0 } else { 24.0 })
+    } else {
+        0.0
+    };
+    let rows_height = row_height * row_count + gap * (row_count - 1.0);
+    let first_row_top = rows_top + (available - rows_height).max(0.0) / 2.0;
+    let rows = std::array::from_fn(|index| SettingsRect {
+        left: SETTINGS_PANEL_INSET,
+        top: first_row_top + index as f32 * (row_height + gap),
+        width: content_width,
+        height: row_height,
+    });
+
+    Some(SettingsLayout {
+        panel,
+        header,
+        rows,
+        footer,
+    })
 }
 
-fn touch_row(position: Vec2, window_width: f32) -> Option<SettingRow> {
-    let (left, right) = settings_panel_x_bounds(window_width)?;
-    if !(left..=right).contains(&position.x) {
+fn row_window_rect(layout: &SettingsLayout, row: SettingRow) -> SettingsRect {
+    let local = layout.rows[row.index()];
+    SettingsRect {
+        left: layout.panel.left + local.left,
+        top: layout.panel.top + local.top,
+        ..local
+    }
+}
+
+fn touch_row(position: Vec2, window_width: f32, window_height: f32) -> Option<SettingRow> {
+    if !position.is_finite() {
         return None;
     }
-    match position.y {
-        y if (0.20..0.33).contains(&y) => Some(SettingRow::Volume),
-        y if (0.33..0.45).contains(&y) => Some(SettingRow::Mute),
-        y if (0.45..0.57).contains(&y) => Some(SettingRow::ReducedMotion),
-        y if (0.57..0.70).contains(&y) => Some(SettingRow::LeaderboardName),
-        y if (0.70..0.84).contains(&y) => Some(SettingRow::Back),
-        _ => None,
+    let layout = settings_layout(window_width, window_height)?;
+    SettingRow::ALL
+        .into_iter()
+        .find(|row| row_window_rect(&layout, *row).contains(position))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RowActionZone {
+    Left,
+    Center,
+    Right,
+}
+
+fn row_action_zone(
+    position: Vec2,
+    window_width: f32,
+    window_height: f32,
+    row: SettingRow,
+) -> Option<RowActionZone> {
+    if !position.is_finite() {
+        return None;
     }
+    let layout = settings_layout(window_width, window_height)?;
+    let bounds = row_window_rect(&layout, row);
+    if !bounds.contains(position) {
+        return None;
+    }
+    let fraction = (position.x - bounds.left) / bounds.width.max(f32::EPSILON);
+    Some(if fraction < SETTINGS_ACTION_LEFT_END {
+        RowActionZone::Left
+    } else if fraction > SETTINGS_ACTION_RIGHT_START {
+        RowActionZone::Right
+    } else {
+        RowActionZone::Center
+    })
 }
 
 fn apply_touch_row(
     position: Vec2,
     window_width: f32,
+    window_height: f32,
     selection: &mut SettingsSelection,
     settings: &mut Settings,
 ) -> Activation {
-    let Some(row) = touch_row(position, window_width) else {
+    let Some(row) = touch_row(position, window_width, window_height) else {
         return Activation::None;
     };
+    let zone = row_action_zone(position, window_width, window_height, row)
+        .unwrap_or(RowActionZone::Center);
     selection.0 = row;
     if row == SettingRow::Back {
         return Activation::Close;
     }
     if row == SettingRow::LeaderboardName {
-        let changed = if position.x < 0.42 {
-            adjust_selection(settings, row, Adjustment::Left)
-        } else if position.x > 0.58 {
-            if settings.leaderboard_initials.is_empty() {
-                append_initial(&mut settings.leaderboard_initials, 'A')
-            } else {
-                cycle_last_initial(&mut settings.leaderboard_initials)
+        let changed = match zone {
+            RowActionZone::Left => adjust_selection(settings, row, Adjustment::Left),
+            RowActionZone::Right => {
+                if settings.leaderboard_initials.is_empty() {
+                    append_initial(&mut settings.leaderboard_initials, 'A')
+                } else {
+                    cycle_last_initial(&mut settings.leaderboard_initials)
+                }
             }
-        } else {
-            append_initial(&mut settings.leaderboard_initials, 'A')
+            RowActionZone::Center => append_initial(&mut settings.leaderboard_initials, 'A'),
         };
         return if changed {
             Activation::Changed
@@ -377,20 +566,22 @@ fn apply_touch_row(
             Activation::None
         };
     }
-    if position.x < 0.42 {
-        if adjust_selection(settings, row, Adjustment::Left) {
-            Activation::Changed
-        } else {
-            Activation::None
+    match zone {
+        RowActionZone::Left => {
+            if adjust_selection(settings, row, Adjustment::Left) {
+                Activation::Changed
+            } else {
+                Activation::None
+            }
         }
-    } else if position.x > 0.58 {
-        if adjust_selection(settings, row, Adjustment::Right) {
-            Activation::Changed
-        } else {
-            Activation::None
+        RowActionZone::Right => {
+            if adjust_selection(settings, row, Adjustment::Right) {
+                Activation::Changed
+            } else {
+                Activation::None
+            }
         }
-    } else {
-        activate_selection(settings, row)
+        RowActionZone::Center => activate_selection(settings, row),
     }
 }
 
@@ -425,7 +616,9 @@ fn settings_input(
             if let Ok(window) = windows.single() {
                 for touch in touches.iter_just_pressed() {
                     touch_active.0 = true;
-                    if normalized_touch(touch.position(), window).is_some_and(opener_hit) {
+                    if normalized_touch(touch.position(), window).is_some_and(|position| {
+                        opener_hit(position, window.width(), window.height())
+                    }) {
                         open.0 = true;
                         selection.0 = SettingRow::Volume;
                         // TouchPlugin sees the same raw first-touch event. Its
@@ -440,7 +633,9 @@ fn settings_input(
                     let clicked_opener = window
                         .cursor_position()
                         .and_then(|position| normalized_touch(position, window))
-                        .is_some_and(opener_hit);
+                        .is_some_and(|position| {
+                            opener_hit(position, window.width(), window.height())
+                        });
                     // Raw mouse input is owned only when it intersects the
                     // exact visible settings button bounds.
                     if clicked_opener {
@@ -501,26 +696,36 @@ fn settings_input(
         let mut handled_pointer = false;
         for touch in touches.iter_just_pressed() {
             touch_active.0 = true;
-            let Some(position) = normalized_touch(touch.position(), window) else {
+            let position = touch.position();
+            if !position.is_finite()
+                || touch_row(position, window.width(), window.height()).is_none()
+            {
                 continue;
-            };
+            }
             handled_pointer = true;
-            if apply_touch_row(position, window.width(), &mut *selection, &mut *settings)
-                == Activation::Close
+            if apply_touch_row(
+                position,
+                window.width(),
+                window.height(),
+                &mut *selection,
+                &mut *settings,
+            ) == Activation::Close
             {
                 open.0 = false;
                 break;
             }
         }
         if open.0 && mouse.just_pressed(MouseButton::Left) {
-            if let Some(position) = window
-                .cursor_position()
-                .and_then(|position| normalized_touch(position, window))
-            {
-                if touch_row(position, window.width()).is_some() {
+            if let Some(position) = window.cursor_position() {
+                if touch_row(position, window.width(), window.height()).is_some() {
                     handled_pointer = true;
-                    if apply_touch_row(position, window.width(), &mut *selection, &mut *settings)
-                        == Activation::Close
+                    if apply_touch_row(
+                        position,
+                        window.width(),
+                        window.height(),
+                        &mut *selection,
+                        &mut *settings,
+                    ) == Activation::Close
                     {
                         open.0 = false;
                     }
@@ -543,19 +748,64 @@ fn sync_settings_ui(
     mut commands: Commands,
     state: Res<State<GameState>>,
     open: Res<SettingsOpen>,
+    windows: Query<&Window, With<PrimaryWindow>>,
     overlay: Query<Entity, With<SettingsOverlayRoot>>,
-    opener: Query<Entity, With<SettingsOpenerRoot>>,
+    mut opener: Query<(Entity, &mut Node, &mut TextFont), With<SettingsOpenerRoot>>,
+    mut panel_geometry: Query<
+        (Entity, &mut Node),
+        (With<SettingsPanel>, Without<SettingsOpenerRoot>),
+    >,
+    mut header_geometry: Query<
+        (Entity, &mut Node),
+        (
+            With<SettingsHeader>,
+            Without<SettingsOpenerRoot>,
+            Without<SettingsPanel>,
+            Without<SettingRow>,
+            Without<SettingsFooter>,
+        ),
+    >,
+    mut row_geometry: Query<
+        (Entity, &SettingRow, &mut Node),
+        (
+            Without<SettingsOpenerRoot>,
+            Without<SettingsPanel>,
+            Without<SettingsHeader>,
+            Without<SettingsFooter>,
+        ),
+    >,
+    mut footer_geometry: Query<
+        (Entity, &mut Node),
+        (
+            With<SettingsFooter>,
+            Without<SettingsOpenerRoot>,
+            Without<SettingsPanel>,
+            Without<SettingsHeader>,
+            Without<SettingRow>,
+        ),
+    >,
 ) {
     let show_opener = settings_context(*state.get()) && !open.0;
+    let layout = windows
+        .single()
+        .ok()
+        .and_then(|window| opener_layout(window.width(), window.height()))
+        .unwrap_or(OpenerLayout {
+            top: OPENER_DESKTOP_TOP,
+            right: OPENER_DESKTOP_RIGHT,
+            width: OPENER_DESKTOP_WIDTH,
+            height: OPENER_DESKTOP_HEIGHT,
+            font_size: OPENER_DESKTOP_FONT_SIZE,
+        });
     if show_opener && opener.is_empty() {
         commands
             .spawn((
                 Node {
                     position_type: PositionType::Absolute,
-                    top: Val::Percent(OPENER_TOP * 100.0),
-                    right: Val::Percent((1.0 - OPENER_RIGHT) * 100.0),
-                    width: Val::Percent((OPENER_RIGHT - OPENER_LEFT) * 100.0),
-                    height: Val::Percent((OPENER_BOTTOM - OPENER_TOP) * 100.0),
+                    top: px(layout.top),
+                    right: px(layout.right),
+                    width: px(layout.width),
+                    height: px(layout.height),
                     border: UiRect::all(px(2.0)),
                     border_radius: BorderRadius::all(px(9.0)),
                     align_items: AlignItems::Center,
@@ -564,31 +814,74 @@ fn sync_settings_ui(
                 },
                 BackgroundColor(Color::srgba(0.035, 0.04, 0.055, 0.94)),
                 BorderColor::all(palette::HUD_ACCENT),
-                Text::new("⚙ SETTINGS"),
+                Text::new(SETTINGS_OPENER_LABEL),
                 TextFont {
-                    font_size: FontSize::Px(16.0),
+                    font_size: FontSize::Px(layout.font_size),
                     ..default()
                 },
                 TextColor(palette::HUD_ACCENT.into()),
             ))
             .insert(GlobalZIndex(80))
             .insert(SettingsOpenerRoot);
-    } else if !show_opener {
-        for entity in &opener {
+    } else if show_opener {
+        for (_, mut node, mut font) in &mut opener {
+            node.top = px(layout.top);
+            node.right = px(layout.right);
+            node.width = px(layout.width);
+            node.height = px(layout.height);
+            font.font_size = FontSize::Px(layout.font_size);
+        }
+    } else {
+        for (entity, _, _) in &mut opener {
             commands.entity(entity).despawn();
         }
     }
 
+    let settings_geometry = windows
+        .single()
+        .ok()
+        .and_then(|window| settings_layout(window.width(), window.height()));
     if open.0 && overlay.is_empty() {
-        spawn_overlay(&mut commands);
-    } else if !open.0 {
+        if let Some(layout) = settings_geometry {
+            spawn_overlay(&mut commands, &layout);
+        }
+    } else if open.0 {
+        if let Some(layout) = settings_geometry {
+            for (_, mut node) in &mut panel_geometry {
+                apply_rect_to_node(&mut node, layout.panel);
+            }
+            for (_, mut node) in &mut header_geometry {
+                apply_rect_to_node(&mut node, layout.header);
+            }
+            for (_, row, mut node) in &mut row_geometry {
+                apply_rect_to_node(&mut node, layout.rows[row.index()]);
+            }
+            for (_, mut node) in &mut footer_geometry {
+                apply_rect_to_node(&mut node, layout.footer);
+            }
+        }
+    } else {
         for entity in &overlay {
             commands.entity(entity).despawn();
         }
     }
 }
 
-fn spawn_overlay(commands: &mut Commands) {
+fn apply_rect_to_node(node: &mut Node, rect: SettingsRect) {
+    node.position_type = PositionType::Absolute;
+    node.left = px(rect.left);
+    node.top = px(rect.top);
+    node.width = px(rect.width);
+    node.height = px(rect.height);
+}
+
+fn positioned_node(rect: SettingsRect) -> Node {
+    let mut node = Node::default();
+    apply_rect_to_node(&mut node, rect);
+    node
+}
+
+fn spawn_overlay(commands: &mut Commands, layout: &SettingsLayout) {
     commands
         .spawn((
             Node {
@@ -597,8 +890,6 @@ fn spawn_overlay(commands: &mut Commands) {
                 left: px(0.0),
                 width: Val::Percent(100.0),
                 height: Val::Percent(100.0),
-                align_items: AlignItems::Center,
-                justify_content: JustifyContent::Center,
                 ..default()
             },
             BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.82)),
@@ -607,19 +898,14 @@ fn spawn_overlay(commands: &mut Commands) {
         ))
         .with_children(|root| {
             root.spawn((
-                Node {
-                    width: Val::Percent(SETTINGS_PANEL_WIDTH_RATIO * 100.0),
-                    height: Val::Percent(88.0),
-                    max_width: px(SETTINGS_PANEL_MAX_WIDTH),
-                    padding: UiRect::all(px(14.0)),
-                    flex_direction: FlexDirection::Column,
-                    align_items: AlignItems::Stretch,
-                    justify_content: JustifyContent::SpaceBetween,
-                    ..default()
-                },
+                positioned_node(layout.panel),
                 BackgroundColor(Color::srgba(0.035, 0.04, 0.055, 0.97)),
+                SettingsPanel,
             ))
             .with_children(|panel| {
+                let mut header_node = positioned_node(layout.header);
+                header_node.align_items = AlignItems::Center;
+                header_node.justify_content = JustifyContent::Center;
                 panel.spawn((
                     Text::new("SETTINGS"),
                     TextFont {
@@ -627,22 +913,16 @@ fn spawn_overlay(commands: &mut Commands) {
                         ..default()
                     },
                     TextColor(palette::HUD_ACCENT.into()),
-                    Node {
-                        align_self: AlignSelf::Center,
-                        ..default()
-                    },
+                    header_node,
+                    SettingsHeader,
                 ));
 
                 for row in SettingRow::ALL {
+                    let mut row_node = positioned_node(layout.rows[row.index()]);
+                    row_node.align_items = AlignItems::Center;
+                    row_node.justify_content = JustifyContent::Center;
                     panel.spawn((
-                        Node {
-                            width: Val::Percent(100.0),
-                            min_height: px(38.0),
-                            padding: UiRect::axes(px(10.0), px(5.0)),
-                            align_items: AlignItems::Center,
-                            justify_content: JustifyContent::Center,
-                            ..default()
-                        },
+                        row_node,
                         BackgroundColor(Color::NONE),
                         Text::default(),
                         TextFont {
@@ -654,49 +934,59 @@ fn spawn_overlay(commands: &mut Commands) {
                     ));
                 }
 
+                let mut footer_node = positioned_node(layout.footer);
+                footer_node.align_items = AlignItems::Center;
+                footer_node.justify_content = JustifyContent::Center;
                 panel.spawn((
-                    Text::new("↑/↓ select • ←/→ change • Enter toggle • Esc/O back\nTouch: left/right to change"),
+                    Text::new(SETTINGS_DEFAULT_FOOTER),
                     TextFont {
                         font_size: FontSize::Px(12.0),
                         ..default()
                     },
                     TextColor(Color::srgba(0.78, 0.8, 0.86, 1.0)),
-                    Node {
-                        align_self: AlignSelf::Center,
-                        ..default()
-                    },
+                    footer_node,
                     SettingsFooter,
                 ));
             });
         });
 }
 
+fn setting_row_text(row: SettingRow, settings: &Settings) -> String {
+    match row {
+        SettingRow::Volume => format!("[ Volume  {}% ]", settings.master_volume),
+        SettingRow::Mute => {
+            format!("[ Mute  {} ]", if settings.muted { "On" } else { "Off" })
+        }
+        SettingRow::ReducedMotion => format!(
+            "[ Reduced Motion  {} ]",
+            if settings.reduced_motion { "On" } else { "Off" }
+        ),
+        SettingRow::LeaderboardName => format!(
+            "[clear]  Leaderboard Name  {}  [edit]",
+            if settings.leaderboard_initials.is_empty() {
+                "[none]"
+            } else {
+                &settings.leaderboard_initials
+            }
+        ),
+        SettingRow::Back => "Back".to_string(),
+    }
+}
+
 fn update_settings_rows(
     settings: Res<Settings>,
     selection: Res<SettingsSelection>,
-    mut rows: Query<(&SettingRow, &mut Text, &mut TextColor, &mut BackgroundColor)>,
+    mut rows: Query<(
+        Entity,
+        &SettingRow,
+        &mut Text,
+        &mut TextColor,
+        &mut BackgroundColor,
+    )>,
     mut footer: Query<&mut Text, (With<SettingsFooter>, Without<SettingRow>)>,
 ) {
-    for (row, mut text, mut color, mut background) in &mut rows {
-        **text = match row {
-            SettingRow::Volume => format!("‹  Volume  {}%  ›", settings.master_volume),
-            SettingRow::Mute => {
-                format!("‹  Mute  {}  ›", if settings.muted { "On" } else { "Off" })
-            }
-            SettingRow::ReducedMotion => format!(
-                "‹  Reduced Motion  {}  ›",
-                if settings.reduced_motion { "On" } else { "Off" }
-            ),
-            SettingRow::LeaderboardName => format!(
-                "‹ clear  Leaderboard Name  {}  edit ›",
-                if settings.leaderboard_initials.is_empty() {
-                    "—"
-                } else {
-                    &settings.leaderboard_initials
-                }
-            ),
-            SettingRow::Back => "Back".to_string(),
-        };
+    for (_, row, mut text, mut color, mut background) in &mut rows {
+        **text = setting_row_text(*row, &settings);
         let selected = *row == selection.0;
         color.0 = if selected {
             palette::HUD_ACCENT.into()
@@ -711,9 +1001,9 @@ fn update_settings_rows(
     }
     for mut text in &mut footer {
         **text = if selection.0 == SettingRow::LeaderboardName {
-            "Type A-Z/0-9 (3-5) • Backspace delete • ← clear\nTouch: center adds A • right cycles • left clears\nClearing revokes consent and stops future automatic submissions"
+            SETTINGS_NAME_FOOTER
         } else {
-            "↑/↓ select • ←/→ change • Enter toggle • Esc/O back\nTouch/click: row center toggles; sides change"
+            SETTINGS_DEFAULT_FOOTER
         }
         .to_string();
     }
@@ -996,58 +1286,210 @@ mod tests {
     }
 
     #[test]
-    fn opener_mouse_hit_bounds_match_visible_button() {
-        assert!(opener_hit(Vec2::new(OPENER_LEFT, OPENER_TOP)));
-        assert!(opener_hit(Vec2::new(OPENER_RIGHT, OPENER_BOTTOM)));
-        assert!(!opener_hit(Vec2::new(OPENER_LEFT - 0.001, OPENER_TOP)));
-        assert!(!opener_hit(Vec2::new(OPENER_RIGHT, OPENER_BOTTOM + 0.001)));
+    fn opener_mouse_hit_bounds_match_visible_button_at_target_viewports() {
+        for (width, height, expected) in [
+            (
+                844.0,
+                390.0,
+                OpenerLayout {
+                    top: 10.0,
+                    right: 12.0,
+                    width: 104.0,
+                    height: 34.0,
+                    font_size: 15.0,
+                },
+            ),
+            (
+                1440.0,
+                900.0,
+                OpenerLayout {
+                    top: 14.0,
+                    right: 16.0,
+                    width: 126.0,
+                    height: 42.0,
+                    font_size: 19.0,
+                },
+            ),
+        ] {
+            assert_eq!(opener_layout(width, height), Some(expected));
+            let left = (width - expected.right - expected.width) / width;
+            let right = (width - expected.right) / width;
+            let top = expected.top / height;
+            let bottom = (expected.top + expected.height) / height;
+            assert!(opener_hit(Vec2::new(left, top), width, height));
+            assert!(opener_hit(Vec2::new(right, bottom), width, height));
+            assert!(!opener_hit(Vec2::new(left - 0.001, top), width, height));
+            assert!(!opener_hit(Vec2::new(right, bottom + 0.001), width, height));
+        }
+        assert!(!opener_hit(Vec2::ZERO, 0.0, 390.0));
     }
 
     #[test]
-    fn centered_panel_bounds_match_desktop_and_mobile_layouts() {
-        let (desktop_left, desktop_right) = settings_panel_x_bounds(1600.0).unwrap();
-        assert!((desktop_left - 0.2625).abs() < 0.000_001);
-        assert!((desktop_right - 0.7375).abs() < 0.000_001);
-
-        let (mobile_left, mobile_right) = settings_panel_x_bounds(390.0).unwrap();
-        assert!((mobile_left - 0.06).abs() < 0.000_001);
-        assert!((mobile_right - 0.94).abs() < 0.000_001);
-
-        assert_eq!(settings_panel_x_bounds(0.0), None);
-        assert_eq!(settings_panel_x_bounds(f32::NAN), None);
+    fn settings_player_labels_are_ascii() {
+        assert_eq!(SETTINGS_OPENER_LABEL, "SETTINGS");
+        assert!(SETTINGS_OPENER_LABEL.is_ascii());
+        assert!(SETTINGS_DEFAULT_FOOTER.is_ascii());
+        assert!(SETTINGS_NAME_FOOTER.is_ascii());
+        for row in SettingRow::ALL {
+            assert!(setting_row_text(row, &Settings::default()).is_ascii());
+        }
     }
 
     #[test]
-    fn settings_rows_reject_clicks_outside_centered_panel() {
-        // Desktop width is capped at 760px, leaving broad side gutters.
-        assert_eq!(touch_row(Vec2::new(0.25, 0.38), 1600.0), None);
-        assert_eq!(touch_row(Vec2::new(0.75, 0.38), 1600.0), None);
-        assert_eq!(
-            touch_row(Vec2::new(0.5, 0.38), 1600.0),
-            Some(SettingRow::Mute)
-        );
+    fn centered_panel_bounds_come_from_shared_layout() {
+        let desktop = settings_layout(1600.0, 900.0).unwrap().panel;
+        assert!((desktop.left / 1600.0 - 0.2625).abs() < 0.000_001);
+        assert!((desktop.right() / 1600.0 - 0.7375).abs() < 0.000_001);
 
-        // Mobile uses 88vw, leaving 6% gutters on each side.
-        assert_eq!(touch_row(Vec2::new(0.059, 0.50), 390.0), None);
-        assert_eq!(touch_row(Vec2::new(0.941, 0.50), 390.0), None);
-        assert_eq!(
-            touch_row(Vec2::new(0.061, 0.50), 390.0),
-            Some(SettingRow::ReducedMotion)
-        );
+        let mobile = settings_layout(390.0, 844.0).unwrap().panel;
+        assert!((mobile.left / 390.0 - 0.06).abs() < 0.000_001);
+        assert!((mobile.right() / 390.0 - 0.94).abs() < 0.000_001);
 
+        assert!(settings_layout(0.0, 390.0).is_none());
+        assert!(settings_layout(f32::NAN, 390.0).is_none());
+    }
+
+    #[test]
+    fn settings_visual_rows_equal_touch_bounds_at_target_viewports() {
+        for (width, height) in [(844.0, 390.0), (1440.0, 900.0)] {
+            let layout = settings_layout(width, height).unwrap();
+            for row in SettingRow::ALL {
+                let bounds = row_window_rect(&layout, row);
+                let center_y = bounds.top + bounds.height / 2.0;
+
+                // Every inclusive visual edge belongs to exactly this row.
+                for point in [
+                    Vec2::new(bounds.left, bounds.top),
+                    Vec2::new(bounds.right(), bounds.top),
+                    Vec2::new(bounds.left, bounds.bottom()),
+                    Vec2::new(bounds.right(), bounds.bottom()),
+                ] {
+                    assert_eq!(touch_row(point, width, height), Some(row), "{row:?}");
+                }
+                // Immediately outside every edge is not this row.
+                for point in [
+                    Vec2::new(bounds.left - 0.25, center_y),
+                    Vec2::new(bounds.right() + 0.25, center_y),
+                    Vec2::new(bounds.left + bounds.width / 2.0, bounds.top - 0.25),
+                    Vec2::new(bounds.left + bounds.width / 2.0, bounds.bottom() + 0.25),
+                ] {
+                    assert_ne!(touch_row(point, width, height), Some(row), "{row:?}");
+                }
+
+                let left_x = bounds.left + bounds.width * 0.2;
+                let center_x = bounds.left + bounds.width * 0.5;
+                let right_x = bounds.left + bounds.width * 0.8;
+                assert_eq!(
+                    row_action_zone(Vec2::new(bounds.left, center_y), width, height, row),
+                    Some(RowActionZone::Left)
+                );
+                assert_eq!(
+                    row_action_zone(Vec2::new(bounds.right(), center_y), width, height, row),
+                    Some(RowActionZone::Right)
+                );
+                assert_eq!(
+                    row_action_zone(Vec2::new(left_x, center_y), width, height, row),
+                    Some(RowActionZone::Left)
+                );
+                assert_eq!(
+                    row_action_zone(Vec2::new(center_x, center_y), width, height, row),
+                    Some(RowActionZone::Center)
+                );
+                assert_eq!(
+                    row_action_zone(Vec2::new(right_x, center_y), width, height, row),
+                    Some(RowActionZone::Right)
+                );
+                // Exact action boundaries belong to center; either side maps
+                // deterministically to its adjacent action.
+                for (fraction, expected) in [
+                    (SETTINGS_ACTION_LEFT_END - 0.000_01, RowActionZone::Left),
+                    (SETTINGS_ACTION_LEFT_END, RowActionZone::Center),
+                    (SETTINGS_ACTION_RIGHT_START, RowActionZone::Center),
+                    (SETTINGS_ACTION_RIGHT_START + 0.000_01, RowActionZone::Right),
+                ] {
+                    assert_eq!(
+                        row_action_zone(
+                            Vec2::new(bounds.left + bounds.width * fraction, center_y),
+                            width,
+                            height,
+                            row,
+                        ),
+                        Some(expected)
+                    );
+                }
+            }
+
+            // Explicit gaps between visual rows are not interactive.
+            for pair in layout.rows.windows(2) {
+                let gap = (pair[0].bottom() + pair[1].top) / 2.0;
+                assert_eq!(
+                    touch_row(
+                        Vec2::new(width / 2.0, layout.panel.top + gap),
+                        width,
+                        height,
+                    ),
+                    None
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn settings_pointer_actions_use_row_local_left_center_right_zones() {
+        let (width, height) = (1440.0, 900.0);
+        let layout = settings_layout(width, height).unwrap();
+        let point = |row: SettingRow, fraction: f32| {
+            let bounds = row_window_rect(&layout, row);
+            Vec2::new(
+                bounds.left + bounds.width * fraction,
+                bounds.top + bounds.height / 2.0,
+            )
+        };
         let mut settings = Settings::default();
         let mut selection = SettingsSelection::default();
         assert_eq!(
-            apply_touch_row(Vec2::new(0.1, 0.38), 1600.0, &mut selection, &mut settings,),
-            Activation::None
+            apply_touch_row(
+                point(SettingRow::Volume, 0.2),
+                width,
+                height,
+                &mut selection,
+                &mut settings,
+            ),
+            Activation::Changed
         );
-        assert_eq!(selection.0, SettingRow::Volume);
-        assert!(!settings.muted);
+        assert_eq!(settings.master_volume, 90);
         assert_eq!(
-            apply_touch_row(Vec2::new(0.95, 0.76), 390.0, &mut selection, &mut settings,),
-            Activation::None
+            apply_touch_row(
+                point(SettingRow::Mute, 0.5),
+                width,
+                height,
+                &mut selection,
+                &mut settings,
+            ),
+            Activation::Changed
         );
-        assert_eq!(selection.0, SettingRow::Volume);
+        assert!(settings.muted);
+        assert_eq!(
+            apply_touch_row(
+                point(SettingRow::ReducedMotion, 0.8),
+                width,
+                height,
+                &mut selection,
+                &mut settings,
+            ),
+            Activation::Changed
+        );
+        assert!(settings.reduced_motion);
+        assert_eq!(
+            apply_touch_row(
+                point(SettingRow::Back, 0.5),
+                width,
+                height,
+                &mut selection,
+                &mut settings,
+            ),
+            Activation::Close
+        );
     }
 
     #[test]
@@ -1107,8 +1549,18 @@ mod tests {
             move_selection(SettingRow::ReducedMotion, 1),
             SettingRow::LeaderboardName
         );
+        let width = 1200.0;
+        let height = 800.0;
+        let layout = settings_layout(width, height).unwrap();
+        let name_bounds = row_window_rect(&layout, SettingRow::LeaderboardName);
+        let name_point = |fraction: f32| {
+            Vec2::new(
+                name_bounds.left + name_bounds.width * fraction,
+                name_bounds.top + name_bounds.height / 2.0,
+            )
+        };
         assert_eq!(
-            touch_row(Vec2::new(0.5, 0.60), 1200.0),
+            touch_row(name_point(0.5), width, height),
             Some(SettingRow::LeaderboardName)
         );
 
@@ -1116,8 +1568,9 @@ mod tests {
         let mut touch_selection = SettingsSelection::default();
         assert_eq!(
             apply_touch_row(
-                Vec2::new(0.5, 0.60),
-                1200.0,
+                name_point(0.5),
+                width,
+                height,
                 &mut touch_selection,
                 &mut touch_settings,
             ),
@@ -1127,8 +1580,9 @@ mod tests {
         assert_eq!(touch_selection.0, SettingRow::LeaderboardName);
         assert_eq!(
             apply_touch_row(
-                Vec2::new(0.8, 0.60),
-                1200.0,
+                name_point(0.8),
+                width,
+                height,
                 &mut touch_selection,
                 &mut touch_settings,
             ),

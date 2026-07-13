@@ -1,3 +1,5 @@
+use std::f32::consts::{PI, TAU};
+
 use bevy::{prelude::*, text::FontSize, window::PrimaryWindow};
 
 use crate::car::{Car, InputFrozen, PlayerInput, TouchInputSet};
@@ -10,37 +12,42 @@ const PAUSE_TOP: f32 = 0.14;
 const PAUSE_LEFT: f32 = 0.44;
 const PAUSE_RIGHT: f32 = 0.56;
 const ACTION_BRAKE_SPEED: f32 = 0.15;
-
-// These are intentionally identical to wasm_battle_arena's touch joystick.
-const INPUT_UP: u8 = 1 << 0;
-const INPUT_DOWN: u8 = 1 << 1;
-const INPUT_LEFT: u8 = 1 << 2;
-const INPUT_RIGHT: u8 = 1 << 3;
-const AXIS_DEADZONE: f32 = 0.2;
-const DIAGONAL_NORMALIZED: f32 = 0.707107;
-const UNIT_TL: Vec2 = Vec2::new(DIAGONAL_NORMALIZED, DIAGONAL_NORMALIZED);
-const UNIT_TR: Vec2 = Vec2::new(-DIAGONAL_NORMALIZED, DIAGONAL_NORMALIZED);
-const UNIT_BL: Vec2 = Vec2::new(DIAGONAL_NORMALIZED, -DIAGONAL_NORMALIZED);
-const UNIT_BR: Vec2 = Vec2::new(-DIAGONAL_NORMALIZED, -DIAGONAL_NORMALIZED);
+const TOUCH_JITTER_PX: f32 = 6.0;
+const TOUCH_JITTER_EPSILON_PX: f32 = 0.01;
+const FULL_STEER_ERROR: f32 = PI / 3.0;
 
 // Fixed touch-only HUD composition. These values are shared by the live
 // nodes in their owning modules and the pure all-panel layout audit below.
 pub(crate) const TOUCH_COCKPIT_LEFT: f32 = 14.0;
 pub(crate) const TOUCH_COCKPIT_TOP: f32 = 12.0;
-pub(crate) const TOUCH_COCKPIT_WIDTH: f32 = 170.0;
-pub(crate) const TOUCH_COCKPIT_HEIGHT: f32 = 116.0;
+pub(crate) const TOUCH_COCKPIT_WIDTH: f32 = 150.0;
+pub(crate) const TOUCH_COCKPIT_HEIGHT: f32 = 100.0;
 pub(crate) const TOUCH_HEALTH_LEFT: f32 = 14.0;
 pub(crate) const TOUCH_HEALTH_TOP: f32 = 136.0;
 pub(crate) const TOUCH_HEALTH_WIDTH: f32 = 190.0;
 pub(crate) const TOUCH_HEALTH_HEIGHT: f32 = 52.0;
-pub(crate) const TOUCH_POWERUP_LEFT: f32 = 205.0;
-pub(crate) const TOUCH_POWERUP_TOP: f32 = 136.0;
+pub(crate) const TOUCH_POWERUP_LEFT: f32 = 210.0;
+pub(crate) const TOUCH_POWERUP_TOP: f32 = 206.0;
 pub(crate) const TOUCH_POWERUP_WIDTH: f32 = 142.0;
 pub(crate) const TOUCH_POWERUP_HEIGHT: f32 = 52.0;
+pub(crate) const TOUCH_OBJECTIVE_TOP: f32 = 54.0;
+pub(crate) const TOUCH_OBJECTIVE_WIDTH: f32 = 300.0;
+pub(crate) const TOUCH_OBJECTIVE_HEIGHT: f32 = 32.0;
 pub(crate) const TOUCH_EVENT_LEFT: f32 = 370.0;
-pub(crate) const TOUCH_EVENT_TOP: f32 = 182.0;
+pub(crate) const TOUCH_EVENT_TOP: f32 = 194.0;
 pub(crate) const TOUCH_EVENT_WIDTH: f32 = 250.0;
 pub(crate) const TOUCH_EVENT_HEIGHT: f32 = 30.0;
+pub(crate) const TOUCH_TIMER_TOP: f32 = 12.0;
+pub(crate) const TOUCH_TIMER_RIGHT: f32 = 16.0;
+pub(crate) const TOUCH_TIMER_WIDTH: f32 = 132.0;
+pub(crate) const TOUCH_TIMER_HEIGHT: f32 = 36.0;
+pub(crate) const TOUCH_MINIMAP_TOP: f32 = 60.0;
+pub(crate) const TOUCH_MINIMAP_RIGHT: f32 = 16.0;
+pub(crate) const TOUCH_MINIMAP_OUTER_SIZE: f32 = 108.0;
+pub(crate) const TOUCH_LEVEL_TOP: f32 = 180.0;
+pub(crate) const TOUCH_LEVEL_RIGHT: f32 = 16.0;
+pub(crate) const TOUCH_LEVEL_WIDTH: f32 = 48.0;
+pub(crate) const TOUCH_LEVEL_HEIGHT: f32 = 26.0;
 
 const TOUCH_INSTRUCTION_HEIGHT: f32 = 44.0;
 const TOUCH_INSTRUCTION_INSET: f32 = 14.0;
@@ -88,11 +95,11 @@ fn centered_bounds(viewport_width: f32, top: f32, width: f32, height: f32) -> Sc
     fixed_bounds((viewport_width - width) * 0.5, top, width, height)
 }
 
-/// Painted bounds for every persistent/active touch HUD panel. Objective and
-/// combo retain their existing centered placement, and the minimap keeps its
-/// current right-side placement; the other four use the compact composition.
+/// Painted bounds for every persistent/active touch HUD panel. These values
+/// are shared with each owning module so this audit covers the timer, level,
+/// and the actual compact minimap rather than stale approximations.
 #[allow(dead_code)]
-pub(crate) fn touch_hud_bounds(viewport: Vec2) -> [ScreenBounds; 7] {
+pub(crate) fn touch_hud_bounds(viewport: Vec2) -> [ScreenBounds; 10] {
     [
         fixed_bounds(
             TOUCH_COCKPIT_LEFT,
@@ -112,7 +119,12 @@ pub(crate) fn touch_hud_bounds(viewport: Vec2) -> [ScreenBounds; 7] {
             TOUCH_POWERUP_WIDTH,
             TOUCH_POWERUP_HEIGHT,
         ),
-        centered_bounds(viewport.x, 54.0, 420.0, 38.0),
+        centered_bounds(
+            viewport.x,
+            TOUCH_OBJECTIVE_TOP,
+            TOUCH_OBJECTIVE_WIDTH,
+            TOUCH_OBJECTIVE_HEIGHT,
+        ),
         centered_bounds(viewport.x, 98.0, 144.0, 80.0),
         fixed_bounds(
             TOUCH_EVENT_LEFT,
@@ -120,7 +132,30 @@ pub(crate) fn touch_hud_bounds(viewport: Vec2) -> [ScreenBounds; 7] {
             TOUCH_EVENT_WIDTH,
             TOUCH_EVENT_HEIGHT,
         ),
-        fixed_bounds(viewport.x - 72.0 - 136.0, 62.0, 136.0, 136.0),
+        fixed_bounds(
+            viewport.x - TOUCH_TIMER_RIGHT - TOUCH_TIMER_WIDTH,
+            TOUCH_TIMER_TOP,
+            TOUCH_TIMER_WIDTH,
+            TOUCH_TIMER_HEIGHT,
+        ),
+        fixed_bounds(
+            viewport.x - TOUCH_MINIMAP_RIGHT - TOUCH_MINIMAP_OUTER_SIZE,
+            TOUCH_MINIMAP_TOP,
+            TOUCH_MINIMAP_OUTER_SIZE,
+            TOUCH_MINIMAP_OUTER_SIZE,
+        ),
+        fixed_bounds(
+            viewport.x - TOUCH_LEVEL_RIGHT - TOUCH_LEVEL_WIDTH,
+            TOUCH_LEVEL_TOP,
+            TOUCH_LEVEL_WIDTH,
+            TOUCH_LEVEL_HEIGHT,
+        ),
+        fixed_bounds(
+            viewport.x * PAUSE_LEFT,
+            4.0,
+            viewport.x * (PAUSE_RIGHT - PAUSE_LEFT),
+            28.0,
+        ),
     ]
 }
 
@@ -177,9 +212,12 @@ struct ActiveTouch {
     current: Vec2,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 struct TouchIntent {
-    direction: u8,
+    /// A live eligible owner always supplies gas, even before it moves.
+    owner: bool,
+    /// Ground-plane direction requested by a drag larger than touch jitter.
+    desired_direction: Option<Vec3>,
     action: bool,
 }
 
@@ -242,50 +280,67 @@ fn is_pause_hitbox(position: Vec2) -> bool {
     position.y < PAUSE_TOP && (PAUSE_LEFT..=PAUSE_RIGHT).contains(&position.x)
 }
 
-fn adaptive_deadzone(window_size: Vec2) -> f32 {
-    (window_size.x.min(window_size.y) * 0.08).clamp(32.0, 72.0)
+fn safe_ground_normalize(direction: Vec3) -> Option<Vec3> {
+    if !direction.is_finite() {
+        return None;
+    }
+    let ground = Vec3::new(direction.x, 0.0, direction.z);
+    let length_squared = ground.length_squared();
+    if length_squared <= f32::EPSILON {
+        None
+    } else {
+        Some(ground / length_squared.sqrt())
+    }
 }
 
-/// Exact eight-way quantization ported from wasm_battle_arena. `dir` is
-/// start-current, so dragging upward produces UP and dragging left produces
-/// LEFT. A displacement exactly on the pixel deadzone remains idle.
-fn input_from_vec(dir: Vec2, deadzone: f32) -> u8 {
-    if dir.length() <= deadzone {
-        return 0;
-    }
-    let dir = dir.normalize_or_zero();
-    let left = dir.distance_squared(Vec2::X);
-    let top_left = dir.distance_squared(UNIT_TL);
-    let top = dir.distance_squared(Vec2::Y);
-    let top_right = dir.distance_squared(UNIT_TR);
-    let right = dir.distance_squared(-Vec2::X);
-    let bottom_left = dir.distance_squared(UNIT_BL);
-    let bottom = dir.distance_squared(-Vec2::Y);
-    let bottom_right = dir.distance_squared(UNIT_BR);
+/// Project camera-local screen axes onto the ground and normalize safely so
+/// equal screen-axis components remain an equal analog diagonal after tilt.
+fn camera_ground_basis(camera: &GlobalTransform) -> (Vec3, Vec3) {
+    let rotation = camera.rotation();
+    (
+        safe_ground_normalize(rotation * Vec3::X).unwrap_or(Vec3::ZERO),
+        safe_ground_normalize(rotation * Vec3::Y).unwrap_or(Vec3::ZERO),
+    )
+}
 
-    if top < AXIS_DEADZONE {
-        INPUT_UP
-    } else if bottom < AXIS_DEADZONE {
-        INPUT_DOWN
-    } else if left < right {
-        if left < AXIS_DEADZONE {
-            INPUT_LEFT
-        } else if top_left < left {
-            INPUT_LEFT | INPUT_UP
-        } else if bottom_left < left {
-            INPUT_LEFT | INPUT_DOWN
-        } else {
-            0
-        }
-    } else if right < AXIS_DEADZONE {
-        INPUT_RIGHT
-    } else if top_right < right {
-        INPUT_RIGHT | INPUT_UP
-    } else if bottom_right < right {
-        INPUT_RIGHT | INPUT_DOWN
-    } else {
-        0
+/// Convert a top-left-origin screen drag (`current - start`, in logical pixels)
+/// into a world-space desired heading. Positive screen Y points down, hence
+/// the subtraction of the camera's screen-up basis. Six pixels or less is
+/// treated only as touch jitter, not as a heading request.
+fn screen_drag_to_world(drag: Vec2, screen_right: Vec3, screen_up: Vec3) -> Option<Vec3> {
+    // Fractional viewport conversion can introduce a few ULPs when an exact
+    // six-pixel touch coordinate is divided and multiplied back.
+    if !drag.is_finite()
+        || drag.length_squared() <= (TOUCH_JITTER_PX + TOUCH_JITTER_EPSILON_PX).powi(2)
+    {
+        return None;
     }
+    let right = safe_ground_normalize(screen_right).unwrap_or(Vec3::ZERO);
+    let up = safe_ground_normalize(screen_up).unwrap_or(Vec3::ZERO);
+    safe_ground_normalize(right * drag.x - up * drag.y)
+}
+
+fn wrapped_angle_error(desired: f32, current: f32) -> f32 {
+    let error = (desired - current + PI).rem_euclid(TAU) - PI;
+    // The antipode has two equally short turns. Preserve the raw error's sign
+    // so exact +PI requests steer left and exact -PI requests steer right.
+    if error == -PI && desired - current > 0.0 {
+        PI
+    } else {
+        error
+    }
+}
+
+/// Roady's heading convention is forward = (-sin(h), 0, -cos(h)).
+fn steer_toward_world_direction(direction: Vec3, heading: f32) -> f32 {
+    let Some(direction) = safe_ground_normalize(direction) else {
+        return 0.0;
+    };
+    if !heading.is_finite() {
+        return 0.0;
+    }
+    let desired_heading = (-direction.x).atan2(-direction.z);
+    (wrapped_angle_error(desired_heading, heading) / FULL_STEER_ERROR).clamp(-1.0, 1.0)
 }
 
 fn eligible_touch(touch: &ActiveTouch) -> bool {
@@ -310,37 +365,49 @@ fn update_drive_owner(owner: Option<u64>, touches: &[ActiveTouch]) -> Option<u64
     }
 }
 
-fn touch_intent(owner: Option<u64>, touches: &[ActiveTouch], window_size: Vec2) -> TouchIntent {
-    let direction = owner
-        .and_then(|id| {
-            touches
-                .iter()
-                .find(|touch| touch.id == id && eligible_touch(touch))
-        })
-        .map(|touch| {
-            let delta = (touch.start - touch.current) * window_size;
-            input_from_vec(delta, adaptive_deadzone(window_size))
-        })
-        .unwrap_or(0);
-    let action = owner.is_some()
+fn touch_intent(
+    owner: Option<u64>,
+    touches: &[ActiveTouch],
+    window_size: Vec2,
+    camera_basis: Option<(Vec3, Vec3)>,
+) -> TouchIntent {
+    let owner_touch = owner.and_then(|id| {
+        touches
+            .iter()
+            .find(|touch| touch.id == id && eligible_touch(touch))
+    });
+    let desired_direction = owner_touch.and_then(|touch| {
+        let drag = (touch.current - touch.start) * window_size;
+        let (screen_right, screen_up) = camera_basis?;
+        screen_drag_to_world(drag, screen_right, screen_up)
+    });
+    let action = owner_touch.is_some()
         && touches
             .iter()
             .any(|touch| eligible_touch(touch) && Some(touch.id) != owner);
-    TouchIntent { direction, action }
+    TouchIntent {
+        owner: owner_touch.is_some(),
+        desired_direction,
+        action,
+    }
 }
 
-/// Merge touch intent onto keyboard input. DOWN never requests reverse; it
-/// zeroes touch steering unless diagonal, where horizontal steering remains.
-/// Action owns throttle/brake, using speed to switch braking to held reverse.
-fn merge_touch_input(keyboard: PlayerInput, intent: TouchIntent, speed: f32) -> PlayerInput {
+/// Merge touch intent onto keyboard input. The owner always requests forward
+/// throttle and directly owns steering (zero while stationary/jittering).
+/// Action retains its brake-then-reverse behavior and overrides that throttle.
+fn merge_touch_input(
+    keyboard: PlayerInput,
+    intent: TouchIntent,
+    speed: f32,
+    heading: f32,
+) -> PlayerInput {
     let mut result = keyboard;
-    let horizontal = intent.direction & (INPUT_LEFT | INPUT_RIGHT);
-    if intent.direction != 0 {
-        result.steer = match horizontal {
-            INPUT_LEFT => 1.0,
-            INPUT_RIGHT => -1.0,
-            _ => 0.0,
-        };
+    if intent.owner {
+        result.throttle = 1.0;
+        result.brake = false;
+        result.steer = intent.desired_direction.map_or(0.0, |direction| {
+            steer_toward_world_direction(direction, heading)
+        });
     }
     if intent.action {
         if speed > ACTION_BRAKE_SPEED {
@@ -350,8 +417,6 @@ fn merge_touch_input(keyboard: PlayerInput, intent: TouchIntent, speed: f32) -> 
             result.throttle = -1.0;
             result.brake = false;
         }
-    } else if intent.direction & INPUT_UP != 0 {
-        result.throttle = 1.0;
     }
     result
 }
@@ -438,6 +503,7 @@ fn read_touch_input(
     windows: Query<&Window, With<PrimaryWindow>>,
     frozen: Res<InputFrozen>,
     car: Query<&Car>,
+    cameras: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
     mut owner: ResMut<DriveTouchOwner>,
     mut input: ResMut<PlayerInput>,
 ) {
@@ -462,9 +528,16 @@ fn read_touch_input(
         // effect. Playing state exit is the sole unconditional owner reset.
         return;
     }
-    let intent = touch_intent(owner.0, &active_touches, window_size);
-    let speed = car.single().map_or(0.0, |car| car.speed);
-    *input = merge_touch_input(*input, intent, speed);
+    let camera_basis = cameras
+        .iter()
+        .find(|(camera, _)| camera.is_active)
+        .map(|(_, transform)| camera_ground_basis(transform));
+    let Ok(car) = car.single() else {
+        return;
+    };
+    let (speed, heading) = (car.speed, car.heading);
+    let intent = touch_intent(owner.0, &active_touches, window_size, camera_basis);
+    *input = merge_touch_input(*input, intent, speed, heading);
     // Touch never writes Handbrake: keyboard Shift remains wholly owned by the
     // keyboard system and cannot be clobbered by touch release/cancel.
 }
@@ -527,10 +600,10 @@ fn spawn_touch_hud(mut commands: Commands, active: Res<TouchControlsActive>) {
             root.spawn((
                 Node {
                     position_type: PositionType::Absolute,
-                    top: Val::Percent(2.0),
+                    top: px(4.0),
                     left: Val::Percent(44.0),
                     width: Val::Percent(12.0),
-                    height: Val::Percent(10.0),
+                    height: px(28.0),
                     align_items: AlignItems::Center,
                     justify_content: JustifyContent::Center,
                     ..default()
@@ -605,13 +678,25 @@ fn despawn_marker<M: Component>(mut commands: Commands, roots: Query<Entity, Wit
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy::input::{InputPlugin, touch::TouchPhase};
 
     fn touch(id: u64, start: Vec2, current: Vec2) -> ActiveTouch {
         ActiveTouch { id, start, current }
     }
 
-    fn intent(direction: u8, action: bool) -> TouchIntent {
-        TouchIntent { direction, action }
+    fn intent(owner: bool, desired_direction: Option<Vec3>, action: bool) -> TouchIntent {
+        TouchIntent {
+            owner,
+            desired_direction,
+            action,
+        }
+    }
+
+    fn assert_vec3_close(actual: Vec3, expected: Vec3) {
+        assert!(
+            actual.distance(expected) < 1.0e-5,
+            "expected {expected:?}, got {actual:?}"
+        );
     }
 
     #[test]
@@ -627,6 +712,12 @@ mod tests {
         );
     }
 
+    fn panel_separation(a: ScreenBounds, b: ScreenBounds) -> f32 {
+        let horizontal = (b.left - a.right).max(a.left - b.right);
+        let vertical = (b.top - a.bottom).max(a.top - b.bottom);
+        horizontal.max(vertical)
+    }
+
     fn assert_touch_hud_layout(viewport: Vec2) {
         let bounds = touch_hud_bounds(viewport);
         let driving = touch_driving_band_bounds(viewport);
@@ -639,32 +730,57 @@ mod tests {
             assert!(!left.overlaps(driving), "{left:?} overlaps driving band");
             for right in bounds.into_iter().skip(index + 1) {
                 assert!(!left.overlaps(right), "{left:?} overlaps {right:?}");
+                assert!(
+                    panel_separation(left, right) >= 12.0,
+                    "less than 12px between {left:?} and {right:?}"
+                );
             }
         }
     }
 
     #[test]
-    fn compact_touch_hud_is_pairwise_disjoint_at_844x390() {
+    fn compact_touch_hud_has_twelve_pixel_clearance_at_target_sizes() {
+        for viewport in [Vec2::new(844.0, 390.0), Vec2::new(960.0, 480.0)] {
+            assert_touch_hud_layout(viewport);
+        }
+
         let viewport = Vec2::new(844.0, 390.0);
-        assert_touch_hud_layout(viewport);
-        let [cockpit, health, powerups, objective, combo, event, _minimap] =
-            touch_hud_bounds(viewport);
-        assert_eq!(cockpit, fixed_bounds(14.0, 12.0, 170.0, 116.0));
+        let [
+            cockpit,
+            health,
+            powerups,
+            objective,
+            combo,
+            event,
+            timer,
+            minimap,
+            level,
+            pause,
+        ] = touch_hud_bounds(viewport);
+        assert_eq!(cockpit, fixed_bounds(14.0, 12.0, 150.0, 100.0));
         assert_eq!(health, fixed_bounds(14.0, 136.0, 190.0, 52.0));
-        assert_eq!(powerups, fixed_bounds(205.0, 136.0, 142.0, 52.0));
-        assert_eq!(objective, fixed_bounds(212.0, 54.0, 420.0, 38.0));
+        assert_eq!(powerups, fixed_bounds(210.0, 206.0, 142.0, 52.0));
+        assert_eq!(objective, fixed_bounds(272.0, 54.0, 300.0, 32.0));
         assert_eq!(combo, fixed_bounds(350.0, 98.0, 144.0, 80.0));
-        assert_eq!(event, fixed_bounds(370.0, 182.0, 250.0, 30.0));
+        assert_eq!(event, fixed_bounds(370.0, 194.0, 250.0, 30.0));
+        assert_eq!(timer, fixed_bounds(696.0, 12.0, 132.0, 36.0));
+        assert_eq!(minimap, fixed_bounds(720.0, 60.0, 108.0, 108.0));
+        assert_eq!(level, fixed_bounds(780.0, 180.0, 48.0, 26.0));
+        assert_eq!(pause, fixed_bounds(371.36, 4.0, 101.28, 28.0));
     }
 
     #[test]
-    fn compact_touch_hud_is_pairwise_disjoint_at_1440x900() {
+    fn compact_touch_hud_is_pairwise_disjoint_on_desktop_sized_touch_viewport() {
         assert_touch_hud_layout(Vec2::new(1440.0, 900.0));
     }
 
     #[test]
     fn full_width_instruction_band_is_low_profile_and_disjoint_from_hud() {
-        for viewport in [Vec2::new(844.0, 390.0), Vec2::new(1440.0, 900.0)] {
+        for viewport in [
+            Vec2::new(844.0, 390.0),
+            Vec2::new(960.0, 480.0),
+            Vec2::new(1440.0, 900.0),
+        ] {
             let band = touch_driving_band_bounds(viewport);
             assert_eq!(band, fixed_bounds(0.0, viewport.y - 44.0, viewport.x, 44.0));
 
@@ -682,33 +798,107 @@ mod tests {
     }
 
     #[test]
-    fn exact_eight_way_quantization_and_adaptive_deadzone() {
-        assert_eq!(adaptive_deadzone(Vec2::new(844.0, 390.0)), 32.0);
-        assert_eq!(adaptive_deadzone(Vec2::new(1440.0, 900.0)), 72.0);
-        for deadzone in [32.0, 72.0] {
-            assert_eq!(input_from_vec(Vec2::X * deadzone, deadzone), 0);
-            let d = deadzone + 1.0;
-            assert_eq!(input_from_vec(Vec2::Y * d, deadzone), INPUT_UP);
-            assert_eq!(input_from_vec(-Vec2::Y * d, deadzone), INPUT_DOWN);
-            assert_eq!(input_from_vec(Vec2::X * d, deadzone), INPUT_LEFT);
-            assert_eq!(input_from_vec(-Vec2::X * d, deadzone), INPUT_RIGHT);
+    fn screen_drag_cardinals_and_diagonals_are_analog_world_directions() {
+        let right = Vec3::X;
+        let up = Vec3::Z;
+        let cases = [
+            (Vec2::new(10.0, 0.0), Vec3::X),
+            (Vec2::new(-10.0, 0.0), Vec3::NEG_X),
+            (Vec2::new(0.0, -10.0), Vec3::Z),
+            (Vec2::new(0.0, 10.0), Vec3::NEG_Z),
+            (Vec2::new(10.0, -10.0), (Vec3::X + Vec3::Z).normalize()),
+            (Vec2::new(-10.0, -10.0), (Vec3::NEG_X + Vec3::Z).normalize()),
+            (Vec2::new(10.0, 10.0), (Vec3::X + Vec3::NEG_Z).normalize()),
+            (
+                Vec2::new(-10.0, 10.0),
+                (Vec3::NEG_X + Vec3::NEG_Z).normalize(),
+            ),
+        ];
+        for (drag, expected) in cases {
+            assert_vec3_close(screen_drag_to_world(drag, right, up).unwrap(), expected);
+        }
+
+        // Unequal components remain analog rather than snapping to eight ways.
+        assert_vec3_close(
+            screen_drag_to_world(Vec2::new(12.0, -9.0), right, up).unwrap(),
+            Vec3::new(0.8, 0.0, 0.6),
+        );
+    }
+
+    #[test]
+    fn camera_basis_projects_local_right_and_up_onto_ground() {
+        let transform = GlobalTransform::from(
+            Transform::from_xyz(12.0, 12.0, 12.0).looking_at(Vec3::ZERO, Vec3::Y),
+        );
+        let (right, up) = camera_ground_basis(&transform);
+        assert_vec3_close(right, Vec3::new(1.0, 0.0, -1.0).normalize());
+        assert_vec3_close(up, Vec3::new(-1.0, 0.0, -1.0).normalize());
+        assert!(right.dot(up).abs() < 1.0e-5);
+    }
+
+    #[test]
+    fn desired_heading_uses_roady_convention_and_wraps_at_plus_minus_pi() {
+        assert_eq!(steer_toward_world_direction(Vec3::NEG_Z, 0.0), 0.0);
+        assert_eq!(steer_toward_world_direction(Vec3::NEG_X, 0.0), 1.0);
+        assert_eq!(steer_toward_world_direction(Vec3::X, 0.0), -1.0);
+        assert_eq!(wrapped_angle_error(PI, 0.0), PI);
+        assert_eq!(wrapped_angle_error(-PI, 0.0), -PI);
+        assert!(
+            (steer_toward_world_direction(
+                Vec3::new(-FULL_STEER_ERROR.sin(), 0.0, -FULL_STEER_ERROR.cos()),
+                0.0,
+            ) - 1.0)
+                .abs()
+                < 1.0e-5
+        );
+        assert!(
+            (steer_toward_world_direction(Vec3::new(-0.5, 0.0, -0.866_025_4), 0.0) - 0.5).abs()
+                < 1.0e-5
+        );
+
+        let epsilon = 0.02;
+        let positive_to_negative = wrapped_angle_error(-PI + epsilon, PI - epsilon);
+        let negative_to_positive = wrapped_angle_error(PI - epsilon, -PI + epsilon);
+        assert!((positive_to_negative - epsilon * 2.0).abs() < 1.0e-5);
+        assert!((negative_to_positive + epsilon * 2.0).abs() < 1.0e-5);
+    }
+
+    #[test]
+    fn stationary_owner_immediately_holds_forward_gas() {
+        let keyboard = PlayerInput {
+            throttle: -0.4,
+            steer: 0.8,
+            brake: false,
+        };
+        assert_eq!(
+            merge_touch_input(keyboard, intent(true, None, false), 0.0, 1.2),
+            PlayerInput {
+                throttle: 1.0,
+                steer: 0.0,
+                brake: false,
+            }
+        );
+    }
+
+    #[test]
+    fn six_pixel_jitter_has_zero_steer_while_owner_holds_gas() {
+        let basis = Some((Vec3::X, Vec3::Z));
+        let size = Vec2::new(844.0, 390.0);
+        let start = Vec2::new(0.25, 0.5);
+        for drag in [Vec2::ZERO, Vec2::new(6.0, 0.0), Vec2::new(3.0, -4.0)] {
+            let current = start + drag / size;
+            let touch_intent = touch_intent(Some(1), &[touch(1, start, current)], size, basis);
+            assert_eq!(touch_intent.desired_direction, None);
             assert_eq!(
-                input_from_vec(Vec2::splat(d), deadzone),
-                INPUT_LEFT | INPUT_UP
-            );
-            assert_eq!(
-                input_from_vec(Vec2::new(-d, d), deadzone),
-                INPUT_RIGHT | INPUT_UP
-            );
-            assert_eq!(
-                input_from_vec(Vec2::new(d, -d), deadzone),
-                INPUT_LEFT | INPUT_DOWN
-            );
-            assert_eq!(
-                input_from_vec(Vec2::splat(-d), deadzone),
-                INPUT_RIGHT | INPUT_DOWN
+                merge_touch_input(PlayerInput::default(), touch_intent, 0.0, 1.2),
+                PlayerInput {
+                    throttle: 1.0,
+                    steer: 0.0,
+                    brake: false,
+                }
             );
         }
+        assert!(screen_drag_to_world(Vec2::new(6.1, 0.0), Vec3::X, Vec3::Z).is_some());
     }
 
     #[test]
@@ -722,6 +912,107 @@ mod tests {
     }
 
     #[test]
+    fn ecs_touch_events_flow_through_touches_and_read_touch_input() {
+        let keyboard_snapshot = PlayerInput {
+            throttle: -0.6,
+            steer: 0.7,
+            brake: true,
+        };
+        let mut app = App::new();
+        app.add_plugins(InputPlugin)
+            .init_resource::<DriveTouchOwner>()
+            .insert_resource(InputFrozen(false))
+            .insert_resource(keyboard_snapshot)
+            .add_systems(Update, read_touch_input.in_set(TouchInputSet));
+
+        let window = app
+            .world_mut()
+            .spawn((
+                Window {
+                    resolution: (844, 390).into(),
+                    ..default()
+                },
+                PrimaryWindow,
+            ))
+            .id();
+        let car = app
+            .world_mut()
+            .spawn(Car {
+                speed: 0.0,
+                heading: 0.0,
+                drift: 0.0,
+            })
+            .id();
+        app.world_mut().spawn((
+            Camera3d::default(),
+            Camera::default(),
+            GlobalTransform::from(
+                Transform::from_xyz(12.0, 12.0, 12.0).looking_at(Vec3::ZERO, Vec3::Y),
+            ),
+        ));
+
+        let send_touch = |app: &mut App, phase: TouchPhase, id: u64, position: Vec2| {
+            app.world_mut().write_message(TouchInput {
+                phase,
+                position,
+                window,
+                force: None,
+                id,
+            });
+        };
+
+        // The real InputPlugin converts TouchInput messages into the Touches
+        // resource in PreUpdate before the gameplay system reads it in Update.
+        send_touch(&mut app, TouchPhase::Started, 10, Vec2::new(700.0, 250.0));
+        app.update();
+        assert!(app.world().resource::<Touches>().get_pressed(10).is_some());
+        assert_eq!(
+            *app.world().resource::<PlayerInput>(),
+            PlayerInput {
+                throttle: 1.0,
+                steer: 0.0,
+                brake: false,
+            },
+            "the sole owner must replace keyboard brake/throttle"
+        );
+
+        app.world_mut()
+            .entity_mut(car)
+            .get_mut::<Car>()
+            .unwrap()
+            .speed = 0.150_01;
+        app.world_mut().insert_resource(keyboard_snapshot);
+        send_touch(&mut app, TouchPhase::Started, 20, Vec2::new(120.0, 250.0));
+        app.update();
+        assert_eq!(
+            *app.world().resource::<PlayerInput>(),
+            PlayerInput {
+                throttle: 0.0,
+                steer: 0.0,
+                brake: true,
+            },
+            "a second touch above the action threshold must brake"
+        );
+
+        app.world_mut()
+            .entity_mut(car)
+            .get_mut::<Car>()
+            .unwrap()
+            .speed = ACTION_BRAKE_SPEED;
+        app.world_mut().insert_resource(keyboard_snapshot);
+        app.update();
+        assert_eq!(
+            *app.world().resource::<PlayerInput>(),
+            PlayerInput {
+                throttle: -1.0,
+                steer: 0.0,
+                brake: false,
+            },
+            "at the action threshold the second touch must request reverse"
+        );
+    }
+
+    #[test]
     fn owner_is_position_independent_sticky_and_promotes_on_release() {
         let first = touch(70, Vec2::new(0.84, 0.31), Vec2::new(0.74, 0.11));
         assert_eq!(update_drive_owner(None, &[first]), Some(70));
@@ -732,19 +1023,21 @@ mod tests {
         assert_eq!(update_drive_owner(Some(70), &[second, first]), Some(70));
         assert_eq!(update_drive_owner(Some(70), &[first, second]), Some(70));
         let size = Vec2::new(844.0, 390.0);
+        let basis = Some((Vec3::X, Vec3::Z));
         assert_eq!(
-            touch_intent(Some(70), &[second, first], size),
-            touch_intent(Some(70), &[first, second], size)
+            touch_intent(Some(70), &[second, first], size, basis),
+            touch_intent(Some(70), &[first, second], size, basis)
         );
-        assert!(touch_intent(Some(70), &[second, first], size).action);
+        assert!(touch_intent(Some(70), &[second, first], size, basis).action);
 
         // Releasing the owner promotes the remaining touch; with one eligible
-        // touch left the action role clears and direction comes from the new owner.
+        // touch left the action role clears and its analog drag becomes desired.
         let promoted = update_drive_owner(Some(70), &[second]);
         assert_eq!(promoted, Some(9));
-        let promoted_intent = touch_intent(promoted, &[second], size);
+        let promoted_intent = touch_intent(promoted, &[second], size, basis);
+        assert!(promoted_intent.owner);
         assert!(!promoted_intent.action);
-        assert_eq!(promoted_intent.direction, INPUT_RIGHT | INPUT_UP);
+        assert!(promoted_intent.desired_direction.is_some());
         assert_eq!(update_drive_owner(promoted, &[]), None);
     }
 
@@ -762,100 +1055,70 @@ mod tests {
         let drive = touch(8, Vec2::new(0.7, 0.4), Vec2::new(0.6, 0.2));
         assert_eq!(update_drive_owner(None, &[pause]), None);
         assert_eq!(update_drive_owner(None, &[pause, drive]), Some(8));
-        let intent = touch_intent(Some(8), &[pause, drive], Vec2::new(844.0, 390.0));
+        let intent = touch_intent(
+            Some(8),
+            &[pause, drive],
+            Vec2::new(844.0, 390.0),
+            Some((Vec3::X, Vec3::Z)),
+        );
+        assert!(intent.owner);
         assert!(!intent.action);
-        assert_ne!(intent.direction, 0);
+        assert!(intent.desired_direction.is_some());
     }
 
     #[test]
-    fn down_never_reverses_but_diagonals_steer() {
+    fn action_brakes_forward_then_holds_reverse_at_boundary_and_overrides_gas() {
         let keyboard = PlayerInput {
-            throttle: 0.3,
-            steer: 0.2,
+            throttle: 0.2,
+            steer: -0.4,
             brake: false,
         };
-        let down = merge_touch_input(keyboard, intent(INPUT_DOWN, false), 0.0);
-        assert_eq!(down.throttle, keyboard.throttle);
-        assert_eq!(down.steer, 0.0);
-        assert_eq!(down.brake, keyboard.brake);
-        let left_down = merge_touch_input(keyboard, intent(INPUT_LEFT | INPUT_DOWN, false), 0.0);
-        assert_eq!(left_down.throttle, keyboard.throttle);
-        assert_eq!(left_down.steer, 1.0);
-        let right_down = merge_touch_input(keyboard, intent(INPUT_RIGHT | INPUT_DOWN, false), 0.0);
-        assert_eq!(right_down.steer, -1.0);
-    }
-
-    #[test]
-    fn action_brakes_forward_then_holds_reverse_at_boundary() {
-        let keyboard = PlayerInput {
-            throttle: 1.0,
-            steer: 0.4,
-            brake: false,
-        };
-        let braking = merge_touch_input(keyboard, intent(INPUT_UP, true), 0.150_01);
+        let desired_left = Some(Vec3::NEG_X);
+        let braking = merge_touch_input(keyboard, intent(true, desired_left, true), 0.150_01, 0.0);
         assert_eq!(
             braking,
-            PlayerInput {
-                throttle: 0.0,
-                steer: 0.0,
-                brake: true
-            }
-        );
-        for speed in [0.15, 0.0, -2.0] {
-            let reverse = merge_touch_input(keyboard, intent(INPUT_UP, true), speed);
-            assert_eq!(
-                reverse,
-                PlayerInput {
-                    throttle: -1.0,
-                    steer: 0.0,
-                    brake: false
-                }
-            );
-        }
-        assert_eq!(merge_touch_input(keyboard, intent(0, false), 0.0), keyboard);
-        assert_eq!(
-            merge_touch_input(PlayerInput::default(), intent(0, false), -1.0),
-            PlayerInput::default(),
-            "releasing action coasts when no keyboard control is held"
-        );
-    }
-
-    #[test]
-    fn direction_on_right_action_on_left_and_keyboard_preservation() {
-        let size = Vec2::new(844.0, 390.0);
-        let touches = [
-            touch(1, Vec2::new(0.85, 0.85), Vec2::new(0.75, 0.65)),
-            touch(2, Vec2::new(0.15, 0.35), Vec2::new(0.95, 0.05)),
-        ];
-        let combined_intent = touch_intent(Some(1), &touches, size);
-        assert_eq!(combined_intent.direction, INPUT_LEFT | INPUT_UP);
-        assert!(combined_intent.action);
-        let keyboard = PlayerInput {
-            throttle: 0.4,
-            steer: -0.3,
-            brake: false,
-        };
-        let merged = merge_touch_input(keyboard, combined_intent, 4.0);
-        assert_eq!(
-            merged,
             PlayerInput {
                 throttle: 0.0,
                 steer: 1.0,
                 brake: true
             }
         );
+        for speed in [0.15, 0.0, -2.0] {
+            let reverse = merge_touch_input(keyboard, intent(true, desired_left, true), speed, 0.0);
+            assert_eq!(
+                reverse,
+                PlayerInput {
+                    throttle: -1.0,
+                    steer: 1.0,
+                    brake: false
+                }
+            );
+        }
+        assert_eq!(
+            merge_touch_input(keyboard, intent(false, None, false), 0.0, 0.0),
+            keyboard
+        );
+    }
+
+    #[test]
+    fn direction_owner_and_action_are_independent_of_touch_positions() {
+        let size = Vec2::new(844.0, 390.0);
+        let basis = Some((Vec3::X, Vec3::Z));
+        let touches = [
+            touch(1, Vec2::new(0.85, 0.85), Vec2::new(0.75, 0.65)),
+            touch(2, Vec2::new(0.15, 0.35), Vec2::new(0.95, 0.05)),
+        ];
+        let combined_intent = touch_intent(Some(1), &touches, size, basis);
+        assert!(combined_intent.owner);
+        assert!(combined_intent.desired_direction.is_some());
+        assert!(combined_intent.action);
 
         // The second touch's large drag cannot alter owner direction.
         let stationary_action = touch(2, touches[1].start, touches[1].start);
         assert_eq!(
-            touch_intent(Some(1), &[touches[0], stationary_action], size).direction,
-            combined_intent.direction
+            touch_intent(Some(1), &[touches[0], stationary_action], size, basis).desired_direction,
+            combined_intent.desired_direction
         );
-        assert_eq!(merge_touch_input(keyboard, intent(0, false), 0.0), keyboard);
-        let up_only = merge_touch_input(keyboard, intent(INPUT_UP, false), 0.0);
-        assert_eq!(up_only.steer, 0.0);
-        assert_eq!(up_only.brake, keyboard.brake);
-        assert_eq!(up_only.throttle, 1.0);
     }
 
     #[test]

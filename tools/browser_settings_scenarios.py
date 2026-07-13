@@ -50,6 +50,19 @@ import traceback
 from pathlib import Path
 from typing import Any, Callable
 
+try:  # Direct script execution puts tools/ on sys.path.
+    from browser_scenarios import (
+        FailureScreenshotRecorder,
+        discard_pre_cleanup_screenshot,
+        promote_pre_cleanup_screenshot,
+    )
+except ImportError:  # Package-style imports used by helper self-tests.
+    from .browser_scenarios import (
+        FailureScreenshotRecorder,
+        discard_pre_cleanup_screenshot,
+        promote_pre_cleanup_screenshot,
+    )
+
 DEFAULT_URL = "http://localhost:8080"
 DEFAULT_OUT_DIR = "tools/scenarios/settings"
 BOOT_TIMEOUT_MS = 120_000
@@ -64,6 +77,18 @@ DEFAULT_SCHEMA = "v2:100:0:0:"
 QA_MARKER = "__roady_car_settings_qa_fresh"
 DESKTOP_VIEWPORT = {"width": 1440, "height": 900}
 MOBILE_VIEWPORT = {"width": 844, "height": 390}
+SCREENSHOT_POLICIES = {"all", "failure"}
+
+
+def parse_screenshot_policy(value: str | None) -> str:
+    """Parse ROADY_SCREENSHOTS without depending on Playwright or argparse."""
+    policy = "all" if value is None else value
+    if policy not in SCREENSHOT_POLICIES:
+        raise ValueError(
+            "ROADY_SCREENSHOTS must be either 'all' or 'failure' "
+            f"(got {value!r})"
+        )
+    return policy
 
 
 def parse_args() -> argparse.Namespace:
@@ -93,7 +118,14 @@ def parse_args() -> argparse.Namespace:
             "Use 'chromium' for Playwright's bundled browser."
         ),
     )
-    return parser.parse_args()
+    parsed = parser.parse_args()
+    try:
+        parsed.screenshot_policy = parse_screenshot_policy(
+            os.environ.get("ROADY_SCREENSHOTS")
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
+    return parsed
 
 
 def resolve_browser_channel(value: str) -> str | None:
@@ -328,6 +360,8 @@ def run_desktop(
     shots: list[str] = sect["screenshots"]
 
     def shot(name: str) -> None:
+        if args.screenshot_policy == "failure":
+            return
         path = out_dir / name
         page.screenshot(path=str(path), full_page=True)
         shots.append(str(path))
@@ -530,6 +564,8 @@ def run_mobile(
     shots: list[str] = sect["screenshots"]
 
     def shot(name: str) -> None:
+        if args.screenshot_policy == "failure":
+            return
         path = out_dir / name
         page.screenshot(path=str(path), full_page=True)
         shots.append(str(path))
@@ -568,41 +604,41 @@ def run_mobile(
     # Touch row bands: Volume .20..33, Mute .33..45, Reduced .45..57,
     # Name .57..70, Back .70..84. Opener matches x .67..97, y .03..18.
     def touch_open_and_adjust() -> None:
-        tap(0.88, 0.12)  # opener -> open (pending Menu->Playing canceled)
-        tap(0.20, 0.26)  # Volume left: 100 -> 90
+        tap(0.92, 0.07)  # opener -> open (pending Menu->Playing canceled)
+        tap(0.20, 0.234)  # Volume left: 100 -> 90
         assert_storage(page, "v2:90:0:0:")
-        tap(0.85, 0.26)  # Volume right: 90 -> 100
+        tap(0.80, 0.234)  # Volume right: 90 -> 100
         assert_storage(page, "v2:100:0:0:")
-        tap(0.85, 0.38)  # Mute right: -> On
+        tap(0.80, 0.352)  # Mute right: -> On
         assert_storage(page, "v2:100:1:0:")
-        tap(0.20, 0.38)  # Mute left: -> Off
+        tap(0.20, 0.352)  # Mute left: -> Off
         assert_storage(page, "v2:100:0:0:")
-        tap(0.50, 0.38)  # Mute center: toggle -> On
+        tap(0.50, 0.352)  # Mute center: toggle -> On
         assert_storage(page, "v2:100:1:0:")
-        tap(0.85, 0.51)  # ReducedMotion right: -> On
+        tap(0.80, 0.469)  # ReducedMotion right: -> On
         assert_storage(page, "v2:100:1:1:")
-        tap(0.20, 0.51)  # ReducedMotion left: -> Off
+        tap(0.20, 0.469)  # ReducedMotion left: -> Off
         assert_storage(page, "v2:100:1:0:")
-        tap(0.50, 0.51)  # ReducedMotion center: toggle -> On
+        tap(0.50, 0.469)  # ReducedMotion center: toggle -> On
         assert_storage(page, "v2:100:1:1:")
         shot("01_mobile_settings_open.png")
 
     run_step(steps, "touch_open_and_adjust", touch_open_and_adjust)
 
     def touch_back_and_reopen() -> None:
-        tap(0.50, 0.77)  # Back row -> close (still Menu)
-        tap(0.88, 0.12)  # reopen
-        tap(0.20, 0.26)  # Volume left: 100 -> 90 (proves reopened)
+        tap(0.50, 0.704)  # Back row -> close (still Menu)
+        tap(0.92, 0.07)  # reopen
+        tap(0.20, 0.234)  # Volume left: 100 -> 90 (proves reopened)
         assert_storage(page, "v2:90:1:1:")
         shot("02_mobile_settings_reopened.png")
-        tap(0.50, 0.77)  # Back -> close
+        tap(0.50, 0.704)  # Back -> close
         # After close, the opener tap is consumed by the modal again (not a
         # menu start); confirm the menu never transitioned by reopening once
         # more and verifying storage is still reachable through the modal.
-        tap(0.88, 0.12)  # reopen
-        tap(0.20, 0.26)  # Volume left: 90 -> 80 (still Menu + modal)
+        tap(0.92, 0.07)  # reopen
+        tap(0.20, 0.234)  # Volume left: 90 -> 80 (still Menu + modal)
         assert_storage(page, "v2:80:1:1:")
-        tap(0.50, 0.77)  # Back -> close
+        tap(0.50, 0.704)  # Back -> close
         shot("03_mobile_closed.png")
 
     run_step(steps, "touch_back_and_reopen", touch_back_and_reopen)
@@ -619,25 +655,25 @@ def run_mobile(
     run_step(steps, "touch_start_and_pause", touch_start_and_pause)
 
     def pause_touch_open_and_adjust() -> None:
-        tap(0.88, 0.12)  # opener -> open over Paused (pending Menu transition canceled)
-        tap(0.20, 0.26)  # Volume left: 80 -> 70 (pending resume transition canceled)
+        tap(0.92, 0.07)  # opener -> open over Paused (pending Menu transition canceled)
+        tap(0.20, 0.234)  # Volume left: 80 -> 70 (pending resume transition canceled)
         assert_storage(page, "v2:70:1:1:")
         shot("05_mobile_paused_settings.png")
 
     run_step(steps, "pause_touch_open_and_adjust", pause_touch_open_and_adjust)
 
     def pause_touch_back_and_verify_paused() -> None:
-        tap(0.50, 0.77)  # Back row -> close (stays Paused; pending Restart canceled)
+        tap(0.50, 0.704)  # Back row -> close (stays Paused; pending Restart canceled)
         # Discriminate Paused from Menu: Enter is a no-op in Paused but starts a
         # round from Menu. Reopening the modal after Enter proves the state is
         # still Paused. (If Back had slipped to Menu, Enter would start a round
         # to Playing and the modal could not reopen; the assertion would fail.)
         page.keyboard.press("Enter")  # Paused: no-op (Menu: would start a round)
         page.wait_for_timeout(150)
-        tap(0.88, 0.12)  # reopen (proves still Paused, not Playing)
-        tap(0.20, 0.26)  # Volume left: 70 -> 60 (proves modal reopened)
+        tap(0.92, 0.07)  # reopen (proves still Paused, not Playing)
+        tap(0.20, 0.234)  # Volume left: 70 -> 60 (proves modal reopened)
         assert_storage(page, "v2:60:1:1:")
-        tap(0.50, 0.77)  # Back -> close (clean final state, still Paused)
+        tap(0.50, 0.704)  # Back -> close (clean final state, still Paused)
         shot("06_mobile_paused_verified.png")
 
     run_step(steps, "pause_touch_back_and_verify_paused", pause_touch_back_and_verify_paused)
@@ -651,12 +687,24 @@ def run_scenario(args: argparse.Namespace, summary: dict[str, Any]) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     summary["out_dir"] = str(out_dir)
 
-    # Import here so a missing dependency can still produce the JSON report
-    # (and after mkdir so the artifact directory always exists).
+    browser = None
+    active_context = None
+    active_page = None
+    failure_paths: list[str] = summary["screenshots"]
+    recorder = FailureScreenshotRecorder(args.screenshot_policy, out_dir, failure_paths)
+
+    # Import after recorder construction so stale private/failure artifacts are
+    # cleared even when Playwright itself is unavailable.
     from playwright.sync_api import sync_playwright
 
-    browser = None
-    with sync_playwright() as playwright:
+    def capture_failure_screenshot() -> None:
+        """Try every live page and fall back to the last pre-cleanup image."""
+        recorder.capture(active_page, active_context, browser)
+
+    playwright_instance = None
+    try:
+        playwright_instance = sync_playwright().start()
+        playwright = playwright_instance
         try:
             launch: dict[str, Any] = {"headless": not args.headed}
             channel = resolve_browser_channel(args.browser_channel)
@@ -665,34 +713,80 @@ def run_scenario(args: argparse.Namespace, summary: dict[str, Any]) -> None:
             browser = playwright.chromium.launch(**launch)
             overall = time.monotonic()
 
-            dctx, dpage = setup_context(
-                playwright, browser, summary, overall, mobile=False
-            )
+            dctx = None
+            dpage = None
+            try:
+                dctx, dpage = setup_context(
+                    playwright, browser, summary, overall, mobile=False
+                )
+            except Exception:
+                # setup_context may fail after creating a context/page but before
+                # returning it; discover those resources from the browser.
+                contexts = list(browser.contexts)
+                if contexts:
+                    active_context = contexts[-1]
+                    pages = list(active_context.pages)
+                    active_page = pages[-1] if pages else None
+                    recorder.snapshot_before_cleanup(active_page, active_context, browser)
+                raise
+            active_context = dctx
+            active_page = dpage
             try:
                 run_desktop(dpage, args, summary, out_dir)
                 assert_no_errors(summary)
+            except Exception:
+                capture_failure_screenshot()
+                raise
             finally:
+                primary_failure_active = sys.exc_info()[0] is not None
+                recorder.snapshot_before_cleanup(dpage, dctx, browser)
                 try:
                     dctx.close()
                 except Exception as exc:
                     summary["cleanup_errors"].append(
                         f"desktop context.close: {type(exc).__name__}: {exc}"
                     )
+                    capture_failure_screenshot()
+                    if not primary_failure_active:
+                        raise
 
-            mctx, mpage = setup_context(
-                playwright, browser, summary, overall, mobile=True
-            )
+            mctx = None
+            mpage = None
+            try:
+                mctx, mpage = setup_context(
+                    playwright, browser, summary, overall, mobile=True
+                )
+            except Exception:
+                contexts = list(browser.contexts)
+                if contexts:
+                    active_context = contexts[-1]
+                    pages = list(active_context.pages)
+                    active_page = pages[-1] if pages else None
+                    recorder.snapshot_before_cleanup(active_page, active_context, browser)
+                raise
+            active_context = mctx
+            active_page = mpage
             try:
                 run_mobile(mpage, args, summary, out_dir)
                 assert_no_errors(summary)
+            except Exception:
+                capture_failure_screenshot()
+                raise
             finally:
+                primary_failure_active = sys.exc_info()[0] is not None
+                recorder.snapshot_before_cleanup(mpage, mctx, browser)
                 try:
                     mctx.close()
                 except Exception as exc:
                     summary["cleanup_errors"].append(
                         f"mobile context.close: {type(exc).__name__}: {exc}"
                     )
+                    capture_failure_screenshot()
+                    if not primary_failure_active:
+                        raise
         finally:
+            primary_failure_active = sys.exc_info()[0] is not None
+            browser_failure: tuple[Exception, Any] | None = None
             if browser is not None:
                 try:
                     browser.close()
@@ -700,6 +794,36 @@ def run_scenario(args: argparse.Namespace, summary: dict[str, Any]) -> None:
                     summary["cleanup_errors"].append(
                         f"browser.close: {type(exc).__name__}: {exc}"
                     )
+                    capture_failure_screenshot()
+                    browser_failure = (exc, exc.__traceback__)
+            if playwright_instance is not None:
+                try:
+                    playwright_instance.stop()
+                except Exception as exc:
+                    summary["cleanup_errors"].append(
+                        f"playwright.stop: {type(exc).__name__}: {exc}"
+                    )
+                    capture_failure_screenshot()
+                    if browser_failure is None:
+                        browser_failure = (exc, exc.__traceback__)
+
+            if not primary_failure_active:
+                if browser_failure is not None:
+                    capture_failure_screenshot()
+                    exc, tb = browser_failure
+                    raise exc.with_traceback(tb)
+                try:
+                    assert_no_errors(summary)
+                except Exception:
+                    capture_failure_screenshot()
+                    raise
+            else:
+                capture_failure_screenshot()
+    finally:
+        # Also covers setup failures before either per-context try/finally.
+        if sys.exc_info()[0] is not None:
+            recorder.snapshot_before_cleanup(active_page, active_context, browser)
+            capture_failure_screenshot()
 
 
 def main() -> int:
@@ -716,6 +840,7 @@ def main() -> int:
             "headed": args.headed,
         },
         "out_dir": str(Path(args.out_dir).expanduser()),
+        "screenshots": [],
         "desktop": {"steps": [], "screenshots": [], "final_storage": None},
         "mobile": {"steps": [], "screenshots": [], "final_storage": None},
         "console_errors": [],
@@ -731,11 +856,17 @@ def main() -> int:
         # Recheck after browser/context shutdown so a late event captured while
         # closing cannot leave the run marked as passed.
         assert_no_errors(summary)
-        if summary["cleanup_errors"]:
-            raise RuntimeError("browser cleanup reported errors")
         summary["status"] = "passed"
+        discard_pre_cleanup_screenshot(
+            args.screenshot_policy, Path(args.out_dir).expanduser().resolve()
+        )
     except Exception as exc:
         exit_code = 1
+        promote_pre_cleanup_screenshot(
+            args.screenshot_policy,
+            Path(args.out_dir).expanduser().resolve(),
+            summary["screenshots"],
+        )
         summary["status"] = "failed"
         summary["failure"] = {
             "type": type(exc).__name__,

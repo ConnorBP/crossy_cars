@@ -18,7 +18,11 @@ use bevy::prelude::*;
 
 use crate::car::Car;
 use crate::chickens::Chicken;
+use crate::game::TouchStateSet;
 use crate::game::state::GameState;
+use crate::touch::{
+    TOUCH_MINIMAP_OUTER_SIZE, TOUCH_MINIMAP_RIGHT, TOUCH_MINIMAP_TOP, TouchControlsActive,
+};
 use crate::world::{Coin, Collider};
 
 // ---------------------------------------------------------------------------
@@ -35,9 +39,11 @@ const PANEL_BORDER: f32 = 2.0;
 const INNER_FRAME_INSET: f32 = 6.0;
 const INNER_FRAME_WIDTH: f32 = 1.0;
 /// Dots are kept wholly inside the inner edge of the range frame.
+#[cfg(test)]
 const PLOT_MIN: f32 = INNER_FRAME_INSET + INNER_FRAME_WIDTH;
+#[cfg(test)]
 const PLOT_MAX: f32 = MAP_SIZE - PLOT_MIN;
-const PLOT_SIZE: f32 = PLOT_MAX - PLOT_MIN;
+#[cfg(test)]
 const MAP_CENTER: f32 = MAP_SIZE / 2.0;
 /// Fixed pool size — bounds the entity count plotted per frame (web-friendly:
 /// no per-frame spawns). One slot is reserved for the car dot.
@@ -51,7 +57,61 @@ const PANEL_TOP: f32 = 62.0;
 /// left to clear that label horizontally without moving either HUD into the
 /// timer/objective strips.
 const PANEL_RIGHT: f32 = 72.0;
+#[cfg(test)]
 const PANEL_OUTER_SIZE: f32 = MAP_SIZE + PANEL_BORDER * 2.0;
+const TOUCH_MAP_SIZE: f32 = TOUCH_MINIMAP_OUTER_SIZE - PANEL_BORDER * 2.0;
+const TOUCH_INNER_FRAME_INSET: f32 = 5.0;
+
+#[derive(Clone, Copy)]
+struct MapLayout {
+    map_size: f32,
+    inner_frame_inset: f32,
+    top: f32,
+    right: f32,
+    compact: bool,
+}
+
+impl MapLayout {
+    fn for_touch(compact: bool) -> Self {
+        if compact {
+            Self {
+                map_size: TOUCH_MAP_SIZE,
+                inner_frame_inset: TOUCH_INNER_FRAME_INSET,
+                top: TOUCH_MINIMAP_TOP,
+                right: TOUCH_MINIMAP_RIGHT,
+                compact: true,
+            }
+        } else {
+            Self {
+                map_size: MAP_SIZE,
+                inner_frame_inset: INNER_FRAME_INSET,
+                top: PANEL_TOP,
+                right: PANEL_RIGHT,
+                compact: false,
+            }
+        }
+    }
+
+    fn outer_size(self) -> f32 {
+        self.map_size + PANEL_BORDER * 2.0
+    }
+
+    fn plot_min(self) -> f32 {
+        self.inner_frame_inset + INNER_FRAME_WIDTH
+    }
+
+    fn plot_max(self) -> f32 {
+        self.map_size - self.plot_min()
+    }
+
+    fn plot_size(self) -> f32 {
+        self.plot_max() - self.plot_min()
+    }
+
+    fn center(self) -> f32 {
+        self.map_size * 0.5
+    }
+}
 #[cfg(test)]
 const DIFFICULTY_RIGHT: f32 = 16.0;
 #[cfg(test)]
@@ -75,8 +135,9 @@ fn bounds_overlap(a: UiBounds, b: UiBounds) -> bool {
     a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top
 }
 
-/// Pure HUD bounds used to keep this module's map clear of the externally
-/// owned level label while accounting for all 132 plotting pixels and border.
+/// Pure desktop HUD bounds used to keep this module's map clear of the
+/// externally owned level label while accounting for all plotting pixels and
+/// border. Compact bounds are audited from the shared touch constants.
 #[cfg(test)]
 fn minimap_and_level_bounds(viewport_width: f32) -> (UiBounds, UiBounds) {
     let map_right = viewport_width - PANEL_RIGHT;
@@ -104,6 +165,16 @@ fn minimap_and_level_bounds(viewport_width: f32) -> (UiBounds, UiBounds) {
 /// (recursively nukes the pooled dot children — safe in 0.19).
 #[derive(Component)]
 struct MinimapRoot;
+#[derive(Component)]
+struct MinimapSurface;
+#[derive(Component)]
+struct MinimapInnerFrame;
+#[derive(Component)]
+struct MinimapVerticalCrosshair;
+#[derive(Component)]
+struct MinimapHorizontalCrosshair;
+#[derive(Component)]
+struct MinimapNorthTick;
 
 /// A pooled dot child. `kind` is refreshed each frame to match whatever entity
 /// the dot is currently plotting (it drives all visual properties via
@@ -154,7 +225,14 @@ impl Plugin for MinimapPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(OnEnter(GameState::Playing), spawn_minimap)
             .add_systems(OnExit(GameState::Playing), despawn_marker::<MinimapRoot>)
-            .add_systems(Update, update_minimap.run_if(in_state(GameState::Playing)));
+            .add_systems(
+                Update,
+                (
+                    update_minimap_layout.after(TouchStateSet),
+                    update_minimap.after(TouchStateSet),
+                )
+                    .run_if(in_state(GameState::Playing)),
+            );
     }
 }
 
@@ -165,18 +243,17 @@ impl Plugin for MinimapPlugin {
 /// Spawn the minimap panel + its fixed pool of dot children (hidden). Lives
 /// only while `Playing`; the root is despawned on exit (recursively removing
 /// the dot children).
-fn spawn_minimap(mut commands: Commands) {
-    let initial_style = dot_style(DotKind::Car);
+fn spawn_minimap(mut commands: Commands, touch: Res<TouchControlsActive>) {
+    let layout = MapLayout::for_touch(touch.0);
+    let initial_style = dot_style(DotKind::Car, layout.compact);
     commands
         .spawn((
             Node {
                 position_type: PositionType::Absolute,
-                top: px(PANEL_TOP),
-                right: px(PANEL_RIGHT),
-                // The border-box is MAP_SIZE plus both 2px borders; plotting
-                // coordinates remain based on the 132px child surface.
-                width: px(PANEL_OUTER_SIZE),
-                height: px(PANEL_OUTER_SIZE),
+                top: px(layout.top),
+                right: px(layout.right),
+                width: px(layout.outer_size()),
+                height: px(layout.outer_size()),
                 border: UiRect::all(px(PANEL_BORDER)),
                 ..default()
             },
@@ -185,11 +262,14 @@ fn spawn_minimap(mut commands: Commands) {
             MinimapRoot,
         ))
         .with_children(|root| {
-            root.spawn(Node {
-                width: px(MAP_SIZE),
-                height: px(MAP_SIZE),
-                ..default()
-            })
+            root.spawn((
+                Node {
+                    width: px(layout.map_size),
+                    height: px(layout.map_size),
+                    ..default()
+                },
+                MinimapSurface,
+            ))
             .with_children(|map| {
                 // A second frame clearly defines the maximum represented
                 // range. It and the heading cues are static pooled-UI siblings,
@@ -197,14 +277,15 @@ fn spawn_minimap(mut commands: Commands) {
                 map.spawn((
                     Node {
                         position_type: PositionType::Absolute,
-                        left: px(INNER_FRAME_INSET),
-                        top: px(INNER_FRAME_INSET),
-                        width: px(MAP_SIZE - INNER_FRAME_INSET * 2.0),
-                        height: px(MAP_SIZE - INNER_FRAME_INSET * 2.0),
+                        left: px(layout.inner_frame_inset),
+                        top: px(layout.inner_frame_inset),
+                        width: px(layout.map_size - layout.inner_frame_inset * 2.0),
+                        height: px(layout.map_size - layout.inner_frame_inset * 2.0),
                         border: UiRect::all(px(INNER_FRAME_WIDTH)),
                         ..default()
                     },
                     BorderColor::all(Color::srgba(0.58, 0.70, 0.84, 0.75)),
+                    MinimapInnerFrame,
                 ));
 
                 // Fixed range crosshair: the full line spans center-to-edge in
@@ -212,24 +293,26 @@ fn spawn_minimap(mut commands: Commands) {
                 map.spawn((
                     Node {
                         position_type: PositionType::Absolute,
-                        left: px(MAP_CENTER - 0.5),
-                        top: px(PLOT_MIN),
+                        left: px(layout.center() - 0.5),
+                        top: px(layout.plot_min()),
                         width: px(1.0),
-                        height: px(PLOT_SIZE),
+                        height: px(layout.plot_size()),
                         ..default()
                     },
                     BackgroundColor(Color::srgba(0.55, 0.68, 0.82, 0.24)),
+                    MinimapVerticalCrosshair,
                 ));
                 map.spawn((
                     Node {
                         position_type: PositionType::Absolute,
-                        left: px(PLOT_MIN),
-                        top: px(MAP_CENTER - 0.5),
-                        width: px(PLOT_SIZE),
+                        left: px(layout.plot_min()),
+                        top: px(layout.center() - 0.5),
+                        width: px(layout.plot_size()),
                         height: px(1.0),
                         ..default()
                     },
                     BackgroundColor(Color::srgba(0.55, 0.68, 0.82, 0.24)),
+                    MinimapHorizontalCrosshair,
                 ));
 
                 // Bright, fixed north tick: north on this map is always the
@@ -237,15 +320,16 @@ fn spawn_minimap(mut commands: Commands) {
                 map.spawn((
                     Node {
                         position_type: PositionType::Absolute,
-                        left: px(MAP_CENTER - 2.0),
-                        top: px(PLOT_MIN + 2.0),
+                        left: px(layout.center() - 2.0),
+                        top: px(layout.plot_min() + 2.0),
                         width: px(4.0),
-                        height: px(12.0),
+                        height: px(if layout.compact { 9.0 } else { 12.0 }),
                         border: UiRect::all(px(1.0)),
                         ..default()
                     },
                     BackgroundColor(Color::srgb(0.30, 0.95, 1.0)),
                     BorderColor::all(Color::srgb(0.95, 1.0, 1.0)),
+                    MinimapNorthTick,
                 ));
 
                 // The only dynamic minimap UI: a fixed 64-node pool.
@@ -253,8 +337,8 @@ fn spawn_minimap(mut commands: Commands) {
                     map.spawn((
                         Node {
                             position_type: PositionType::Absolute,
-                            left: px(MAP_CENTER),
-                            top: px(MAP_CENTER),
+                            left: px(layout.center()),
+                            top: px(layout.center()),
                             width: px(initial_style.width),
                             height: px(initial_style.height),
                             border: UiRect::all(px(initial_style.border_width)),
@@ -268,6 +352,62 @@ fn spawn_minimap(mut commands: Commands) {
                 }
             });
         });
+}
+
+fn update_minimap_layout(
+    touch: Res<TouchControlsActive>,
+    mut nodes: Query<
+        (
+            &mut Node,
+            Option<&MinimapRoot>,
+            Option<&MinimapSurface>,
+            Option<&MinimapInnerFrame>,
+            Option<&MinimapVerticalCrosshair>,
+            Option<&MinimapHorizontalCrosshair>,
+            Option<&MinimapNorthTick>,
+        ),
+        Or<(
+            With<MinimapRoot>,
+            With<MinimapSurface>,
+            With<MinimapInnerFrame>,
+            With<MinimapVerticalCrosshair>,
+            With<MinimapHorizontalCrosshair>,
+            With<MinimapNorthTick>,
+        )>,
+    >,
+) {
+    if !touch.0 {
+        return;
+    }
+    let layout = MapLayout::for_touch(true);
+    for (mut node, root, surface, frame, vertical, horizontal, north) in &mut nodes {
+        if root.is_some() {
+            node.top = px(layout.top);
+            node.right = px(layout.right);
+            node.width = px(layout.outer_size());
+            node.height = px(layout.outer_size());
+        } else if surface.is_some() {
+            node.width = px(layout.map_size);
+            node.height = px(layout.map_size);
+        } else if frame.is_some() {
+            node.left = px(layout.inner_frame_inset);
+            node.top = px(layout.inner_frame_inset);
+            node.width = px(layout.map_size - layout.inner_frame_inset * 2.0);
+            node.height = px(layout.map_size - layout.inner_frame_inset * 2.0);
+        } else if vertical.is_some() {
+            node.left = px(layout.center() - 0.5);
+            node.top = px(layout.plot_min());
+            node.height = px(layout.plot_size());
+        } else if horizontal.is_some() {
+            node.left = px(layout.plot_min());
+            node.top = px(layout.center() - 0.5);
+            node.width = px(layout.plot_size());
+        } else if north.is_some() {
+            node.left = px(layout.center() - 2.0);
+            node.top = px(layout.plot_min() + 2.0);
+            node.height = px(9.0);
+        }
+    }
 }
 
 /// Despawn every entity tagged with marker `M` (mirrors `ui.rs` / `health.rs`).
@@ -287,6 +427,7 @@ fn despawn_marker<M: Component>(mut commands: Commands, q: Query<Entity, With<M>
 /// chickens => obstacles); unused dots are hidden. Plotted count is capped at
 /// the pool size.
 fn update_minimap(
+    touch: Res<TouchControlsActive>,
     car: Query<(&Car, &Transform)>,
     coins: Query<&GlobalTransform, With<Coin>>,
     chickens: Query<&GlobalTransform, With<Chicken>>,
@@ -303,6 +444,7 @@ fn update_minimap(
     let Ok((car, car_t)) = car.single() else {
         return;
     };
+    let layout = MapLayout::for_touch(touch.0);
     let car_pos = car_t.translation;
     let heading = car.heading;
 
@@ -325,6 +467,7 @@ fn update_minimap(
         DotKind::Coin,
         &mut plots,
         max_plots,
+        layout,
     );
     collect_plots(
         chickens.iter(),
@@ -334,6 +477,7 @@ fn update_minimap(
         DotKind::Chicken,
         &mut plots,
         max_plots,
+        layout,
     );
     collect_plots(
         obstacles.iter(),
@@ -343,15 +487,16 @@ fn update_minimap(
         DotKind::Obstacle,
         &mut plots,
         max_plots,
+        layout,
     );
 
     // Assign pool dots: first = car (centered), rest = plots in order. Each
     // pooled node is fully restyled, so its silhouette follows its new kind.
     let mut iter = dots.iter_mut();
     if let Some((mut node, mut bg, mut border, mut vis, mut dot)) = iter.next() {
-        let style = dot_style(DotKind::Car);
+        let style = dot_style(DotKind::Car, layout.compact);
         apply_dot_style(&mut node, &mut bg, &mut border, style);
-        let position = clamped_dot_position(Vec2::splat(MAP_CENTER), style);
+        let position = clamped_dot_position(Vec2::splat(layout.center()), style, layout);
         node.left = px(position.x);
         node.top = px(position.y);
         *vis = Visibility::Visible;
@@ -359,9 +504,9 @@ fn update_minimap(
     }
     for (i, (mut node, mut bg, mut border, mut vis, mut dot)) in iter.enumerate() {
         if let Some(plot) = plots.get(i) {
-            let style = dot_style(plot.kind);
+            let style = dot_style(plot.kind, layout.compact);
             apply_dot_style(&mut node, &mut bg, &mut border, style);
-            let position = clamped_dot_position(Vec2::new(plot.x, plot.y), style);
+            let position = clamped_dot_position(Vec2::new(plot.x, plot.y), style, layout);
             node.left = px(position.x);
             node.top = px(position.y);
             *vis = Visibility::Visible;
@@ -383,6 +528,7 @@ fn collect_plots<'a>(
     kind: DotKind,
     plots: &mut Vec<Plot>,
     max_plots: usize,
+    layout: MapLayout,
 ) {
     for tf in iter {
         if plots.len() >= max_plots {
@@ -394,7 +540,7 @@ fn collect_plots<'a>(
         let pos = tf.translation();
         let dx = pos.x - car_pos.x;
         let dz = pos.z - car_pos.z;
-        if let Some(point) = project_offset(dx, dz, sin_h, cos_h) {
+        if let Some(point) = project_offset_for_layout(dx, dz, sin_h, cos_h, layout) {
             plots.push(Plot {
                 x: point.x,
                 y: point.y,
@@ -408,65 +554,85 @@ fn collect_plots<'a>(
 /// coordinates. Returning `None` keeps the radar's range circular. Forward is
 /// always decreasing UI Y; this is deliberately independent of ECS state so
 /// projection semantics can be tested directly.
+#[cfg(test)]
 fn project_offset(dx: f32, dz: f32, sin_h: f32, cos_h: f32) -> Option<Vec2> {
+    project_offset_for_layout(dx, dz, sin_h, cos_h, MapLayout::for_touch(false))
+}
+
+fn project_offset_for_layout(
+    dx: f32,
+    dz: f32,
+    sin_h: f32,
+    cos_h: f32,
+    layout: MapLayout,
+) -> Option<Vec2> {
     if dx * dx + dz * dz > RANGE * RANGE {
         return None;
     }
     let right_comp = dx * cos_h - dz * sin_h;
     let fwd_comp = -dx * sin_h - dz * cos_h;
-    let scale = PLOT_SIZE / (2.0 * RANGE);
+    let scale = layout.plot_size() / (2.0 * RANGE);
     Some(Vec2::new(
-        MAP_CENTER + right_comp * scale,
-        MAP_CENTER - fwd_comp * scale,
+        layout.center() + right_comp * scale,
+        layout.center() - fwd_comp * scale,
     ))
 }
 
 /// Convert a desired dot center into a clamped top-left coordinate. The clamp
 /// includes each style's full dimensions, keeping every pooled node wholly
 /// within the inner edge of the range frame.
-fn clamped_dot_position(center: Vec2, style: DotStyle) -> Vec2 {
+fn clamped_dot_position(center: Vec2, style: DotStyle, layout: MapLayout) -> Vec2 {
     Vec2::new(
-        (center.x - style.width / 2.0).clamp(PLOT_MIN, PLOT_MAX - style.width),
-        (center.y - style.height / 2.0).clamp(PLOT_MIN, PLOT_MAX - style.height),
+        (center.x - style.width / 2.0).clamp(layout.plot_min(), layout.plot_max() - style.width),
+        (center.y - style.height / 2.0).clamp(layout.plot_min(), layout.plot_max() - style.height),
     )
 }
 
 /// Visual encoding by kind. Every kind has a distinct size/aspect/border
 /// signature as well as a high-contrast color, avoiding color-only meaning.
-fn dot_style(kind: DotKind) -> DotStyle {
+fn dot_style(kind: DotKind, compact: bool) -> DotStyle {
+    let scale = if compact { 0.78 } else { 1.0 };
+    let scaled =
+        |width: f32, height: f32, border_width: f32, fill: Color, border: Color| DotStyle {
+            width: width * scale,
+            height: height * scale,
+            border_width,
+            fill,
+            border,
+        };
     match kind {
         // Compact square with a dark keyline.
-        DotKind::Coin => DotStyle {
-            width: 8.0,
-            height: 8.0,
-            border_width: 1.0,
-            fill: Color::srgb(1.0, 0.82, 0.05),
-            border: Color::srgb(0.20, 0.13, 0.0),
-        },
+        DotKind::Coin => scaled(
+            8.0,
+            8.0,
+            1.0,
+            Color::srgb(1.0, 0.82, 0.05),
+            Color::srgb(0.20, 0.13, 0.0),
+        ),
         // Wide dash, visually distinct from every square marker.
-        DotKind::Chicken => DotStyle {
-            width: 11.0,
-            height: 6.0,
-            border_width: 1.0,
-            fill: Color::srgb(1.0, 1.0, 1.0),
-            border: Color::srgb(0.10, 0.12, 0.16),
-        },
+        DotKind::Chicken => scaled(
+            11.0,
+            6.0,
+            1.0,
+            Color::srgb(1.0, 1.0, 1.0),
+            Color::srgb(0.10, 0.12, 0.16),
+        ),
         // Tall marker reinforces that the car points toward map north.
-        DotKind::Car => DotStyle {
-            width: 8.0,
-            height: 12.0,
-            border_width: 1.0,
-            fill: Color::srgb(1.0, 0.12, 0.18),
-            border: Color::srgb(1.0, 0.92, 0.92),
-        },
+        DotKind::Car => scaled(
+            8.0,
+            12.0,
+            1.0,
+            Color::srgb(1.0, 0.12, 0.18),
+            Color::srgb(1.0, 0.92, 0.92),
+        ),
         // Largest square and uniquely heavy border.
-        DotKind::Obstacle => DotStyle {
-            width: 11.0,
-            height: 11.0,
-            border_width: 2.0,
-            fill: Color::srgb(0.38, 0.62, 0.82),
-            border: Color::srgb(0.04, 0.08, 0.13),
-        },
+        DotKind::Obstacle => scaled(
+            11.0,
+            11.0,
+            if compact { 1.0 } else { 2.0 },
+            Color::srgb(0.38, 0.62, 0.82),
+            Color::srgb(0.04, 0.08, 0.13),
+        ),
     }
 }
 
@@ -488,9 +654,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn actual_132px_map_panel_clears_level_label_on_mobile_and_desktop() {
+    fn desktop_132px_map_panel_clears_level_label() {
         assert_eq!(PANEL_OUTER_SIZE, 136.0);
-        for viewport_width in [844.0, 1440.0] {
+        for viewport_width in [1440.0] {
             let (map, level) = minimap_and_level_bounds(viewport_width);
             // Their vertical ranges overlap (the original bug), so clearance
             // must be genuine horizontal separation rather than bad map math.
@@ -509,7 +675,7 @@ mod tests {
             DotKind::Obstacle,
         ];
         let signatures = kinds.map(|kind| {
-            let style = dot_style(kind);
+            let style = dot_style(kind, false);
             assert!(style.width > 4.0 && style.height > 4.0);
             (style.width, style.height, style.border_width)
         });
@@ -540,13 +706,26 @@ mod tests {
             DotKind::Car,
             DotKind::Obstacle,
         ] {
-            let style = dot_style(kind);
+            let layout = MapLayout::for_touch(false);
+            let style = dot_style(kind, false);
             for center in [Vec2::splat(-1000.0), Vec2::splat(1000.0)] {
-                let position = clamped_dot_position(center, style);
+                let position = clamped_dot_position(center, style, layout);
                 assert!(position.x >= PLOT_MIN && position.y >= PLOT_MIN);
                 assert!(position.x + style.width <= PLOT_MAX);
                 assert!(position.y + style.height <= PLOT_MAX);
             }
         }
+    }
+
+    #[test]
+    fn compact_projection_uses_the_actual_resized_plot_surface() {
+        let layout = MapLayout::for_touch(true);
+        assert_eq!(layout.outer_size(), 108.0);
+        let forward = project_offset_for_layout(0.0, -RANGE, 0.0, 1.0, layout).unwrap();
+        let right = project_offset_for_layout(RANGE, 0.0, 0.0, 1.0, layout).unwrap();
+        assert!((forward.x - layout.center()).abs() < 0.001);
+        assert!((forward.y - layout.plot_min()).abs() < 0.001);
+        assert!((right.x - layout.plot_max()).abs() < 0.001);
+        assert!((right.y - layout.center()).abs() < 0.001);
     }
 }

@@ -181,7 +181,7 @@ fn format_best_medal(kind: ModifierKind, best: u32) -> String {
         Medal::Silver => "SILVER",
         Medal::Gold => "GOLD",
     };
-    format!("BEST {best} · {medal}")
+    format!("BEST {best} | {medal}")
 }
 
 /// Spawn the full-screen centered overlay with a big number/word that
@@ -506,19 +506,19 @@ mod tests {
     fn best_medal_format_covers_no_medal_and_all_medals() {
         assert_eq!(
             format_best_medal(ModifierKind::Standard, 19),
-            "BEST 19 · NO MEDAL"
+            "BEST 19 | NO MEDAL"
         );
         assert_eq!(
             format_best_medal(ModifierKind::Standard, 20),
-            "BEST 20 · BRONZE"
+            "BEST 20 | BRONZE"
         );
         assert_eq!(
             format_best_medal(ModifierKind::Standard, 40),
-            "BEST 40 · SILVER"
+            "BEST 40 | SILVER"
         );
         assert_eq!(
             format_best_medal(ModifierKind::Standard, 70),
-            "BEST 70 · GOLD"
+            "BEST 70 | GOLD"
         );
     }
 
@@ -526,11 +526,21 @@ mod tests {
     fn best_medal_format_uses_the_active_conditions_thresholds() {
         assert_eq!(
             format_best_medal(ModifierKind::RushHour, 15),
-            "BEST 15 · BRONZE"
+            "BEST 15 | BRONZE"
         );
         assert_eq!(
             format_best_medal(ModifierKind::ChickenFrenzy, 20),
-            "BEST 20 · NO MEDAL"
+            "BEST 20 | NO MEDAL"
         );
+        for kind in [
+            ModifierKind::Standard,
+            ModifierKind::RushHour,
+            ModifierKind::ChickenFrenzy,
+            ModifierKind::Stampede,
+            ModifierKind::GlassCannon,
+        ] {
+            assert!(format_best_medal(kind, 40).is_ascii());
+        }
+        assert!(CountdownCue::Go.label().is_ascii());
     }
 }

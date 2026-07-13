@@ -39,10 +39,14 @@ use std::f32::consts::{FRAC_PI_2, TAU};
 
 use crate::car::{Car, DrivingSet, InputFrozen};
 use crate::game::SpawnSet;
+use crate::game::TouchStateSet;
 use crate::game::resources::RoundActive;
 use crate::game::state::GameState;
 use crate::modifiers::ActiveModifier;
 use crate::run_events::ActiveEvent;
+use crate::touch::{
+    TOUCH_LEVEL_HEIGHT, TOUCH_LEVEL_RIGHT, TOUCH_LEVEL_TOP, TOUCH_LEVEL_WIDTH, TouchControlsActive,
+};
 use crate::world::{Collider, is_road_line};
 
 // ===========================================================================
@@ -359,6 +363,12 @@ impl Plugin for DifficultyPlugin {
             // UI refresh runs in every state so the label recovers even while
             // paused; the query is trivial when the UI root is absent.
             .add_systems(Update, update_difficulty_ui)
+            .add_systems(
+                Update,
+                update_difficulty_layout
+                    .after(TouchStateSet)
+                    .run_if(in_state(GameState::Playing)),
+            )
             // Clean up traffic on round end / menu return (NOT on Paused —
             // traffic persists across pause so resume continues seamlessly).
             .add_systems(OnEnter(GameState::GameOver), cleanup_traffic)
@@ -916,34 +926,73 @@ fn spawn_one_traffic(
 /// Spawn the "Lv {level}" label. Lives only while `Playing` (despawned by
 /// [`despawn_marker::<DifficultyUiRoot>`] on exit). Positioned just below the
 /// minimap (top-right), aligned with its right edge.
-fn spawn_difficulty_ui(mut commands: Commands) {
+fn spawn_difficulty_ui(mut commands: Commands, touch: Res<TouchControlsActive>) {
     commands
         .spawn((
-            Node {
-                position_type: PositionType::Absolute,
-                top: px(UI_TOP),
-                right: px(UI_RIGHT),
-                padding: UiRect::all(px(6.0)),
-                ..default()
-            },
+            difficulty_ui_node(touch.0),
             BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.35)),
             DifficultyUiRoot,
             Text::new("Lv "),
-            TextFont {
-                font_size: FontSize::Px(18.0),
-                ..default()
-            },
+            difficulty_ui_font(touch.0),
             TextColor(crate::palette::HUD_TEXT.into()),
         ))
         .with_child((
             TextSpan::default(),
-            TextFont {
-                font_size: FontSize::Px(18.0),
-                ..default()
-            },
+            difficulty_ui_font(touch.0),
             TextColor(crate::palette::HUD_ACCENT.into()),
             DifficultyLevelText,
         ));
+}
+
+fn difficulty_ui_node(touch_active: bool) -> Node {
+    if touch_active {
+        Node {
+            position_type: PositionType::Absolute,
+            top: px(TOUCH_LEVEL_TOP),
+            right: px(TOUCH_LEVEL_RIGHT),
+            width: px(TOUCH_LEVEL_WIDTH),
+            height: px(TOUCH_LEVEL_HEIGHT),
+            align_items: AlignItems::Center,
+            justify_content: JustifyContent::Center,
+            padding: UiRect::all(px(4.0)),
+            ..default()
+        }
+    } else {
+        Node {
+            position_type: PositionType::Absolute,
+            top: px(UI_TOP),
+            right: px(UI_RIGHT),
+            padding: UiRect::all(px(6.0)),
+            ..default()
+        }
+    }
+}
+
+fn difficulty_ui_font(touch_active: bool) -> TextFont {
+    TextFont {
+        font_size: FontSize::Px(if touch_active { 14.0 } else { 18.0 }),
+        ..default()
+    }
+}
+
+fn update_difficulty_layout(
+    touch: Res<TouchControlsActive>,
+    mut roots: Query<
+        (&mut Node, &mut TextFont),
+        (With<DifficultyUiRoot>, Without<DifficultyLevelText>),
+    >,
+    mut spans: Query<&mut TextFont, (With<DifficultyLevelText>, Without<DifficultyUiRoot>)>,
+) {
+    if !touch.0 {
+        return;
+    }
+    for (mut node, mut font) in &mut roots {
+        *node = difficulty_ui_node(true);
+        *font = difficulty_ui_font(true);
+    }
+    for mut font in &mut spans {
+        *font = difficulty_ui_font(true);
+    }
 }
 
 /// Refresh the "Lv {level}" number span each frame. Runs in every state; the

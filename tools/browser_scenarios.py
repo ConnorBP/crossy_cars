@@ -41,6 +41,166 @@ MUTED_SCHEMA = "v2:100:1:0:"
 # initial localStorage wipe one-shot, so the later reload genuinely verifies
 # persistence instead of being reset by the init script.
 QA_SESSION_MARKER = "__roady_car_browser_qa_initialized"
+SCREENSHOT_POLICIES = {"all", "failure"}
+
+
+def parse_screenshot_policy(value: str | None) -> str:
+    """Parse ROADY_SCREENSHOTS without depending on Playwright or argparse."""
+    policy = "all" if value is None else value
+    if policy not in SCREENSHOT_POLICIES:
+        raise ValueError(
+            "ROADY_SCREENSHOTS must be either 'all' or 'failure' "
+            f"(got {value!r})"
+        )
+    return policy
+
+
+class FailureScreenshotRecorder:
+    """Manage one failure image plus a pre-cleanup fallback.
+
+    The class is deliberately Playwright-independent: tests can supply page
+    doubles whose ``screenshot`` method writes the requested path.
+    """
+
+    def __init__(self, policy: str, out_dir: Path, reported: list[str]) -> None:
+        self.enabled = policy == "failure"
+        self.failure_path = out_dir / "failure.png"
+        self.temp_path = out_dir / ".pre_cleanup.png"
+        self.stage_path = out_dir / ".pre_cleanup.new.png"
+        self.reported = reported
+        self.recorded = False
+        if self.enabled:
+            # Never mistake an artifact from an older run for a successful write.
+            for path in (self.failure_path, self.temp_path, self.stage_path):
+                path.unlink(missing_ok=True)
+
+    @staticmethod
+    def _remove(path: Path) -> None:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    @staticmethod
+    def _pages(preferred: Any, context: Any, browser: Any) -> list[Any]:
+        """Return every discoverable live page, preferred first."""
+        candidates: list[Any] = []
+        contexts: list[Any] = []
+        if preferred is not None:
+            candidates.append(preferred)
+        if context is not None:
+            contexts.append(context)
+        if browser is not None:
+            try:
+                contexts.extend(browser.contexts)
+            except Exception:
+                pass
+        for candidate_context in contexts:
+            try:
+                candidates.extend(candidate_context.pages)
+            except Exception:
+                pass
+        live: list[Any] = []
+        seen: set[int] = set()
+        for candidate in candidates:
+            if id(candidate) in seen:
+                continue
+            seen.add(id(candidate))
+            try:
+                if candidate.is_closed():
+                    continue
+            except Exception:
+                pass
+            live.append(candidate)
+        return live
+
+    def _write(self, page: Any, path: Path) -> bool:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            return False
+        try:
+            page.screenshot(path=str(path), full_page=True)
+        except Exception:
+            self._remove(path)
+            return False
+        return path.is_file()
+
+    def snapshot_before_cleanup(self, preferred: Any, context: Any, browser: Any) -> None:
+        """Refresh the fallback without destroying an older usable fallback."""
+        if not self.enabled or self.recorded:
+            return
+        for candidate in self._pages(preferred, context, browser):
+            if self._write(candidate, self.stage_path):
+                try:
+                    self.stage_path.replace(self.temp_path)
+                except OSError:
+                    self._remove(self.stage_path)
+                return
+
+    def promote(self) -> bool:
+        if not self.enabled or self.recorded or not self.temp_path.is_file():
+            return self.recorded
+        try:
+            self.temp_path.replace(self.failure_path)
+        except OSError:
+            return False
+        self.recorded = True
+        self.reported.append(str(self.failure_path))
+        self._remove(self.stage_path)
+        return True
+
+    def capture(self, preferred: Any, context: Any, browser: Any) -> bool:
+        """Try every live page; latch only after a screenshot write succeeds."""
+        if not self.enabled or self.recorded:
+            return self.recorded
+        for candidate in self._pages(preferred, context, browser):
+            if self._write(candidate, self.failure_path):
+                self.recorded = True
+                self.reported.append(str(self.failure_path))
+                self._remove(self.temp_path)
+                self._remove(self.stage_path)
+                return True
+        return self.promote()
+
+
+def discard_pre_cleanup_screenshot(policy: str, out_dir: Path) -> None:
+    """Remove private fallback files after the caller has declared success."""
+    if policy != "failure":
+        return
+    for path in (out_dir / ".pre_cleanup.png", out_dir / ".pre_cleanup.new.png"):
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            # The temporary file is intentionally unreported; cleanup of an
+            # auxiliary diagnostic must not turn a successful suite into failure.
+            pass
+
+
+def promote_pre_cleanup_screenshot(
+    policy: str, out_dir: Path, reported: list[str]
+) -> bool:
+    """Promote a fallback left by a failure during Playwright shutdown."""
+    if policy != "failure":
+        return False
+    failure = out_dir / "failure.png"
+    temp = out_dir / ".pre_cleanup.png"
+    if not failure.is_file() and temp.is_file():
+        try:
+            temp.replace(failure)
+        except OSError:
+            return False
+    if failure.is_file():
+        try:
+            temp.unlink(missing_ok=True)
+            (out_dir / ".pre_cleanup.new.png").unlink(missing_ok=True)
+        except OSError:
+            # failure.png is still valid and is the only reported artifact.
+            pass
+        if str(failure) not in reported:
+            reported.append(str(failure))
+        return True
+    return False
 
 
 def parse_args() -> argparse.Namespace:
@@ -70,7 +230,14 @@ def parse_args() -> argparse.Namespace:
             "Use 'chromium' for Playwright's bundled browser."
         ),
     )
-    return parser.parse_args()
+    parsed = parser.parse_args()
+    try:
+        parsed.screenshot_policy = parse_screenshot_policy(
+            os.environ.get("ROADY_SCREENSHOTS")
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
+    return parsed
 
 
 def resolve_browser_channel(value: str) -> str | None:
@@ -174,15 +341,27 @@ def run_scenario(args: argparse.Namespace, summary: dict[str, Any]) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     summary["out_dir"] = str(out_dir)
 
-    # Import here so a missing dependency can still produce the JSON report
-    # (and after mkdir so the requested artifact directory always exists).
+    recorder = FailureScreenshotRecorder(
+        args.screenshot_policy, out_dir, summary["screenshots"]
+    )
+
+    # Import here so a missing dependency can still produce the JSON report.
+    # Recorder construction above also clears stale artifacts first.
     from playwright.sync_api import sync_playwright
 
     browser = None
     context = None
+    page = None
     cleanup_errors: list[str] = summary["cleanup_errors"]
+    playwright_instance = None
 
-    with sync_playwright() as playwright:
+    def capture_failure_screenshot() -> None:
+        """Best-effort evidence; all live pages precede the saved fallback."""
+        recorder.capture(page, context, browser)
+
+    try:
+        playwright_instance = sync_playwright().start()
+        playwright = playwright_instance
         try:
             # Local runs exercise installed Chrome by default; CI can select
             # Playwright's installed Chromium without changing local behavior.
@@ -275,6 +454,8 @@ def run_scenario(args: argparse.Namespace, summary: dict[str, Any]) -> None:
             page.on("response", on_response)
 
             def screenshot(filename: str) -> None:
+                if args.screenshot_policy == "failure":
+                    return
                 path = out_dir / filename
                 page.screenshot(path=str(path), full_page=True)
                 summary["screenshots"].append(str(path))
@@ -464,17 +645,89 @@ def run_scenario(args: argparse.Namespace, summary: dict[str, Any]) -> None:
                 not summary["http_errors"],
                 f"observed {len(summary['http_errors'])} HTTP error response(s)",
             )
+        except Exception:
+            capture_failure_screenshot()
+            raise
         finally:
+            primary_failure_active = sys.exc_info()[0] is not None
+            cleanup_failure: tuple[Exception, Any] | None = None
             if context is not None:
+                recorder.snapshot_before_cleanup(page, context, browser)
                 try:
                     context.close()
                 except Exception as exc:
                     cleanup_errors.append(f"context.close: {type(exc).__name__}: {exc}")
+                    capture_failure_screenshot()
+                    cleanup_failure = (exc, exc.__traceback__)
             if browser is not None:
                 try:
                     browser.close()
                 except Exception as exc:
                     cleanup_errors.append(f"browser.close: {type(exc).__name__}: {exc}")
+                    capture_failure_screenshot()
+                    if cleanup_failure is None:
+                        cleanup_failure = (exc, exc.__traceback__)
+
+            if not primary_failure_active:
+                if cleanup_failure is not None:
+                    capture_failure_screenshot()
+                    exc, tb = cleanup_failure
+                    raise exc.with_traceback(tb)
+                try:
+                    assert_condition(
+                        not summary["console_errors"],
+                        f"observed {len(summary['console_errors'])} console.error message(s)",
+                    )
+                    assert_condition(
+                        not summary["page_errors"],
+                        f"observed {len(summary['page_errors'])} pageerror event(s)",
+                    )
+                    assert_condition(
+                        not summary["network_failures"],
+                        f"observed {len(summary['network_failures'])} failed request(s)",
+                    )
+                    assert_condition(
+                        not summary["http_errors"],
+                        f"observed {len(summary['http_errors'])} HTTP error response(s)",
+                    )
+                except Exception:
+                    capture_failure_screenshot()
+                    raise
+            else:
+                capture_failure_screenshot()
+    finally:
+        stop_failure_active = sys.exc_info()[0] is not None
+        try:
+            if playwright_instance is not None:
+                playwright_instance.stop()
+        except Exception as exc:
+            cleanup_errors.append(f"playwright.stop: {type(exc).__name__}: {exc}")
+            capture_failure_screenshot()
+            if not stop_failure_active:
+                raise
+        if not stop_failure_active:
+            try:
+                assert_condition(
+                    not summary["console_errors"],
+                    f"observed {len(summary['console_errors'])} console.error message(s)",
+                )
+                assert_condition(
+                    not summary["page_errors"],
+                    f"observed {len(summary['page_errors'])} pageerror event(s)",
+                )
+                assert_condition(
+                    not summary["network_failures"],
+                    f"observed {len(summary['network_failures'])} failed request(s)",
+                )
+                assert_condition(
+                    not summary["http_errors"],
+                    f"observed {len(summary['http_errors'])} HTTP error response(s)",
+                )
+            except Exception:
+                capture_failure_screenshot()
+                raise
+        else:
+            capture_failure_screenshot()
 
 
 def main() -> int:
@@ -521,11 +774,17 @@ def main() -> int:
             not summary["http_errors"],
             f"observed {len(summary['http_errors'])} HTTP error response(s)",
         )
-        if summary["cleanup_errors"]:
-            raise RuntimeError("browser cleanup reported errors")
         summary["status"] = "passed"
+        discard_pre_cleanup_screenshot(
+            args.screenshot_policy, Path(args.out_dir).expanduser().resolve()
+        )
     except Exception as exc:
         exit_code = 1
+        promote_pre_cleanup_screenshot(
+            args.screenshot_policy,
+            Path(args.out_dir).expanduser().resolve(),
+            summary["screenshots"],
+        )
         summary["status"] = "failed"
         summary["failure"] = {
             "type": type(exc).__name__,

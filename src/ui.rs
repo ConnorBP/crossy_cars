@@ -13,7 +13,7 @@ use crate::persist::{
 use crate::settings::Settings;
 use crate::touch::{
     TOUCH_COCKPIT_HEIGHT, TOUCH_COCKPIT_LEFT, TOUCH_COCKPIT_TOP, TOUCH_COCKPIT_WIDTH,
-    TouchControlsActive,
+    TOUCH_TIMER_HEIGHT, TOUCH_TIMER_RIGHT, TOUCH_TIMER_TOP, TOUCH_TIMER_WIDTH, TouchControlsActive,
 };
 
 /// One shared breakpoint for every cross-plugin UI decision. Landscape phones
@@ -136,7 +136,7 @@ fn condition_summary(kind: ModifierKind, best: u32) -> String {
     let prefix = format!("{} BEST: {}", kind.display_name(), best);
     match medal_for(kind, best) {
         Medal::None => prefix,
-        medal => format!("{prefix} · {}", medal.label()),
+        medal => format!("{prefix} | {}", medal.label()),
     }
 }
 
@@ -353,6 +353,12 @@ struct CockpitRoot;
 #[derive(Component)]
 struct CompactCockpitApplied;
 #[derive(Component)]
+struct CockpitSecondaryInfo;
+#[derive(Component)]
+struct TimerRoot;
+#[derive(Component)]
+struct TimerLabel;
+#[derive(Component)]
 struct HintRoot;
 #[derive(Component)]
 struct PauseRoot;
@@ -436,6 +442,7 @@ impl Plugin for UiPlugin {
                     update_timer_text,
                     update_hint.after(TouchStateSet),
                     update_cockpit_layout.after(TouchStateSet),
+                    update_timer_layout.after(TouchStateSet),
                 )
                     .run_if(in_state(GameState::Playing)),
             )
@@ -495,7 +502,7 @@ fn spawn_menu(mut commands: Commands, condition_bests: Res<ConditionBests>) {
             // Compact controls stay legible without pushing the five-row
             // gallery or start affordance below a short mobile viewport.
             p.spawn((
-                Text::new("WASD / Arrows — Drive   •   Space — Brake   •   Esc — Pause"),
+                Text::new("WASD / Arrows - Drive   |   Space - Brake   |   Esc - Pause"),
                 TextFont {
                     font_size: FontSize::Px(13.0),
                     ..default()
@@ -598,222 +605,296 @@ fn spawn_hud(
     touch: Res<TouchControlsActive>,
 ) {
     // --- Top-left cockpit cluster on a semi-transparent panel ---
-    commands
-        .spawn((
-            cockpit_root_node(touch.0),
-            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.35)),
-            HudRoot,
-            CockpitRoot,
-        ))
-        .with_children(|p| {
-            // SPEED label
-            p.spawn((
-                Text::new("SPEED"),
-                TextFont {
-                    font_size: FontSize::Px(13.0),
-                    ..default()
-                },
-                TextColor(Color::srgba(0.75, 0.75, 0.8, 1.0).into()),
-                Node {
-                    margin: UiRect::bottom(px(2.0)),
-                    ..default()
-                },
-            ));
-            // Big digital speed (40px accent) + smaller " u/s" unit, laid out inline.
-            p.spawn((Node {
-                flex_direction: FlexDirection::Row,
-                align_items: AlignItems::End,
-                margin: UiRect::bottom(px(6.0)),
+    let mut cockpit = commands.spawn((
+        cockpit_root_node(touch.0),
+        BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.35)),
+        HudRoot,
+        CockpitRoot,
+    ));
+    if touch.0 {
+        cockpit.insert(CompactCockpitApplied);
+    }
+    cockpit.with_children(|p| {
+        // SPEED label
+        p.spawn((
+            Text::new("SPEED"),
+            TextFont {
+                font_size: FontSize::Px(cockpit_font_size(13.0, touch.0)),
                 ..default()
-            },))
-                .with_children(|s| {
-                    s.spawn((
-                        Text::new(""),
-                        TextFont {
-                            font_size: FontSize::Px(40.0),
-                            ..default()
-                        },
-                        TextColor(palette::HUD_ACCENT.into()),
-                    ))
-                    .with_child((
-                        TextSpan::default(),
-                        TextFont {
-                            font_size: FontSize::Px(40.0),
-                            ..default()
-                        },
-                        TextColor(palette::HUD_ACCENT.into()),
-                        SpeedText,
-                    ));
-                    s.spawn((
-                        Text::new(" u/s"),
-                        TextFont {
-                            font_size: FontSize::Px(20.0),
-                            ..default()
-                        },
-                        TextColor(palette::HUD_TEXT.into()),
-                        Node {
-                            margin: UiRect::left(px(4.0)),
-                            ..default()
-                        },
-                    ));
-                });
-            // Gear / direction line
-            p.spawn((
-                Text::new("GEAR "),
-                TextFont {
-                    font_size: FontSize::Px(18.0),
-                    ..default()
-                },
-                TextColor(Color::srgba(0.75, 0.75, 0.8, 1.0).into()),
-                Node {
-                    margin: UiRect::bottom(px(6.0)),
-                    ..default()
-                },
-            ))
-            .with_child((
-                TextSpan::default(),
-                TextFont {
-                    font_size: FontSize::Px(18.0),
-                    ..default()
-                },
-                TextColor(palette::HUD_ACCENT.into()),
-                GearText,
-            ));
-            // SCORE label
-            p.spawn((
-                Text::new("SCORE"),
-                TextFont {
-                    font_size: FontSize::Px(13.0),
-                    ..default()
-                },
-                TextColor(Color::srgba(0.75, 0.75, 0.8, 1.0).into()),
-                Node {
-                    margin: UiRect {
-                        top: px(8.0),
-                        bottom: px(2.0),
+            },
+            TextColor(Color::srgba(0.75, 0.75, 0.8, 1.0).into()),
+            Node {
+                margin: UiRect::bottom(px(cockpit_margin(2.0, touch.0))),
+                ..default()
+            },
+        ));
+        // Big digital speed (40px accent) + smaller " u/s" unit, laid out inline.
+        p.spawn((Node {
+            flex_direction: FlexDirection::Row,
+            align_items: AlignItems::End,
+            margin: UiRect::bottom(px(cockpit_margin(6.0, touch.0))),
+            ..default()
+        },))
+            .with_children(|s| {
+                s.spawn((
+                    Text::new(""),
+                    TextFont {
+                        font_size: FontSize::Px(cockpit_font_size(40.0, touch.0)),
                         ..default()
                     },
-                    ..default()
-                },
-            ));
-            // Big score number (chickens + coins)
-            p.spawn((
-                Text::new(""),
-                TextFont {
-                    font_size: FontSize::Px(36.0),
-                    ..default()
-                },
-                TextColor(palette::HUD_ACCENT.into()),
-                Node {
-                    margin: UiRect::bottom(px(6.0)),
-                    ..default()
-                },
-            ))
-            .with_child((
-                TextSpan::default(),
-                TextFont {
-                    font_size: FontSize::Px(36.0),
-                    ..default()
-                },
-                TextColor(palette::HUD_ACCENT.into()),
-                ScoreText,
-            ));
-            // Chickens line
-            p.spawn((
-                Text::new("Chickens: "),
-                TextFont {
-                    font_size: FontSize::Px(20.0),
-                    ..default()
-                },
-                TextColor(palette::HUD_TEXT.into()),
-                Node {
-                    margin: UiRect::bottom(px(2.0)),
-                    ..default()
-                },
-            ))
-            .with_child((
-                TextSpan::default(),
-                TextFont {
-                    font_size: FontSize::Px(20.0),
-                    ..default()
-                },
-                TextColor(palette::HUD_ACCENT.into()),
-                ChickensText,
-            ));
-            // Coins line
-            p.spawn((
-                Text::new("Coins: "),
-                TextFont {
-                    font_size: FontSize::Px(20.0),
-                    ..default()
-                },
-                TextColor(palette::HUD_TEXT.into()),
-                Node {
-                    margin: UiRect::bottom(px(8.0)),
-                    ..default()
-                },
-            ))
-            .with_child((
-                TextSpan::default(),
-                TextFont {
-                    font_size: FontSize::Px(20.0),
-                    ..default()
-                },
-                TextColor(palette::HUD_ACCENT.into()),
-                CoinsText,
-            ));
-            // Current road condition. It is created once with the HUD and
-            // removed by the existing HudRoot lifecycle (including pauses).
-            p.spawn((
-                Text::new("ROAD CONDITION"),
-                TextFont {
-                    font_size: FontSize::Px(12.0),
-                    ..default()
-                },
-                TextColor(Color::srgba(0.75, 0.75, 0.8, 1.0).into()),
-                Node {
-                    margin: UiRect::bottom(px(1.0)),
-                    ..default()
-                },
-            ));
-            p.spawn((
-                Text::new(active_modifier.display_name()),
-                TextFont {
-                    font_size: FontSize::Px(18.0),
-                    ..default()
-                },
-                TextColor(active_modifier.color()),
-            ));
-        });
-
-    // --- Timer (top-right) ---
-    commands
-        .spawn((
-            Node {
-                position_type: PositionType::Absolute,
-                top: px(12.0),
-                right: px(16.0),
-                padding: UiRect::axes(px(9.0), px(7.0)),
-                ..default()
-            },
-            BackgroundColor(Color::srgba(0.015, 0.02, 0.035, 0.72)),
-            HudRoot,
-            Text::new("Time Left: "),
+                    TextColor(palette::HUD_ACCENT.into()),
+                ))
+                .with_child((
+                    TextSpan::default(),
+                    TextFont {
+                        font_size: FontSize::Px(cockpit_font_size(40.0, touch.0)),
+                        ..default()
+                    },
+                    TextColor(palette::HUD_ACCENT.into()),
+                    SpeedText,
+                ));
+                s.spawn((
+                    Text::new(" u/s"),
+                    TextFont {
+                        font_size: FontSize::Px(cockpit_font_size(20.0, touch.0)),
+                        ..default()
+                    },
+                    TextColor(palette::HUD_TEXT.into()),
+                    Node {
+                        margin: UiRect::left(px(cockpit_margin(4.0, touch.0))),
+                        ..default()
+                    },
+                ));
+            });
+        // Gear / direction line
+        p.spawn((
+            Text::new("GEAR "),
             TextFont {
-                font_size: FontSize::Px(24.0),
+                font_size: FontSize::Px(cockpit_font_size(18.0, touch.0)),
                 ..default()
             },
-            TextColor(palette::HUD_TEXT.into()),
+            TextColor(Color::srgba(0.75, 0.75, 0.8, 1.0).into()),
+            Node {
+                margin: UiRect::bottom(px(cockpit_margin(6.0, touch.0))),
+                ..default()
+            },
         ))
         .with_child((
             TextSpan::default(),
             TextFont {
-                font_size: FontSize::Px(24.0),
+                font_size: FontSize::Px(cockpit_font_size(18.0, touch.0)),
                 ..default()
             },
             TextColor(palette::HUD_ACCENT.into()),
+            GearText,
+        ));
+        // SCORE label
+        p.spawn((
+            Text::new("SCORE"),
+            TextFont {
+                font_size: FontSize::Px(13.0),
+                ..default()
+            },
+            TextColor(Color::srgba(0.75, 0.75, 0.8, 1.0).into()),
+            Node {
+                margin: UiRect {
+                    top: px(8.0),
+                    bottom: px(2.0),
+                    ..default()
+                },
+                display: if touch.0 {
+                    Display::None
+                } else {
+                    Display::Flex
+                },
+                ..default()
+            },
+            CockpitSecondaryInfo,
+        ));
+        // Big score number (chickens + coins)
+        p.spawn((
+            Text::new(""),
+            TextFont {
+                font_size: FontSize::Px(36.0),
+                ..default()
+            },
+            TextColor(palette::HUD_ACCENT.into()),
+            Node {
+                margin: UiRect::bottom(px(6.0)),
+                display: if touch.0 {
+                    Display::None
+                } else {
+                    Display::Flex
+                },
+                ..default()
+            },
+            CockpitSecondaryInfo,
+        ))
+        .with_child((
+            TextSpan::default(),
+            TextFont {
+                font_size: FontSize::Px(36.0),
+                ..default()
+            },
+            TextColor(palette::HUD_ACCENT.into()),
+            ScoreText,
+        ));
+        // Chickens line
+        p.spawn((
+            Text::new("Chickens: "),
+            TextFont {
+                font_size: FontSize::Px(20.0),
+                ..default()
+            },
+            TextColor(palette::HUD_TEXT.into()),
+            Node {
+                margin: UiRect::bottom(px(2.0)),
+                display: if touch.0 {
+                    Display::None
+                } else {
+                    Display::Flex
+                },
+                ..default()
+            },
+            CockpitSecondaryInfo,
+        ))
+        .with_child((
+            TextSpan::default(),
+            TextFont {
+                font_size: FontSize::Px(20.0),
+                ..default()
+            },
+            TextColor(palette::HUD_ACCENT.into()),
+            ChickensText,
+        ));
+        // Coins line
+        p.spawn((
+            Text::new("Coins: "),
+            TextFont {
+                font_size: FontSize::Px(20.0),
+                ..default()
+            },
+            TextColor(palette::HUD_TEXT.into()),
+            Node {
+                margin: UiRect::bottom(px(8.0)),
+                display: if touch.0 {
+                    Display::None
+                } else {
+                    Display::Flex
+                },
+                ..default()
+            },
+            CockpitSecondaryInfo,
+        ))
+        .with_child((
+            TextSpan::default(),
+            TextFont {
+                font_size: FontSize::Px(20.0),
+                ..default()
+            },
+            TextColor(palette::HUD_ACCENT.into()),
+            CoinsText,
+        ));
+        // Current road condition. It is created once with the HUD and
+        // removed by the existing HudRoot lifecycle (including pauses).
+        p.spawn((
+            Text::new("ROAD CONDITION"),
+            TextFont {
+                font_size: FontSize::Px(12.0),
+                ..default()
+            },
+            TextColor(Color::srgba(0.75, 0.75, 0.8, 1.0).into()),
+            Node {
+                margin: UiRect::bottom(px(1.0)),
+                display: if touch.0 {
+                    Display::None
+                } else {
+                    Display::Flex
+                },
+                ..default()
+            },
+            CockpitSecondaryInfo,
+        ));
+        p.spawn((
+            Text::new(active_modifier.display_name()),
+            TextFont {
+                font_size: FontSize::Px(18.0),
+                ..default()
+            },
+            TextColor(active_modifier.color()),
+            Node {
+                display: if touch.0 {
+                    Display::None
+                } else {
+                    Display::Flex
+                },
+                ..default()
+            },
+            CockpitSecondaryInfo,
+        ));
+    });
+
+    // --- Timer (top-right) ---
+    commands
+        .spawn((
+            timer_root_node(touch.0),
+            BackgroundColor(Color::srgba(0.015, 0.02, 0.035, 0.72)),
+            HudRoot,
+            TimerRoot,
+            TimerLabel,
+            Text::new(if touch.0 { "TIME " } else { "Time Left: " }),
+            timer_font(touch.0),
+            TextColor(palette::HUD_TEXT.into()),
+        ))
+        .with_child((
+            TextSpan::default(),
+            timer_font(touch.0),
+            TextColor(palette::HUD_ACCENT.into()),
             TimerText,
         ));
+}
+
+fn timer_root_node(touch_active: bool) -> Node {
+    if touch_active {
+        Node {
+            position_type: PositionType::Absolute,
+            top: px(TOUCH_TIMER_TOP),
+            right: px(TOUCH_TIMER_RIGHT),
+            width: px(TOUCH_TIMER_WIDTH),
+            height: px(TOUCH_TIMER_HEIGHT),
+            align_items: AlignItems::Center,
+            justify_content: JustifyContent::Center,
+            padding: UiRect::axes(px(6.0), px(4.0)),
+            ..default()
+        }
+    } else {
+        Node {
+            position_type: PositionType::Absolute,
+            top: px(12.0),
+            right: px(16.0),
+            padding: UiRect::axes(px(9.0), px(7.0)),
+            ..default()
+        }
+    }
+}
+
+fn timer_font(touch_active: bool) -> TextFont {
+    TextFont {
+        font_size: FontSize::Px(if touch_active { 16.0 } else { 24.0 }),
+        ..default()
+    }
+}
+
+fn cockpit_font_size(size: f32, touch_active: bool) -> f32 {
+    if touch_active {
+        if size >= 30.0 { 17.0 } else { 12.0 }
+    } else {
+        size
+    }
+}
+
+fn cockpit_margin(size: f32, touch_active: bool) -> f32 {
+    if touch_active { size * 0.3 } else { size }
 }
 
 fn cockpit_root_node(touch_active: bool) -> Node {
@@ -825,7 +906,7 @@ fn cockpit_root_node(touch_active: bool) -> Node {
             width: px(TOUCH_COCKPIT_WIDTH),
             height: px(TOUCH_COCKPIT_HEIGHT),
             flex_direction: FlexDirection::Column,
-            padding: UiRect::all(px(6.0)),
+            padding: UiRect::all(px(5.0)),
             ..default()
         }
     } else {
@@ -843,18 +924,18 @@ fn cockpit_root_node(touch_active: bool) -> Node {
 fn scale_cockpit_descendant(
     entity: Entity,
     children: &Query<&Children>,
-    fonts: &mut Query<&mut TextFont>,
-    nodes: &mut Query<&mut Node>,
+    fonts: &mut Query<&mut TextFont, (Without<TimerRoot>, Without<CockpitSecondaryInfo>)>,
+    nodes: &mut Query<&mut Node, (Without<TimerRoot>, Without<CockpitSecondaryInfo>)>,
 ) {
     if let Ok(mut font) = fonts.get_mut(entity) {
         if let FontSize::Px(size) = font.font_size {
-            font.font_size = FontSize::Px((size * 0.35).max(7.0));
+            font.font_size = FontSize::Px(if size >= 30.0 { 17.0 } else { 12.0 });
         }
     }
     if let Ok(mut node) = nodes.get_mut(entity) {
         let scale = |value: &mut Val| {
             if let Val::Px(pixels) = value {
-                *pixels *= 0.25;
+                *pixels *= 0.3;
             }
         };
         scale(&mut node.margin.left);
@@ -876,12 +957,16 @@ fn update_cockpit_layout(
     mut commands: Commands,
     touch: Res<TouchControlsActive>,
     roots: Query<(Entity, Option<&CompactCockpitApplied>), With<CockpitRoot>>,
+    mut secondary_nodes: Query<&mut Node, With<CockpitSecondaryInfo>>,
     children: Query<&Children>,
-    mut fonts: Query<&mut TextFont>,
-    mut nodes: Query<&mut Node>,
+    mut fonts: Query<&mut TextFont, (Without<TimerRoot>, Without<CockpitSecondaryInfo>)>,
+    mut nodes: Query<&mut Node, (Without<TimerRoot>, Without<CockpitSecondaryInfo>)>,
 ) {
     if !touch.0 {
         return;
+    }
+    for mut node in &mut secondary_nodes {
+        node.display = Display::None;
     }
     for (entity, applied) in &roots {
         if let Ok(mut node) = nodes.get_mut(entity) {
@@ -895,6 +980,27 @@ fn update_cockpit_layout(
             }
             commands.entity(entity).insert(CompactCockpitApplied);
         }
+    }
+}
+
+fn update_timer_layout(
+    touch: Res<TouchControlsActive>,
+    mut roots: Query<
+        (&mut Node, &mut TextFont, &mut Text),
+        (With<TimerRoot>, With<TimerLabel>, Without<TimerText>),
+    >,
+    mut spans: Query<&mut TextFont, (With<TimerText>, Without<TimerRoot>)>,
+) {
+    if !touch.0 {
+        return;
+    }
+    for (mut node, mut font, mut text) in &mut roots {
+        *node = timer_root_node(true);
+        *font = timer_font(true);
+        **text = "TIME ".to_string();
+    }
+    for mut font in &mut spans {
+        *font = timer_font(true);
     }
 }
 
@@ -933,7 +1039,7 @@ fn spawn_hint(mut commands: Commands, touch_active: Res<TouchControlsActive>) {
                 BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.45)),
             ))
             .with_child((
-                Text::new("WASD to drive  •  Space to brake  •  Esc to pause"),
+                Text::new("WASD to drive  |  Space to brake  |  Esc to pause"),
                 TextFont {
                     font_size: FontSize::Px(16.0),
                     ..default()
@@ -974,7 +1080,7 @@ fn spawn_pause(mut commands: Commands) {
                 },
             ));
             p.spawn((
-                Text::new("ESC  Resume  •  R  Restart  •  Q  Menu"),
+                Text::new("ESC  Resume  |  R  Restart  |  Q  Menu"),
                 TextFont {
                     font_size: FontSize::Px(26.0),
                     ..default()
@@ -1185,7 +1291,7 @@ fn spawn_gameover(
             ));
             // Restart / menu prompt
             p.spawn((
-                Text::new("R / ENTER / SPACE to play again  •  Q / ESC for menu"),
+                Text::new("R / ENTER / SPACE to play again  |  Q / ESC for menu"),
                 TextFont {
                     font_size: FontSize::Px(layout.prompt.font),
                     ..default()
@@ -1434,15 +1540,15 @@ mod tests {
         );
         assert_eq!(
             condition_summary(ModifierKind::Standard, 20),
-            "Standard BEST: 20 · Bronze"
+            "Standard BEST: 20 | Bronze"
         );
         assert_eq!(
             condition_summary(ModifierKind::RushHour, 30),
-            "Rush Hour BEST: 30 · Silver"
+            "Rush Hour BEST: 30 | Silver"
         );
         assert_eq!(
             condition_summary(ModifierKind::GlassCannon, 80),
-            "Glass Cannon BEST: 80 · Gold"
+            "Glass Cannon BEST: 80 | Gold"
         );
     }
 
@@ -1459,6 +1565,22 @@ mod tests {
         assert!(is_medal_upgrade(Medal::None, Medal::Gold));
         assert!(!is_medal_upgrade(Medal::Bronze, Medal::Bronze));
         assert!(!is_medal_upgrade(Medal::Gold, Medal::Silver));
+    }
+
+    #[test]
+    fn rendered_static_labels_are_ascii() {
+        for label in [
+            "ROADY CAR",
+            "Hit wandering chickens for score!\nCoins give bonus time.",
+            "WASD / Arrows - Drive   |   Space - Brake   |   Esc - Pause",
+            "B/S/G = BRONZE/SILVER/GOLD   [X] EARNED   [-] LOCKED",
+            "Press ENTER / SPACE to drive",
+            "WASD to drive  |  Space to brake  |  Esc to pause",
+            "ESC  Resume  |  R  Restart  |  Q  Menu",
+            "R / ENTER / SPACE to play again  |  Q / ESC for menu",
+        ] {
+            assert!(label.is_ascii(), "{label:?}");
+        }
     }
 
     #[test]
