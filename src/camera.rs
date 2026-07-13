@@ -12,6 +12,7 @@ use crate::game::events::ObstacleHit;
 use crate::game::resources::GameConfig;
 use crate::game::state::GameState;
 use crate::settings::Settings;
+use crate::world::world_review_bounds;
 
 /// Exponential smoothing rate for camera follow / zoom (higher = snappier).
 const SMOOTH: f32 = 4.0;
@@ -53,6 +54,75 @@ fn configure_obstacle_feedback_order(app: &mut App) {
 }
 
 pub struct CameraPlugin;
+
+/// Fixed overhead camera used only by `?world_review=1`. It has no follow,
+/// shake, speed zoom, bloom, or other frame-dependent behavior.
+pub struct WorldReviewCameraPlugin;
+
+impl Plugin for WorldReviewCameraPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(Startup, spawn_world_review_camera)
+            .add_systems(Update, fit_world_review_camera);
+    }
+}
+
+const REVIEW_FRAME_MARGIN: f32 = 1.04;
+
+/// Fit both dimensions, including portrait viewports. Returned values are
+/// `(viewport_height, center_x, center_z)` and are pure for focused tests.
+fn review_projection_for_bounds(min: Vec2, max: Vec2, aspect: f32) -> (f32, f32, f32) {
+    let width = (max.x - min.x).max(1.0);
+    let height = (max.y - min.y).max(1.0);
+    let aspect = if aspect.is_finite() && aspect > 0.0 {
+        aspect
+    } else {
+        1.0
+    };
+    let viewport_height = height.max(width / aspect) * REVIEW_FRAME_MARGIN;
+    (
+        viewport_height,
+        (min.x + max.x) * 0.5,
+        (min.y + max.y) * 0.5,
+    )
+}
+
+fn spawn_world_review_camera(mut commands: Commands) {
+    let (min, max) = world_review_bounds();
+    let (viewport_height, center_x, center_z) = review_projection_for_bounds(min, max, 4.0 / 3.0);
+    commands.spawn((
+        Camera3d::default(),
+        Msaa::Sample4,
+        Tonemapping::TonyMcMapface,
+        Projection::from(OrthographicProjection {
+            scaling_mode: ScalingMode::FixedVertical { viewport_height },
+            ..OrthographicProjection::default_3d()
+        }),
+        Transform::from_xyz(center_x, 400.0, center_z)
+            .looking_at(Vec3::new(center_x, 0.0, center_z), Vec3::NEG_Z),
+    ));
+}
+
+fn fit_world_review_camera(
+    windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
+    mut cameras: Query<(&mut Transform, &mut Projection), With<Camera3d>>,
+) {
+    let Ok(window) = windows.single() else { return };
+    let width = window.resolution.width();
+    let height = window.resolution.height();
+    if width <= 0.0 || height <= 0.0 {
+        return;
+    }
+    let (min, max) = world_review_bounds();
+    let (viewport_height, center_x, center_z) =
+        review_projection_for_bounds(min, max, width / height);
+    for (mut transform, mut projection) in &mut cameras {
+        if let Projection::Orthographic(orthographic) = &mut *projection {
+            orthographic.scaling_mode = ScalingMode::FixedVertical { viewport_height };
+        }
+        *transform = Transform::from_xyz(center_x, 400.0, center_z)
+            .looking_at(Vec3::new(center_x, 0.0, center_z), Vec3::NEG_Z);
+    }
+}
 
 impl Plugin for CameraPlugin {
     fn build(&self, app: &mut App) {
@@ -235,9 +305,9 @@ fn camera_viewport_height(
 mod tests {
     use super::{
         CameraObstacleFeedbackSet, camera_viewport_height, configure_obstacle_feedback_order,
-        next_trauma,
+        next_trauma, review_projection_for_bounds,
     };
-    use crate::car::DrivingSet;
+    use crate::{car::DrivingSet, world::world_review_bounds};
     use bevy::prelude::*;
 
     #[derive(Resource, Default)]
@@ -249,6 +319,33 @@ mod tests {
 
     fn record_feedback(mut order: ResMut<ExecutionOrder>) {
         order.0.push("camera feedback");
+    }
+
+    #[test]
+    fn review_projection_fits_landscape_portrait_and_target_bounds() {
+        let (min, max) = world_review_bounds();
+        let targets = [
+            min,
+            max,
+            Vec2::new(min.x, max.y),
+            Vec2::new(max.x, min.y),
+            Vec2::ZERO,
+        ];
+        for aspect in [16.0 / 9.0, 4.0 / 3.0, 9.0 / 16.0] {
+            let (height, center_x, center_z) = review_projection_for_bounds(min, max, aspect);
+            let half_width = height * aspect * 0.5;
+            let half_height = height * 0.5;
+            assert!(targets.iter().all(|target| {
+                (target.x - center_x).abs() <= half_width
+                    && (target.y - center_z).abs() <= half_height
+            }));
+        }
+    }
+
+    #[test]
+    fn review_projection_sanitizes_unsupported_aspect() {
+        let (height, _, _) = review_projection_for_bounds(Vec2::ZERO, Vec2::new(200.0, 100.0), 0.0);
+        assert!(height >= 200.0);
     }
 
     #[test]

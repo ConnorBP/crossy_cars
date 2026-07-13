@@ -38,6 +38,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use bevy::color::LinearRgba;
 use bevy::math::primitives::Circle;
 use bevy::prelude::*;
+use serde::Serialize;
 
 use crate::car::{Car, DrivingSet, InputFrozen};
 use crate::game::SpawnSet;
@@ -49,6 +50,10 @@ use crate::textures::TextureAssets;
 
 /// Gate real-time shadows off on WebGL2 for performance.
 const SHADOWS: bool = cfg!(not(target_arch = "wasm32"));
+
+/// Stable review/export seed. Production generation itself is coordinate
+/// seeded and unchanged; this only documents the harness contract.
+const REVIEW_SEED: u32 = 0;
 
 /// Tag for coin entities (environment now — spawned inside blocks, recycled
 /// with them, collected on pickup and respawned when the block re-populates).
@@ -148,8 +153,8 @@ pub enum Edge {
 /// A Wang-tile kind from the road-network tile set. Each variant fixes the
 /// `Edge` socket on each of the four sides (W, E, S, N). The set is
 /// **complete**: for any combination of fixed-edge constraints there is at
-/// least one `TileKind` whose sockets match (see `ALL_TILES` / `tile_from_edges`).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// least one `TileKind` whose sockets match (see `TILE_CATALOG` / `tile_from_edges`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize)]
 pub enum TileKind {
     /// All edges None — a full block of buildings.
     Empty,
@@ -283,11 +288,10 @@ fn window_row_heights(height: f32) -> Vec<f32> {
         .collect()
 }
 
-/// All tiles in the set (used by `tile_from_edges` to find matches). Includes the
-/// four single-edge `Stub*` tiles so the set is COMPLETE: every fixed-edge
-/// combination (including a single fixed-Road edge with the rest free) has at
-/// least one matching tile.
-const ALL_TILES: [TileKind; 19] = [
+/// Stable review/catalog order for every production tile kind. This complete
+/// set includes the four single-edge stubs, so every socket combination has a
+/// match. The world-review atlas and JSON intentionally share this ordering.
+pub const TILE_CATALOG: [TileKind; 19] = [
     TileKind::Empty,
     TileKind::Park,
     TileKind::Field,
@@ -388,7 +392,7 @@ fn tile_from_edges(gx: i32, gz: i32) -> TileKind {
     // Find the tile whose sockets match (W,E,S,N) exactly. There is exactly
     // one for every non-all-None combo (the set is complete + each non-empty
     // combo has a unique tile).
-    ALL_TILES
+    TILE_CATALOG
         .iter()
         .copied()
         .find(|&k| {
@@ -800,6 +804,42 @@ impl FromWorld for WorldAssets {
 
 pub struct WorldPlugin;
 
+/// Explicit review-harness gate. This resource is never inserted by
+/// `WorldPlugin`, so production entities keep their normal archetypes.
+#[derive(Resource, Default)]
+struct WorldReviewMode;
+
+/// Marker attached only to roots in the deterministic review scene.
+#[derive(Component, Clone, Copy)]
+struct ReviewTile {
+    kind: TileKind,
+    source: ReviewTileSource,
+    catalog_index: Option<usize>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ReviewTileSource {
+    Production,
+    Atlas,
+}
+
+/// Minimal, gameplay-free production-world review plugin. It deliberately
+/// reuses `tile_from_edges`, `seed_for`, and `populate_block`; only selection,
+/// placement, and reporting differ from the streaming game world.
+pub struct WorldReviewPlugin;
+
+impl Plugin for WorldReviewPlugin {
+    fn build(&self, app: &mut App) {
+        app.insert_resource(WorldReviewMode)
+            .init_resource::<GridConfig>()
+            .init_resource::<WorldAssets>()
+            .add_systems(Startup, spawn_review_world)
+            // This marker means only that the ECS scene and metadata exist.
+            // Pixel/render readiness is deliberately owned by the capture tool.
+            .add_systems(Update, publish_review_metadata);
+    }
+}
+
 impl Plugin for WorldPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<GridConfig>()
@@ -902,6 +942,377 @@ fn spawn_grid_window(
 /// function of (gx, gz).
 fn seed_for(gx: i32, gz: i32) -> u32 {
     (gx as u32).wrapping_mul(1664525) ^ (gz as u32).wrapping_mul(22695477).wrapping_add(0x9e3779b9)
+}
+
+// ---------------------------------------------------------------------------
+// W0 deterministic production-world review scene and metadata
+// ---------------------------------------------------------------------------
+
+const REVIEW_WINDOW_COUNT: i32 = 5;
+const REVIEW_BLOCK_SIZE: f32 = 40.0;
+const REVIEW_ATLAS_COLUMNS: usize = 10;
+const REVIEW_ATLAS_Z: f32 = 160.0;
+/// Roads centered on an edge extend this far beyond a nominal tile boundary.
+const REVIEW_ROAD_SPILL: f32 = 4.0;
+/// Empty space between the worst-case spilled geometry of adjacent tiles.
+const REVIEW_ATLAS_GUTTER: f32 = 10.0;
+const REVIEW_ATLAS_PITCH: f32 = REVIEW_BLOCK_SIZE + 2.0 * REVIEW_ROAD_SPILL + REVIEW_ATLAS_GUTTER;
+const REVIEW_CONTENT_HALF_EXTENT: f32 = REVIEW_BLOCK_SIZE * 0.5 + REVIEW_ROAD_SPILL;
+
+/// Exact XZ bounds of all review geometry relevant to framing. The forced
+/// atlas uses a 10u visible gutter after accounting for each tile's 4u road
+/// spill, so incompatible edge sockets can never visually touch.
+pub(crate) fn world_review_bounds() -> (Vec2, Vec2) {
+    // The 5x5 roots are centered from -60 through +100; each ground plane is
+    // 42u wide, while edge roads can reach 24u from a root. Use the larger.
+    let production_min = Vec2::splat(-60.0 - REVIEW_CONTENT_HALF_EXTENT);
+    let production_max = Vec2::splat(100.0 + REVIEW_CONTENT_HALF_EXTENT);
+    let atlas_half_columns = (REVIEW_ATLAS_COLUMNS as f32 - 1.0) * 0.5;
+    // Ground planes are 42u wide, but road spill reaches 24u from the root.
+    let atlas_min = Vec2::new(
+        -atlas_half_columns * REVIEW_ATLAS_PITCH - REVIEW_CONTENT_HALF_EXTENT,
+        REVIEW_ATLAS_Z - REVIEW_CONTENT_HALF_EXTENT,
+    );
+    let atlas_rows = TILE_CATALOG.len().div_ceil(REVIEW_ATLAS_COLUMNS);
+    let atlas_max = Vec2::new(
+        atlas_half_columns * REVIEW_ATLAS_PITCH + REVIEW_CONTENT_HALF_EXTENT,
+        REVIEW_ATLAS_Z
+            + (atlas_rows.saturating_sub(1)) as f32 * REVIEW_ATLAS_PITCH
+            + REVIEW_CONTENT_HALF_EXTENT,
+    );
+    (production_min.min(atlas_min), production_max.max(atlas_max))
+}
+
+#[derive(Serialize, Debug, Default, PartialEq, Eq)]
+struct ReviewCounts {
+    mesh3d: usize,
+    roads: usize,
+    curbs: usize,
+    markings: usize,
+    buildings: usize,
+    trees: usize,
+    farm_props: usize,
+    coins: usize,
+    lamps: usize,
+    obstacles: usize,
+}
+
+#[derive(Serialize, Debug, PartialEq)]
+struct ReviewBlockMetadata {
+    source: &'static str,
+    catalog_index: Option<usize>,
+    gx: i32,
+    gz: i32,
+    kind: &'static str,
+    sockets: [&'static str; 4],
+    world_x: f32,
+    world_z: f32,
+    counts: ReviewCounts,
+}
+
+#[derive(Serialize, Debug, PartialEq)]
+struct ReviewBoundsMetadata {
+    min_x: f32,
+    max_x: f32,
+    min_z: f32,
+    max_z: f32,
+}
+
+#[derive(Serialize, Debug, PartialEq)]
+struct ReviewAtlasMetadata {
+    columns: usize,
+    pitch: f32,
+    gutter: f32,
+    road_spill: f32,
+    origin_z: f32,
+}
+
+#[derive(Serialize, Debug, PartialEq)]
+struct ReviewMetadata {
+    schema: &'static str,
+    ready: bool,
+    seed: u32,
+    block_size: f32,
+    production_window_count: i32,
+    socket_order: [&'static str; 4],
+    scene_bounds: ReviewBoundsMetadata,
+    atlas: ReviewAtlasMetadata,
+    blocks: Vec<ReviewBlockMetadata>,
+}
+
+fn tile_kind_name(kind: TileKind) -> &'static str {
+    use TileKind::*;
+    match kind {
+        Empty => "Empty",
+        Park => "Park",
+        Field => "Field",
+        Orchard => "Orchard",
+        RoadNS => "RoadNS",
+        RoadEW => "RoadEW",
+        Cross => "Cross",
+        TN => "TN",
+        TE => "TE",
+        TS => "TS",
+        TW => "TW",
+        CornerWN => "CornerWN",
+        CornerNE => "CornerNE",
+        CornerES => "CornerES",
+        CornerSW => "CornerSW",
+        StubW => "StubW",
+        StubE => "StubE",
+        StubS => "StubS",
+        StubN => "StubN",
+    }
+}
+
+fn socket_names(kind: TileKind) -> [&'static str; 4] {
+    sockets(kind).map(|edge| if edge == Edge::Road { "road" } else { "none" })
+}
+
+fn spawn_review_world(
+    _mode: Res<WorldReviewMode>,
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    textures: Res<TextureAssets>,
+    world_assets: Res<WorldAssets>,
+) {
+    commands.spawn((
+        DirectionalLight {
+            color: Color::srgb(1.0, 0.94, 0.82),
+            illuminance: 10_000.0,
+            shadow_maps_enabled: false,
+            ..default()
+        },
+        Transform::from_xyz(-100.0, 180.0, -80.0).looking_at(Vec3::ZERO, Vec3::Y),
+    ));
+
+    for (gx, gz) in desired_grid_coords((0, 0), REVIEW_WINDOW_COUNT) {
+        spawn_review_tile(
+            &mut commands,
+            &mut meshes,
+            &textures,
+            &world_assets,
+            Vec3::new(
+                (gx as f32 + 0.5) * REVIEW_BLOCK_SIZE,
+                0.0,
+                (gz as f32 + 0.5) * REVIEW_BLOCK_SIZE,
+            ),
+            gx,
+            gz,
+            tile_from_edges(gx, gz),
+            ReviewTileSource::Production,
+            None,
+        );
+    }
+    for (index, &kind) in TILE_CATALOG.iter().enumerate() {
+        let column = index % REVIEW_ATLAS_COLUMNS;
+        let row = index / REVIEW_ATLAS_COLUMNS;
+        spawn_review_tile(
+            &mut commands,
+            &mut meshes,
+            &textures,
+            &world_assets,
+            Vec3::new(
+                (column as f32 - 4.5) * REVIEW_ATLAS_PITCH,
+                0.0,
+                REVIEW_ATLAS_Z + row as f32 * REVIEW_ATLAS_PITCH,
+            ),
+            column as i32,
+            row as i32,
+            kind,
+            ReviewTileSource::Atlas,
+            Some(index),
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_review_tile(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    textures: &TextureAssets,
+    world_assets: &WorldAssets,
+    position: Vec3,
+    gx: i32,
+    gz: i32,
+    kind: TileKind,
+    source: ReviewTileSource,
+    catalog_index: Option<usize>,
+) {
+    let root = commands
+        .spawn((
+            Transform::from_translation(position),
+            Visibility::default(),
+            Block { gx, gz },
+            ReviewTile {
+                kind,
+                source,
+                catalog_index,
+            },
+        ))
+        .id();
+    let seed = catalog_index.map_or_else(|| seed_for(gx, gz), |i| seed_for(i as i32, -1000));
+    populate_block(
+        commands,
+        meshes,
+        textures,
+        world_assets,
+        root,
+        gx,
+        gz,
+        seed,
+        kind,
+    );
+}
+
+fn publish_review_metadata(world: &mut World, mut published: Local<bool>) {
+    if *published {
+        return;
+    }
+    let metadata = build_review_metadata(world);
+    // Compact JSON keeps native output machine-readable on exactly one line.
+    let json = serde_json::to_string(&metadata).expect("world-review metadata must serialize");
+    publish_review_json(&json);
+    *published = true;
+}
+
+/// Build publication data from the real spawned hierarchy. This is the sole
+/// metadata builder used by runtime publication and tests; no estimated
+/// per-archetype counts are maintained in parallel.
+fn build_review_metadata(world: &mut World) -> ReviewMetadata {
+    assert!(
+        world.contains_resource::<WorldReviewMode>(),
+        "review metadata requested outside WorldReviewMode"
+    );
+    let mut tile_query = world.query::<(Entity, &Block, &ReviewTile, &Transform)>();
+    let tiles: Vec<_> = tile_query
+        .iter(world)
+        .map(|(entity, block, tile, transform)| {
+            (entity, block.gx, block.gz, *tile, transform.translation)
+        })
+        .collect();
+
+    let (road_meshes, marking_meshes) = {
+        let assets = world.resource::<WorldAssets>();
+        let roads = [assets.meshes.road_x.clone(), assets.meshes.road_z.clone()];
+        let mut markings = vec![
+            assets.meshes.dash_x.clone(),
+            assets.meshes.dash_z.clone(),
+            assets.meshes.crosswalk_x.clone(),
+            assets.meshes.crosswalk_z.clone(),
+            assets.meshes.stop_line_x.clone(),
+            assets.meshes.stop_line_z.clone(),
+        ];
+        markings.extend(assets.meshes.edge_line_x.iter().cloned());
+        markings.extend(assets.meshes.edge_line_z.iter().cloned());
+        (roads, markings)
+    };
+    let mut blocks = Vec::with_capacity(tiles.len());
+    for (entity, gx, gz, tile, translation) in tiles {
+        let mut counts = ReviewCounts::default();
+        count_review_descendants(world, entity, &road_meshes, &marking_meshes, &mut counts);
+        blocks.push(ReviewBlockMetadata {
+            source: match tile.source {
+                ReviewTileSource::Production => "production",
+                ReviewTileSource::Atlas => "atlas",
+            },
+            catalog_index: tile.catalog_index,
+            gx,
+            gz,
+            kind: tile_kind_name(tile.kind),
+            sockets: socket_names(tile.kind),
+            world_x: translation.x,
+            world_z: translation.z,
+            counts,
+        });
+    }
+    blocks.sort_by_key(|block| {
+        (
+            if block.source == "production" { 0 } else { 1 },
+            block.catalog_index.unwrap_or(0),
+            block.gx,
+            block.gz,
+        )
+    });
+    let (bounds_min, bounds_max) = world_review_bounds();
+    ReviewMetadata {
+        schema: "roady-world-review-v1",
+        ready: true,
+        seed: REVIEW_SEED,
+        block_size: REVIEW_BLOCK_SIZE,
+        production_window_count: REVIEW_WINDOW_COUNT,
+        socket_order: ["west", "east", "south", "north"],
+        scene_bounds: ReviewBoundsMetadata {
+            min_x: bounds_min.x,
+            max_x: bounds_max.x,
+            min_z: bounds_min.y,
+            max_z: bounds_max.y,
+        },
+        atlas: ReviewAtlasMetadata {
+            columns: REVIEW_ATLAS_COLUMNS,
+            pitch: REVIEW_ATLAS_PITCH,
+            gutter: REVIEW_ATLAS_GUTTER,
+            road_spill: REVIEW_ROAD_SPILL,
+            origin_z: REVIEW_ATLAS_Z,
+        },
+        blocks,
+    }
+}
+
+fn count_review_descendants(
+    world: &World,
+    entity: Entity,
+    road_meshes: &[Handle<Mesh>; 2],
+    marking_meshes: &[Handle<Mesh>],
+    counts: &mut ReviewCounts,
+) {
+    // Roads and markings are classified from the actual Mesh3d handles. This
+    // avoids adding review/accounting components to production archetypes.
+    if let Some(mesh) = world.get::<Mesh3d>(entity) {
+        counts.mesh3d += 1;
+        counts.roads += usize::from(road_meshes.contains(&mesh.0));
+        counts.markings += usize::from(marking_meshes.contains(&mesh.0));
+    }
+    counts.curbs += usize::from(world.get::<Curb>(entity).is_some());
+    counts.buildings += usize::from(world.get::<Building>(entity).is_some());
+    counts.trees += usize::from(world.get::<Tree>(entity).is_some());
+    counts.farm_props += usize::from(world.get::<FarmProp>(entity).is_some());
+    counts.coins += usize::from(world.get::<Coin>(entity).is_some());
+    counts.lamps += usize::from(world.get::<LampPost>(entity).is_some());
+    counts.obstacles += usize::from(
+        world.get::<Cone>(entity).is_some()
+            || world.get::<Hydrant>(entity).is_some()
+            || world.get::<Bench>(entity).is_some()
+            || world.get::<Hedge>(entity).is_some(),
+    );
+    if let Some(children) = world.get::<Children>(entity) {
+        for child in children.iter() {
+            count_review_descendants(world, child, road_meshes, marking_meshes, counts);
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn publish_review_json(json: &str) {
+    if let Some(window) = web_sys::window() {
+        let _ = js_sys::Reflect::set(
+            window.as_ref(),
+            &"__ROADY_WORLD_REVIEW__".into(),
+            &json.into(),
+        );
+        if let Some(root) = window
+            .document()
+            .and_then(|document| document.document_element())
+        {
+            let _ = root.set_attribute("data-roady-world-review-ready", "true");
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn publish_review_json(json: &str) {
+    println!("ROADY_WORLD_REVIEW_JSON={json}");
+    println!("ROADY_WORLD_REVIEW_READY=1");
 }
 
 // ---------------------------------------------------------------------------
@@ -2755,6 +3166,147 @@ mod tests {
         // And the private helpers agree with the public wrapper.
         assert!(vertical_line_road(0));
         assert!(horizontal_line_road(0));
+    }
+
+    #[test]
+    fn review_catalog_is_exhaustive_unique_and_socket_stable() {
+        assert_eq!(TILE_CATALOG.len(), 19);
+        let names: BTreeSet<_> = TILE_CATALOG
+            .iter()
+            .map(|&kind| tile_kind_name(kind))
+            .collect();
+        assert_eq!(names.len(), TILE_CATALOG.len());
+        for &kind in &TILE_CATALOG {
+            assert_eq!(socket_names(kind).len(), 4);
+            assert!(
+                socket_names(kind)
+                    .iter()
+                    .all(|socket| matches!(*socket, "road" | "none"))
+            );
+        }
+    }
+
+    fn review_test_app() -> App {
+        let mut app = App::new();
+        app.init_resource::<Assets<Mesh>>()
+            .init_resource::<Assets<Image>>()
+            .init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<TextureAssets>()
+            .insert_resource(WorldReviewMode)
+            .init_resource::<WorldAssets>()
+            .add_systems(Startup, spawn_review_world);
+        app.update();
+        app
+    }
+
+    #[test]
+    fn normal_world_plugin_has_no_review_mode_or_review_archetypes() {
+        let mut app = App::new();
+        app.init_resource::<Assets<Mesh>>()
+            .init_resource::<Assets<Image>>()
+            .init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<TextureAssets>();
+        app.add_plugins(WorldPlugin);
+        assert!(!app.world().contains_resource::<WorldReviewMode>());
+        let review_tiles = {
+            let world = app.world_mut();
+            let mut query = world.query::<&ReviewTile>();
+            query.iter(world).count()
+        };
+        assert_eq!(review_tiles, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "outside WorldReviewMode")]
+    fn review_builder_rejects_normal_mode() {
+        let mut world = World::new();
+        let _ = build_review_metadata(&mut world);
+    }
+
+    #[test]
+    fn real_review_builder_is_deterministic_complete_and_uses_count_schema() {
+        let mut app = review_test_app();
+        let first = build_review_metadata(app.world_mut());
+        let second = build_review_metadata(app.world_mut());
+        assert_eq!(first, second);
+        assert!(first.ready);
+        assert_eq!(first.schema, "roady-world-review-v1");
+        assert_eq!(first.seed, REVIEW_SEED);
+        assert_eq!(first.blocks.len(), 25 + TILE_CATALOG.len());
+        assert_eq!(
+            first
+                .blocks
+                .iter()
+                .filter(|block| block.source == "production")
+                .count(),
+            25
+        );
+        let atlas: Vec<_> = first
+            .blocks
+            .iter()
+            .filter(|block| block.source == "atlas")
+            .collect();
+        assert_eq!(atlas.len(), TILE_CATALOG.len());
+        assert!(atlas.iter().enumerate().all(|(index, block)| {
+            block.catalog_index == Some(index) && block.kind == tile_kind_name(TILE_CATALOG[index])
+        }));
+        assert!(first.blocks.iter().all(|block| block.counts.mesh3d > 0));
+        assert!(first.blocks.iter().any(|block| block.counts.roads > 0));
+        assert!(first.blocks.iter().any(|block| block.counts.curbs > 0));
+        assert!(first.blocks.iter().any(|block| block.counts.markings > 0));
+        assert!(first.blocks.iter().any(|block| block.counts.buildings > 0));
+        assert!(first.blocks.iter().any(|block| block.counts.trees > 0));
+        assert!(first.blocks.iter().any(|block| block.counts.farm_props > 0));
+        assert!(first.blocks.iter().any(|block| block.counts.coins > 0));
+        assert!(first.blocks.iter().any(|block| block.counts.lamps > 0));
+        assert!(first.blocks.iter().any(|block| block.counts.obstacles > 0));
+
+        let json = serde_json::to_value(&first).unwrap();
+        let counts = json["blocks"][0]["counts"].as_object().unwrap();
+        assert_eq!(
+            counts.keys().map(String::as_str).collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                "buildings",
+                "coins",
+                "curbs",
+                "farm_props",
+                "lamps",
+                "markings",
+                "mesh3d",
+                "obstacles",
+                "roads",
+                "trees",
+            ])
+        );
+    }
+
+    #[test]
+    fn forced_atlas_has_visible_gutter_beyond_road_spill_and_metadata_matches() {
+        assert!(REVIEW_ATLAS_GUTTER > REVIEW_ROAD_SPILL);
+        assert_eq!(
+            REVIEW_ATLAS_PITCH - 2.0 * REVIEW_CONTENT_HALF_EXTENT,
+            REVIEW_ATLAS_GUTTER
+        );
+        let mut app = review_test_app();
+        let metadata = build_review_metadata(app.world_mut());
+        assert_eq!(metadata.atlas.pitch, REVIEW_ATLAS_PITCH);
+        assert_eq!(metadata.atlas.gutter, REVIEW_ATLAS_GUTTER);
+        assert_eq!(metadata.atlas.road_spill, REVIEW_ROAD_SPILL);
+        let atlas: Vec<_> = metadata
+            .blocks
+            .iter()
+            .filter(|b| b.source == "atlas")
+            .collect();
+        assert_eq!(atlas[1].world_x - atlas[0].world_x, REVIEW_ATLAS_PITCH);
+        assert_eq!(
+            atlas[REVIEW_ATLAS_COLUMNS].world_z - atlas[0].world_z,
+            REVIEW_ATLAS_PITCH
+        );
+        let (min, max) = world_review_bounds();
+        assert_eq!(metadata.scene_bounds.min_x, min.x);
+        assert_eq!(metadata.scene_bounds.max_x, max.x);
+        assert_eq!(metadata.scene_bounds.min_z, min.y);
+        assert_eq!(metadata.scene_bounds.max_z, max.y);
     }
 
     #[test]
