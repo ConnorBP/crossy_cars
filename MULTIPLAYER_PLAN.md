@@ -1,150 +1,558 @@
-# Optional Multiplayer Extension Plan
+# Roady Car Online Mode Architecture
 
-**Status:** Optional design plan — no networking implementation committed  
-**Date:** 2026-07-12  
-**Target:** Bevy 0.19, Rust 1.95, `wasm32-unknown-unknown`, WebGL2, `web-sys` 0.3.103
+**Status:** optional implementation plan; no online gameplay code is implemented or approved for kickoff yet.
+**Updated:** 2026-07-13
+**Target:** Bevy 0.19, Rust 1.95, `wasm32-unknown-unknown`, WebGL2, `web-sys` 0.3.103. Reconfirm these pins at kickoff.
+**Primary constraint:** single-player remains the zero-configuration default and must stay fully functional when every network feature is absent or disabled.
 
-Multiplayer is an optional extension. Offline single-player remains the zero-configuration default and must continue to build and run without a server. Networking should be added only after small, useful single-player refactors establish clean seams; this plan does not justify a speculative rewrite of the game.
+A deliberate multiplayer kickoff is required before M0/M1 work begins. The kickoff must name an owner, budget, hosting target and success/stop criteria; this plan does not justify a speculative rewrite or adding networking dependencies to ordinary single-player.
 
-## 1. Recommended First Mode
+## 1. Goals and non-goals
 
-The first real-time mode should be a **2–4 player, 60-second race-to-score in a shared city**. It matches the existing round structure: players collect coins and hit chickens while avoiding obstacles and harmful critters. When the authoritative timer reaches zero, the highest score wins. Existing combo and power-up systems can remain per-player initially.
+### Goals
 
-Optional later modes:
+- Optional 2-player, 60-second-baseline competitive shared-world score attack, with a path to 4 players after explicit scale gates.
+- Native and WebAssembly clients.
+- Server-authoritative driving, collisions, claims, health, score, objectives, match time, events, and results.
+- Cloudflare-hosted lobby/control plane informed by Ghost protocol-v3 lifecycle reference patterns.
+- Reconnect, version rejection, bounded abuse controls, independent rollout, and rollback.
+- Early source refactors that improve ownership and determinism without requiring a server.
 
-- **Asynchronous ghosts and leaderboards:** considerably cheaper than live networking and useful even if real-time multiplayer is deferred.
-- **Co-op shared score:** viable later, but multiple cars require redesigning spawn and recycling logic that currently follows one car.
-- **Spectating and replay:** compatible with snapshots, but not a first-release requirement.
+### Non-goals for the first release
 
-Large public lobbies, persistent worlds, host migration, MMO features, and ranked cross-platform ladders are explicitly out of scope.
+- Replacing or delaying the current offline Enter/Space/tap flow.
+- Peer authority, listen servers, host migration, or Ghost's WebRTC/GGRS gameplay data plane.
+- Deterministic lockstep across native and WASM.
+- Dynamic fleet allocation before usage justifies it.
+- Bot takeover, accounts/OAuth, voice chat, spectators, replay, or online scores on the existing single-player leaderboard.
+- Large public lobbies, persistent worlds, MMO features, ranked cross-platform ladders, and mandatory server persistence.
 
-## 2. Current Architecture and Blockers
+If live multiplayer fails its dependency, hosting, cost, or feel gates, asynchronous ghosts plus a separate authoritative leaderboard are the preferred cheaper fallback. Snapshot-based replay/spectating can be considered later; neither should expand the first live release.
 
-Useful foundations already exist:
+## 2. User experience and state flow
 
-- Plugins separate cars, world generation, traffic, pickups, critters, UI, audio, and effects.
-- Road and block layouts are deterministic functions of grid coordinates.
-- Gameplay messages decouple several collision outcomes from presentation systems.
-- `GameConfig` already centralizes important tuning values.
+The current Menu action remains unchanged:
 
-The current code is nevertheless single-player-specific:
+```text
+Enter / Space / ordinary Menu tap -> offline single-player
+```
 
-- `spawn_car` creates exactly one car at startup.
-- Many systems use `car.single()` or `car.single_mut()`.
-- Keyboard input is read directly inside movement, body-roll, and brake-light systems.
-- Camera and minimap logic assume one local car.
-- Chickens, critters, traffic, and pickups recycle relative to one car rather than a set of active players.
-- `Score`, `TimeLeft`, health, combo state, and game-over reason are global resources rather than player- or match-owned replicated state.
-- Several procedural systems use local runtime seeds instead of a shared session/round seed.
-- Traffic movement is separate simplistic logic; the project does **not** currently have a reusable AI controller for the player car. Disconnect-to-bot handoff is therefore a later feature, not free infrastructure.
+A separate visible `MULTIPLAYER` action opens an optional flow:
 
-## 3. Phase 0: Lightweight Seams, No Netcode
+```text
+Menu
+  -> MultiplayerMenu
+  -> Connecting
+  -> Lobby { create | join code }
+  -> Ready
+  -> OnlineCountdown
+  -> OnlinePlaying
+  -> OnlineResults
+  -> Lobby or Menu
+```
 
-These changes should be independently valuable and preserve current behavior:
+The lobby shows room code, 2-player roster, ready state, version errors, latency, reconnect status, and Leave. Settings remain available before Ready. Online Pause cannot stop the authoritative match; it becomes a local overlay with Resume and Leave confirmation.
 
-1. **`Player` and identity components.** Add a local `Player` marker and stable `NetId(u32)`/`NetEntity(u64)` identity separate from Bevy `Entity`. The current player defaults to ID 0.
-2. **`PlayerInput` resource/component.** One `read_local_input` system converts keyboard state into `{ throttle, steer, brake }`. Movement, body roll, wheels, and brake lights consume this data instead of reading keys independently.
-3. **`NetMode` resource.** Add `SinglePlayer` as the default, with future `Client` and `Server` variants. Do not scatter networking branches through unrelated systems yet.
-4. **Shared session seeds.** Introduce `SessionSeed` and a round index so procedural spawn sequences can be reproduced when required. Block geometry remains coordinate-derived.
-5. **Round ownership.** Add a `RoundEntity` marker for transient gameplay entities and establish one cleanup contract.
-6. **Parameterized car spawning.** Replace the hard-coded single origin spawn with configuration accepting player ID, ownership, and spawn transform while still spawning exactly one local car by default.
-7. **Authoritative event application.** Gradually centralize score/timer/health mutations into systems that consume explicit gameplay messages. Avoid a large all-at-once rewrite.
+Touch layouts use the current responsive breakpoints and must fit 844x390 and 960x480. The local-player camera and HUD remain primary; remote players have distinct non-color identity markers and minimap shapes.
 
-Do **not** introduce a transport trait, replication dependency, fixed-point math, or a pure whole-game `(state, input) -> state` architecture during Phase 0. Snapshot reconciliation does not require bit-perfect cross-platform lockstep.
+## 3. Architecture decision: split control plane and gameplay plane
 
-## 4. Authority and Simulation Model
+### Cloudflare Worker plus Durable Object
 
-Use a **dedicated authoritative native server**. Browser clients are untrusted and only submit bounded input. The server owns:
+Owns:
 
-- Canonical car movement and obstacle collision outcomes
-- Scores, health, combos, power-up state, and the round timer
-- Gameplay entity spawn/despawn decisions
-- Round start/end and final results
+- exact-origin admission filtering;
+- room configuration;
+- player identity and reconnect-token rotation;
+- roster, profile, presence, ready state, queued joiners;
+- immutable active epoch/round lifecycle;
+- alarms and reconnect expiry;
+- authoritative-server endpoint selection;
+- short-lived signed match-ticket issuance;
+- control WebSocket status/errors.
 
-Reject peer-to-peer/listen-server authority for the initial version: browser NAT limitations, cheating, host advantage, and host migration are unnecessary complexity.
+It does **not** run per-frame gameplay or relay snapshots.
 
-Reject deterministic lockstep. Bevy entity/system iteration and native-versus-WASM floating point are not guaranteed bit-identical. Instead use:
+### Dedicated native Roady server
 
-- A fixed authoritative server simulation rate, initially 20–30 Hz
-- Server snapshots at roughly 10–20 Hz
-- Client prediction only for the owned car
-- Server reconciliation with tolerances, e.g. about 0.3 world units and 5 degrees before visible correction
-- Buffered interpolation for remote cars and dynamic entities, rendering about 100 ms behind
+Owns:
 
-The client stores recent `(tick, PlayerInput, predicted car state)` entries. When an authoritative snapshot arrives, it accepts small error, or rewinds the owned car to the acknowledged state and replays later inputs. Server collision push-outs always win. Wheel spin, body roll, brake lights, particles, camera shake, and audio remain local presentation derived from replicated state/events.
+- fixed-tick car simulation;
+- static/dynamic world state;
+- traffic, creatures, pickups, collisions, damage and cooldowns;
+- score, combo, power-ups, objectives, match clock and events;
+- authoritative claims and results;
+- snapshots, acknowledgements and reconnect full state.
 
-## 5. Replicated State
+### Client
 
-Every networked gameplay object receives a server-assigned `NetEntity`; never transmit raw Bevy `Entity` values.
+Owns:
 
-Replicate:
+- keyboard/touch input collection;
+- local prediction and reconciliation;
+- remote interpolation;
+- camera, UI, audio, particles and presentation;
+- immutable terrain regeneration after seed/version agreement.
 
-- Cars: owner, transform, heading, speed, health, active power-ups
-- Match: round ID, timer, phase, session seed
-- Per-player score and combo summary
-- Chicken, critter, traffic, pickup, and coin spawn/despawn deltas
-- Discrete confirmed events such as hit, collect, damage, and round end
+This preserves a clean trust boundary: clients submit input, never position, damage, score, pickups, objective completion, or results as authority. Peer-to-peer/listen-server authority is rejected for v1 because browser NAT/connectivity constraints, cheating exposure, host advantage and host-migration failure modes add complexity without helping the two-player mode.
 
-Do not replicate purely visual particles, tire marks, mesh children, audio players, camera transforms, or UI nodes.
+## 4. Ghost protocol-v3 evidence and reuse boundary
 
-### Multi-car world recycling
+Historical snapshot: the prior networking review recorded the Ghost `ghost-network-lifecycle` worktree at commit `1db3942442cd95cb8765b99451087ce0cbdcc99c`. At that snapshot, `npm test` reproduced **44/45 passing**, with `selection requires both profile and ready` failing. Treat this as historical evidence, not current/proven green status. A deliberate Roady kickoff must pin the intended Ghost revision, confirm worktree cleanliness, rerun its complete Worker suite, and resolve or explicitly supersede every red test before reducer code is shared.
 
-Current recycling is anchored to one car. Multiplayer must define interest around all active players. A practical first rule is:
+The historical review identified these Ghost paths at that revision:
 
-- Keep a block/entity while it lies within the keep radius of **any** player.
-- Retire it only when outside the radius of **all** players.
-- The server chooses spawns using the union of player interest regions and sends stable IDs/deltas.
-- Clients may visually cull by their local camera, but may not independently decide authoritative despawns.
+- `cloudflare-worker/src/index.js`
+- `cloudflare-worker/src/protocol.js`
+- `cloudflare-worker/src/epoch-lobby.js`
+- `cloudflare-worker/src/epoch-state.js`
+- `cloudflare-worker/vendor/cloudflare-game-common/lifecycle.js`
+- `docs/lobby-v3.md`
 
-Widely separated players increase the active world substantially; matches may therefore need a maximum separation rule or bounded arena for v1.
+The snapshot supports an architectural reference, not a claim that current Ghost code is proven, green, or directly reusable. At kickoff, record the current repository/revision and clean-worktree state, re-read the files and migration history, and rerun the lifecycle tests. A red or unavailable suite blocks reducer code reuse but not independent use of the documented concepts.
 
-## 6. Transport and Protocol
+Reuse the **concepts and intentionally versioned shared artifacts**, not repository imports:
 
-Use **WebSocket for v1** because browsers support it reliably through TLS proxies. Consider WebTransport later if measured latency or head-of-line blocking justifies the operational complexity.
+- persistent control WebSocket;
+- immutable active epoch and round;
+- fixed room configuration;
+- incumbent roster continuity and queued mid-round joiners;
+- ready/profile flow;
+- reconnect identity with hashed, rotating bearer token;
+- superseded-socket closure;
+- hibernating WebSocket attachments;
+- Durable Object storage and alarm expiry;
+- epoch-scoped messages;
+- idempotent terminal decisions as a reference pattern, subject to Roady-specific authenticated result rules.
 
-The native server can use Tokio plus a WebSocket library; the WASM client should use browser WebSocket APIs or a dependency confirmed compatible with Bevy 0.19 and the existing `web-sys = 0.3.103` pin. Evaluate Lightyear or Replicon only when their Bevy 0.19 and browser support is verified; do not couple Phase 0 to them.
+Do not copy:
 
-Use a compact, versioned binary schema such as `postcard` over Serde, with explicit protocol and client-build versions. Core messages:
+- WebRTC signaling as Roady's gameplay transport;
+- GGRS rollback session construction;
+- Ghost duel/deathmatch mode labels;
+- Ghost outcome/score rules;
+- Ghost palette/profile schema;
+- seed-derived match identity;
+- Ghost room/storage key naming.
 
-- C→S `Hello { protocol, build, display_name }`
-- C→S `InputTick { tick, throttle_i8, steer_i8, brake }`
-- C→S `Ready`, `Leave`, `Ping`
-- S→C `Welcome { player_id, room, tick }`
-- S→C `LobbyState { players, ready }`
-- S→C `RoundStart { round_id, session_seed, duration }`
-- S→C `Snapshot { tick, cars, scores, time_left, deltas }`
-- S→C `Spawn`, `Despawn`, and confirmed gameplay events
-- S→C `RoundEnd { reason, final_scores }`, `Pong`, and versioned errors
+The historical review indicates that Ghost's lifecycle reducer was not exported by the shared npm package at the reviewed point; re-verify this at the pinned revision. If Roady adopts reducer code, first make it an explicit versioned shared artifact or a clearly versioned Roady vendor module with provenance and parity tests. Never import source from the Ghost repository.
 
-Validate message sizes, enum tags, input ranges, sequence numbers, and maximum receive rates.
+## 5. Shared Cloudflare package boundary
 
-## 7. Lobby, Security, and Deployment
+Canonical source:
 
-Add optional `Connecting` and `Lobby` states without removing Menu, Playing, Paused, or GameOver. Menu continues to launch single-player immediately; Multiplayer connects to a room service, joins a 2–4 player lobby, performs a ready check, then waits for authoritative `RoundStart`.
+```text
+@segfault-site/cloudflare-game-common@0.1.0
+E:/DEVELOPER/PROJECTS/audit-worktrees/cloudflare-game-common
+```
 
-Baseline anti-cheat follows from server authority. The server validates tick windows and input ranges, rate-limits messages, clamps movement through `GameConfig`, rejects incompatible builds, and never accepts client-authored scores or positions.
+Roady standalone CI imports through:
 
-The server is a separate native/headless binary or feature-gated target using Bevy `MinimalPlugins` plus fixed scheduling. Rendering and asset-only plugins must be separable from simulation. Deploy it in a container behind TLS termination (`wss://`). A simple HTTP room service can return a room token and WebSocket URL. One process may host multiple small rooms after profiling; one room per process is acceptable for a prototype.
+```text
+leaderboard/vendor/cloudflare-game-common/src/index.ts
+```
 
-Server persistence is optional for v1. Keep local single-player best scores unchanged. Store match results or accounts only after the live mode proves worthwhile.
+Do not import a sibling workspace and do not assume npm publication; the package is currently local/unpublished.
 
-## 8. Testing Strategy
+Every new matchmaking Worker input uses the shared primitives for:
 
-- Unit-test protocol round trips and rejection of malformed/oversized messages.
-- Test movement from identical input sequences within tolerances, not bit-perfect native/WASM checksums.
-- Run a headless authoritative app plus two simulated clients through an in-memory transport.
-- Inject latency, jitter, duplication, reordering, and disconnects; verify interpolation and reconciliation converge.
-- Assert scores, timers, health, and spawn/despawn sets converge to server state.
-- Add two-browser-tab Playwright/manual smoke tests against a local server.
-- Continue the existing single-player WASM driving audit for every networking change.
-- Soak-test long rounds and widely separated players for entity/memory growth.
+- `parseExactOrigins` / `isExactOriginAllowed`;
+- UTF-8 byte bounds and `boundedString`;
+- bounded JSON and plain-object validation;
+- SHA-256, canonical base64url, cryptographic random IDs/tokens;
+- fail-closed Cloudflare rate limiting.
 
-## 9. Phased Roadmap and Gates
+Before matchmaking implementation, synchronize Roady's adapter with package 0.1.0 and add its missing exports:
 
-1. **Phase 0 — single-player seams:** input resource, player identity, session seed, round ownership, parameterized car spawn. Gate: all current tests, WASM build, and browser audit pass with networking absent.
-2. **Phase 1 — local replication prototype:** native headless server, binary messages, one browser client receiving authoritative snapshots and reconciling its car. **Go/no-go:** stable 10-minute local session, correction rate and magnitude acceptable, no regression to offline single-player, and server/client architecture does not require duplicating gameplay logic.
-3. **Phase 2 — two-player competitive:** room code, lobby, authoritative 60-second timer/scoring, two browser tabs/LAN clients, N-car interest rules.
-4. **Phase 3 — public 2–4 player release:** TLS deployment, reconnect/forfeit policy, monitoring, abuse limits, WAN testing.
-5. **Optional later:** WebTransport, ghosts/leaderboards, replay/spectating, accounts, co-op, or purpose-built bot controllers.
+- `BoundedJsonError`;
+- `parseBoundedJson`;
+- `readBoundedJsonObject`;
+- exported bounded-string option type;
+- exported rate-limit logger type.
 
-Highest risks are Bevy 0.19 networking dependency compatibility, separating headless simulation from rendering, multiple-player recycling cost, collision reconciliation feel, and uncontrolled multiplayer scope. Phase 1 should not begin until Phase 0 ships cleanly as ordinary single-player and a deliberate multiplayer kickoff is approved.
+Package/adapter parity tests are mandatory. Availability policy remains explicit at the endpoint boundary; it must not weaken the fail-closed shared primitive.
+
+## 6. MVP server allocation and tickets
+
+Do not build a dynamic allocator first. Configure one static TLS WebSocket authoritative endpoint per environment/region.
+
+When the roster is full and ready, the Durable Object:
+
+1. selects the configured server endpoint;
+2. creates `match_id`, epoch, round, seed and expiry;
+3. issues one short-lived signed ticket per player;
+4. broadcasts `start { endpoint, ticket, match metadata }`.
+
+Ticket fields:
+
+```text
+protocol_version
+build_version
+ruleset_version
+topology_version
+match_id
+room_id
+epoch
+round
+player_id
+ordered_roster
+session_seed
+server_endpoint / audience
+issued_at
+expires_at
+nonce
+```
+
+The Worker and native server share a dedicated ticket-signing key. The server rejects bad audience, expiry, signature, roster, version, nonce replay, and duplicate live identity. Ticket key rotation and overlap policy must be documented before preview.
+
+Dynamic regional allocation can later replace endpoint selection without changing the client gameplay protocol.
+
+## 7. Authority, rates, prediction and interpolation
+
+Initial targets:
+
+- authoritative simulation: 30 Hz;
+- client input send: 30 Hz;
+- snapshots: 15-20 Hz;
+- rendering/interpolation: display rate;
+- bounded remote extrapolation followed by hold/resync.
+
+Input frame:
+
+```text
+match_id
+player_id
+client_tick
+sequence
+last_server_tick_seen
+throttle [-1,1]
+steer [-1,1]
+brake bool
+handbrake bool
+```
+
+The owned car predicts with the shared car-motion kernel and stores input history. Snapshots acknowledge input sequence. Initial tuning thresholds are approximately **0.3 world units** of position error and **5 degrees** of heading error: accept/smooth smaller error, and rewind to authoritative state plus replay unacknowledged inputs above threshold. These are starting hypotheses, not protocol constants; M2/M4 fault tests must tune and record them. Static collision may be predicted, but server collision/damage wins. Presentation effects respond to confirmed event IDs and may use harmless predicted previews.
+
+Remote cars and dynamic entities initially render from an approximately **100 ms** interpolation buffer. Extrapolation is short and bounded, then holds or requests resync; it never creates authoritative interactions.
+
+Lockstep is rejected because current native/WASM floating point, ECS/query ordering, streamed dynamic entities, and several system-local RNG streams are not a proven cross-platform deterministic simulation contract.
+
+## 8. World seed and topology synchronization
+
+Introduce:
+
+```rust
+SessionSeed(u128)
+TopologyVersion(u32)
+RulesetVersion(u32)
+RoundId
+NetEntityId(u64)
+```
+
+Use domain-separated deterministic streams, e.g. topology, urban props, rural props, pickups, traffic, chickens, critters, modifiers and run events. Never derive authoritative randomness from ECS entity IDs, query iteration order, or process-local counters.
+
+Clients regenerate immutable terrain from `(SessionSeed, TopologyVersion, coordinate)`. Server snapshots carry dynamic entities only, plus sampled topology hashes/manifests for mismatch detection. Reject incompatible topology/build/ruleset before play.
+
+Do not freeze the current infinite-line road topology as multiplayer v1. The planned edge-segment/center-arm road rewrite and top-down render validation should land before `TopologyVersion = 1` is declared stable.
+
+For multiple players, the exact interest invariant is:
+
+- retain a block/entity while it is within the authoritative keep radius of **any** active player;
+- retire it only while it is outside that radius for **all** active players;
+- choose spawns from the server's bounded union of player interest regions, using stable IDs;
+- allow clients to cull visuals locally, but never to authoritatively spawn/despawn.
+
+The union must be bounded by a measured entity/memory cap plus either maximum player separation or an explicit regroup policy. The separation value and cap remain pre-preview decisions; silently violating the invariant under load is not allowed.
+
+## 9. Online gameplay semantics
+
+Initial mode: **2-player competitive shared-world race-to-score**, starting from a 60-second authoritative clock. Players score through versioned rules based on the existing coin/chicken loop while avoiding obstacles and harmful critters; the highest server-confirmed score wins. Any time-extension behavior and tie result must be fixed in the versioned ruleset before M3. Co-op shared score remains a later mode, not an unresolved MVP presentation choice. Authority rules:
+
+- Match clock, road condition and scheduled events are shared.
+- Score, health, combo, power-ups and personal objective progress are per-player.
+- Server decides simultaneous pickup/target claims by authoritative tick, then stable `PlayerId` tie-break.
+- Chicken/critter/traffic events carry actor and stable event/entity IDs.
+- Car-to-world and car-to-traffic collisions are authoritative.
+- Car-to-car collisions start non-damaging or tightly impulse-bounded to limit griefing.
+- Coin/time extensions are applied by server rules only.
+- Confirmed events are idempotent by stable event ID.
+- Online results are excluded from the current single-player leaderboard until a separate authoritative ruleset/board is designed.
+
+## 10. Current foundations, blockers and required refactors
+
+Useful foundations already present in the historical/current source assessment:
+
+- plugins separate cars, world generation, traffic, pickups, critters, UI, audio and effects;
+- road/block layouts are coordinate-derived;
+- gameplay messages already separate several outcomes from presentation;
+- `GameConfig` centralizes important tuning;
+- keyboard/touch collection is already centralized into global `PlayerInput` and `Handbrake` state.
+
+Do not regress that input seam or repeat the stale claim that movement, body-roll and brake-light systems still read keys independently. The remaining input work is to make buffers player-addressed and tick-addressed, with keyboard/touch writing only the local player's buffer.
+
+Current blockers are the one-car spawn and `single()` assumptions; local-only camera/HUD/minimap ownership; global score/time/health/combo/game-over state; one-car world recycling; process-local random streams; mixed simulation/presentation scheduling; and broad cleanup ownership. Traffic has separate simplistic movement, not a reusable player-car AI controller, so disconnect-to-bot is not free infrastructure.
+
+| Current area | Required seam | Offline compatibility |
+|---|---|---|
+| `src/main.rs`, plugin tuple | reusable client/server app construction | existing client is default |
+| `game/state.rs` | optional multiplayer/lobby states | offline state flow unchanged |
+| global mode assumptions | `NetMode::{SinglePlayer, OnlineClient, AuthoritativeServer}` | defaults to SinglePlayer |
+| `car.rs` single car queries | stable `PlayerId`, `LocalPlayer`, parameterized car spawn, per-player input | spawn one local player offline |
+| global `PlayerInput`, `Handbrake` | player-addressed input buffers | keyboard/touch write local player only |
+| gameplay messages | actor-bearing messages with stable entity/event IDs; gradually centralize authoritative score/timer/health mutation through their consumers | offline actor is local player and existing values remain exact |
+| `Score`, `Health`, `Combo`, power-ups/objective | per-player component/resource records | offline accessors expose local record |
+| `TimeLeft`, condition, events | match-owned state | same values offline |
+| `world.rs` one-car recycling | server interest union / separation policy | current one-player window offline |
+| mixed simulation/presentation systems | fixed authoritative simulation sets and client-only presentation sets | both installed in offline client |
+| cleanup via broad state hooks | explicit `RoundEntity` (or equivalent match-ownership) marker and one match-owned cleanup contract | existing round lifecycle preserved |
+
+Refactor one seam at a time with the existing test and browser gates green. The historical **Phase 0**, now M1, explicitly prohibits a transport trait, replication/network dependency, fixed-point conversion, or pure whole-game `(state, input) -> state` rewrite. Do not introduce transport abstractions before multi-car-safe ownership exists; snapshot reconciliation does not require bit-perfect lockstep.
+
+## 11. Control protocol
+
+Control plane uses strict bounded JSON schemas over WebSocket. Version 1 messages include:
+
+Client:
+
+```text
+profile
+ready
+leave
+ping
+```
+
+Server:
+
+```text
+welcome { player_id, reconnect_token, room config }
+status { roster, ready, presence, queue }
+presence
+profile_accepted
+start { epoch, round, match_id, seed, endpoint, ticket, versions }
+round_commit / round_abort
+pong
+error
+```
+
+Room codes are identifiers, not passwords. Exact Origin filters browsers but is not authentication.
+
+Clients can request leave but can never submit `round_commit`, `round_abort`, or final results. Only the assigned authoritative server may call the Durable Object's authenticated server-only terminal endpoint. The DO verifies server credential/signature, `match_id`, room, epoch, round, assignment and idempotency before atomically committing the authoritative result or abort reason, then broadcasts `round_commit`/`round_abort` to clients. Invalid, stale, conflicting or client-originated terminal requests are rejected and audited without sensitive fields.
+
+## 12. Replication, transport and gameplay protocol
+
+Every networked gameplay object has a server-assigned `NetEntityId`; raw Bevy `Entity` values never cross the wire.
+
+Explicitly replicate:
+
+- cars: player owner, transform, heading, speed, health and active power-ups;
+- match: identity, round, phase, authoritative time, seed and version tuple;
+- per-player score, combo and objective summary;
+- traffic, creatures, pickups and coins as stable spawn/despawn/state deltas;
+- stable, idempotent confirmed hit/collect/damage/claim and round events.
+
+Explicitly exclude purely visual particles, tire marks, mesh children, audio players, camera transforms, UI nodes, screen shake and other presentation-only state.
+
+Use WebSocket for v1 because native and browsers can operate it through common TLS termination; expose gameplay only as `wss://` outside local development. WebTransport remains a measured later option because its deployment complexity is not justified yet. The native server may use Tokio plus a WebSocket crate, while WASM must use browser APIs or a crate verified against Bevy 0.19 and the pinned `web-sys`. Lightyear/Replicon are evaluation candidates only after native, WASM and Bevy-version support is proven; neither belongs in Phase 0.
+
+Use a versioned binary gameplay protocol:
+
+```text
+ClientHello / ServerHello
+InputBatch
+FullSnapshot
+DeltaSnapshot
+Spawn / Despawn
+ConfirmedEvent
+InputAck
+Ping / Pong
+ResyncRequest
+RoundResult
+Error / Disconnect
+```
+
+`postcard` over Serde is an initial codec candidate, not an assumed dependency: first spike round trips, malformed-enum behavior, allocation limits, schema evolution and native/WASM compatibility. Pin the chosen codec and document compatibility rules and golden vectors. Every frame includes protocol/build/match identity and sequence/tick as applicable. Deltas name their baseline; a missing baseline requests a full snapshot. Stale/duplicate input and confirmed events are rejected idempotently. Apply explicit payload, batch, tick-window, enum-tag and message-rate limits. Start uncompressed; add compression only after measurements and bounded decompression limits. Head-of-line blocking, crate compatibility and codec evolution remain measured risks, not reasons to weaken authority.
+
+## 13. Reconnect and failure behavior
+
+- Web reconnect credential: session storage; native: memory or OS-appropriate local secure storage.
+- Prefer delivering reconnect credentials in bounded protocol messages rather than URLs. If browser WebSocket reconnection requires a query credential, it must be short-lived and single-use; Worker/proxy/access-log configuration must drop or redact the full query string, observability must never record the URL, and a deployment test must prove the policy before preview.
+- Token rotates on accepted reconnect; superseded socket closes.
+- Grace target: approximately 30 seconds.
+- Reconnect obtains a fresh gameplay ticket and full snapshot.
+- No host migration because clients are never hosts.
+- No initial bot takeover.
+- During grace the car uses a documented safe policy (coast/brake and no scoring input).
+- After expiry, mark disconnected/forfeit according to mode; replacement may enter only a later epoch.
+- Server loss yields a clear terminal error and Menu return; never silently accepts client results.
+
+## 14. Security, abuse and observability
+
+- Validate ticket, identity, versions and input sequence before simulation.
+- Enforce per-IP upgrade, per-room socket, per-player message, payload, idle and room-creation limits.
+- Never log IPs, raw rate-limit keys, bearer tokens, reconnect query values or URLs containing them, tickets, or signing material.
+- Exact Origin is filtering, not proof of client identity.
+- Detect impossible input rate/value/tick windows server-side.
+- Score/collision farming detection uses authoritative telemetry only.
+- Metrics: connections, room creation, ready latency, ticket rejects, reconnect success, RTT/loss, reconciliation magnitude, snapshot bytes, simulation overruns, disconnect reason, entity count, match completion.
+
+## 15. Deployment and rollback
+
+Keep four independent products:
+
+1. Cloudflare Pages game client;
+2. leaderboard Worker/D1;
+3. matchmaking Worker/Durable Object;
+4. native authoritative Roady server.
+
+Matchmaking workflow gates:
+
+- vendored-adapter/package parity tests;
+- typecheck and unit/protocol/lifecycle tests;
+- Wrangler dry-run;
+- deployment;
+- WebSocket origin/rate/schema/start-ticket smoke tests;
+- explicit Worker version rollback procedure.
+
+Server workflow gates:
+
+- a separate native/headless app using Bevy `MinimalPlugins` plus fixed scheduling, with rendering and asset-only plugins excluded;
+- pinned Rust artifact/container behind TLS termination (`wss://`);
+- protocol tests;
+- convergence/fault/soak tests;
+- health/readiness endpoint;
+- staged deployment and previous-image rollback.
+
+One process may host multiple isolated rooms only after profiling proves tick fairness, room caps and failure isolation; one room per process is acceptable for the prototype. Server persistence is optional for v1: keep single-player best scores unchanged and do not store accounts/results until a separate authoritative board is approved.
+
+Every matchmaking deployment that adds or changes a Durable Object class or storage schema must include explicit Wrangler migration declarations, schema-version handling, clean-create and upgrade-from-previous tests, rollback/forward-fix analysis, and preview validation that alarms, hibernating attachments, active epochs and reconnect expiry survive as intended. Never assume code rollback alone reverses a DO storage migration.
+
+Feature flags:
+
+- hide Multiplayer UI;
+- disable matchmaking globally;
+- disable new rooms while allowing active matches to finish;
+- restrict preview room prefix/build allowlist.
+
+## 16. Milestones and go/no-go gates
+
+### M0 - shared Cloudflare boundary
+
+- Record deliberate kickoff approval, pinned Ghost evidence revision, target-version recheck, owners and stop criteria.
+- Synchronize Roady's vendored adapter with package 0.1.0.
+- Add missing JSON/type exports and parity tests.
+- Decide/version the lifecycle shared artifact.
+
+**Gate:** package, adapter, leaderboard Worker tests/typecheck/dry-run green in standalone checkout.
+
+### M1 - offline ownership seams
+
+- Add `NetMode`, IDs, local ownership, actor events and multi-car-safe queries.
+- Parameterize car spawn and separate per-player/match state.
+
+**Gate:** no transport dependency; every existing offline Rust/browser/release test green.
+
+### M2 - local authoritative loopback and early browser transport spike
+
+- Extract fixed simulation kernel and headless native server.
+- Connect one then two in-memory/loopback simulated clients.
+- Before transport architecture is locked, connect one WASM/browser client to the loopback server using the selected browser WebSocket API and candidate binary codec. This early spike must test the pinned `web-sys` boundary, TLS/local-development shape, codec vectors and malformed-frame behavior rather than deferring browser risk to M5.
+
+**Gate:** stable 10-minute local session; authoritative convergence; exact convergence of scores, timers, health and authoritative spawn/despawn sets; measured correction rate/magnitude within recorded tolerances; bounded entity growth; no duplicated gameplay logic; identical offline feel within tolerances; and one browser client completing the loopback protocol spike.
+
+### M3 - Cloudflare lobby and static server ticket
+
+- Add Roady protocol-v1 Durable Object and one configured server endpoint.
+- Signed tickets and two-player roster/ready flow.
+
+**Gate:** origin/schema/rate/ticket/replay/reconnect tests; authenticated server-only commit/abort tests; DO clean-create, migration and rollback/forward-fix validation; no public UI yet.
+
+### M4 - two native clients
+
+- Prediction, reconciliation, interpolation and authoritative gameplay semantics.
+
+**Gate:** latency/loss/reordering fault matrix and long soak pass.
+
+### M5 - native plus WASM
+
+- Browser WebSocket client, touch lobby/gameplay UX and reconnect.
+
+**Gate:** native/native, native/WASM and two-browser-tab tests pass; topology hashes agree.
+
+### M6 - opt-in two-player preview
+
+- Feature-flagged production preview with observability and rollback.
+
+**Gate:** completion/reconnect/crash/entity/latency metrics within written thresholds.
+
+### M7 - four-player expansion
+
+Only after separation, world-interest, entity-growth, bandwidth, abuse and 4-client soak gates pass.
+
+### M8 - dynamic allocation
+
+Only if measured usage/cost/region demand justifies replacing static endpoint selection.
+
+## 17. Test matrix
+
+Mandatory new tests:
+
+- shared-package/adapter API and behavior parity;
+- exact origin, UTF-8, bounded JSON/plain objects, crypto and fail-closed rates;
+- lifecycle roster/epoch/queue/expiry/token rotation;
+- ticket expiry, audience, tampering, replay and key rotation;
+- malformed, duplicate, stale and oversized protocol frames plus codec golden-vector/schema-evolution tests;
+- explicit replication include/exclude checks and rejection of raw Bevy entity IDs;
+- missing delta baseline/full resync;
+- seed/topology hash agreement over coordinate samples;
+- stable entity/event IDs and idempotent confirmed events;
+- simultaneous claims and collision tie order;
+- movement from identical input sequences within stated tolerances, never a native/WASM bit-perfect checksum gate;
+- an in-memory authoritative server plus simulated clients;
+- exact convergence of scores, timers, health and authoritative spawn/despawn sets;
+- server car-state convergence under latency, jitter, loss, duplication and reordering;
+- prediction rewind/replay and remote interpolation/extrapolation;
+- reconnect full snapshot, credential-query log redaction and grace expiry;
+- authenticated server-only DO commit/abort, conflicting terminal decisions and client-result rejection;
+- DO clean-create, upgrade migration, alarm/attachment restoration and rollback/forward-fix drills;
+- player separation, the any-player/all-players interest invariant, entity caps and long soak;
+- native/native, native/WASM, two tabs, mobile touch;
+- abuse/rate/idle/version rejection;
+- server/Worker failure and rollback drills.
+
+Existing offline gates remain mandatory:
+
+```text
+cargo fmt --all -- --check
+cargo test --locked
+cargo check --locked
+cargo check --locked --target wasm32-unknown-unknown
+trunk build --release --cargo-profile wasm-release
+python tools/check_release.py --dist dist
+strict runtime, desktop, touch, Settings and Turnstile browser suites
+production browser audit
+```
+
+## 18. Risk register
+
+| Risk | Required mitigation / gate |
+|---|---|
+| Bevy 0.19/headless separation duplicates or changes gameplay | `MinimalPlugins` loopback prototype; shared simulation systems; offline and 10-minute convergence gates |
+| Native/WASM WebSocket or codec dependency incompatibility | pinned-version spike, golden vectors, malformed-input tests and two-target CI before adoption |
+| WebSocket head-of-line blocking harms feel | measure RTT/loss/correction and snapshot size under WAN faults; consider WebTransport only from evidence |
+| Prediction/collision correction feels poor | start near 0.3 units/5 degrees and 100 ms interpolation, then tune with recorded M2/M4 thresholds |
+| Multi-player separation explodes entities, memory or bandwidth | exact interest invariant, separation/regroup rule, hard measured caps and long soak |
+| Topology/RNG diverges across native and WASM | version tuple, domain-separated streams and coordinate hash tests before topology v1 |
+| Ghost reference or shared package differs from assumptions | pin/reinspect revision, reproduce upstream tests, provenance/parity tests; do not repository-import |
+| DO lifecycle/storage migration corrupts rooms | authenticated terminal transition tests, schema migrations, preview upgrades and rollback/forward-fix drill |
+| Tickets/reconnect tokens leak through logs | rotation, short expiry, query redaction/drop policy and deployment log test |
+| Hosting cost, abuse or scope grows uncontrolled | static endpoint, room/rate caps, feature kill switches, explicit budget and stop/fallback decision |
+
+## 19. Open decisions before implementation
+
+- Native server hosting target, static MVP region and operating budget.
+- Whether lifecycle reducer becomes a new shared-package export or separately versioned vendor artifact.
+- Match-ticket signing algorithm, secret storage, rotation and overlap procedure.
+- Maximum permitted player separation and regroup policy.
+- Safe disconnected-car behavior during grace.
+- Whether online mode later receives a separate authoritative leaderboard.
+- Preview capacity, metrics thresholds and rollback owner.
