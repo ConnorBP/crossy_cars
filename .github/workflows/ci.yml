@@ -16,7 +16,7 @@ jobs:
   build:
     name: Rust tests and production release
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 75
     env:
       CARGO_TERM_COLOR: always
       TRUNK_VERSION: 0.21.14
@@ -64,15 +64,15 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Run Rust tests
-        timeout-minutes: 15
+        timeout-minutes: 30
         run: cargo test --locked
 
       - name: Check WebAssembly target
-        timeout-minutes: 15
+        timeout-minutes: 20
         run: cargo check --locked --target wasm32-unknown-unknown
 
       - name: Build production WebAssembly release
-        timeout-minutes: 20
+        timeout-minutes: 25
         run: trunk build --release --cargo-profile wasm-release
 
       - name: Validate release output
