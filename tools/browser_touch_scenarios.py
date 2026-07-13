@@ -113,23 +113,23 @@ def main() -> int:
             page.wait_for_timeout(3_800)
             shot("01_touch_hud.png")
 
-            # Start on the left DRIVE pad, drag up-left, then add the right
-            # BRAKE/REVERSE action while retaining the drive touch.
+            # The first eligible touch owns direction regardless of position:
+            # begin on the right, drag up-left, then add action on the left.
             cdp = context.new_cdp_session(page)
-            drive = {"x": 100, "y": 335, "radiusX": 8, "radiusY": 8, "force": 1, "id": 1}
+            drive = {"x": 735, "y": 325, "radiusX": 8, "radiusY": 8, "force": 1, "id": 1}
             cdp.send(
                 "Input.dispatchTouchEvent",
                 {"type": "touchStart", "touchPoints": [drive]},
             )
             page.wait_for_timeout(600)
-            drive["x"] = 55
-            drive["y"] = 275
+            drive["x"] = 690
+            drive["y"] = 265
             cdp.send(
                 "Input.dispatchTouchEvent",
                 {"type": "touchMove", "touchPoints": [drive]},
             )
             page.wait_for_timeout(1_000)
-            action = {"x": 735, "y": 325, "radiusX": 8, "radiusY": 8, "force": 1, "id": 2}
+            action = {"x": 100, "y": 325, "radiusX": 8, "radiusY": 8, "force": 1, "id": 2}
             cdp.send(
                 "Input.dispatchTouchEvent",
                 {"type": "touchStart", "touchPoints": [drive, action]},

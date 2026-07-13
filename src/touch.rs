@@ -6,7 +6,6 @@ use crate::game::{
     state::GameState,
 };
 
-const ACTIVE_Y: f32 = 0.55;
 const PAUSE_TOP: f32 = 0.14;
 const PAUSE_LEFT: f32 = 0.44;
 const PAUSE_RIGHT: f32 = 0.56;
@@ -43,13 +42,8 @@ pub(crate) const TOUCH_EVENT_TOP: f32 = 182.0;
 pub(crate) const TOUCH_EVENT_WIDTH: f32 = 250.0;
 pub(crate) const TOUCH_EVENT_HEIGHT: f32 = 30.0;
 
-const DRIVE_PAD_LEFT: f32 = 32.0;
-const DRIVE_PAD_BOTTOM: f32 = 10.0;
-const DRIVE_PAD_SIZE: f32 = 136.0;
-const ACTION_PAD_RIGHT: f32 = 32.0;
-const ACTION_PAD_BOTTOM: f32 = 18.0;
-const ACTION_PAD_WIDTH: f32 = 180.0;
-const ACTION_PAD_HEIGHT: f32 = 112.0;
+const TOUCH_INSTRUCTION_HEIGHT: f32 = 44.0;
+const TOUCH_INSTRUCTION_INSET: f32 = 14.0;
 
 /// Top-left-origin pixel bounds used to verify HUD separation without an ECS
 /// world or renderer. Touch, health, and pickup UI share this representation.
@@ -130,49 +124,32 @@ pub(crate) fn touch_hud_bounds(viewport: Vec2) -> [ScreenBounds; 7] {
     ]
 }
 
-/// Union of all lower driving hitboxes in top-left-origin screen pixels.
+/// Painted bounds of the low-profile, full-width touch instruction band.
+/// Touch roles themselves are position-independent and have no driving hitbox.
 #[allow(dead_code)]
 pub(crate) fn touch_driving_band_bounds(viewport: Vec2) -> ScreenBounds {
     ScreenBounds {
         left: 0.0,
-        top: viewport.y * ACTIVE_Y,
+        top: (viewport.y - TOUCH_INSTRUCTION_HEIGHT).max(0.0),
         right: viewport.x,
         bottom: viewport.y,
     }
 }
 
 #[cfg(test)]
-fn touch_control_zone_bounds(viewport: Vec2) -> [ScreenBounds; 2] {
-    [
-        ScreenBounds {
-            left: 0.0,
-            top: viewport.y * ACTIVE_Y,
-            right: viewport.x * 0.5,
-            bottom: viewport.y,
-        },
-        ScreenBounds {
-            left: viewport.x * 0.5,
-            top: viewport.y * ACTIVE_Y,
-            right: viewport.x,
-            bottom: viewport.y,
-        },
-    ]
-}
-
-#[cfg(test)]
 fn touch_control_label_bounds(viewport: Vec2) -> [ScreenBounds; 2] {
+    let band = touch_driving_band_bounds(viewport);
+    let midpoint = viewport.x * 0.5;
     [
         ScreenBounds {
-            left: DRIVE_PAD_LEFT,
-            top: viewport.y - DRIVE_PAD_BOTTOM - DRIVE_PAD_SIZE,
-            right: DRIVE_PAD_LEFT + DRIVE_PAD_SIZE,
-            bottom: viewport.y - DRIVE_PAD_BOTTOM,
+            left: TOUCH_INSTRUCTION_INSET,
+            right: midpoint,
+            ..band
         },
         ScreenBounds {
-            left: viewport.x - ACTION_PAD_RIGHT - ACTION_PAD_WIDTH,
-            top: viewport.y - ACTION_PAD_BOTTOM - ACTION_PAD_HEIGHT,
-            right: viewport.x - ACTION_PAD_RIGHT,
-            bottom: viewport.y - ACTION_PAD_BOTTOM,
+            left: midpoint,
+            right: (viewport.x - TOUCH_INSTRUCTION_INSET).max(midpoint),
+            ..band
         },
     ]
 }
@@ -188,8 +165,8 @@ struct TouchHudRoot;
 #[derive(Component)]
 struct TouchGuidanceRoot;
 
-/// The first live touch on the left half owns the drive stick until it is
-/// released/cancelled, matching wasm_battle_arena's `TouchMap` resource.
+/// The first eligible live touch anywhere owns direction until it is
+/// released/cancelled. Other eligible touches supply the action role.
 #[derive(Resource, Default, Debug, Clone, Copy, PartialEq, Eq)]
 struct DriveTouchOwner(Option<u64>);
 
@@ -311,28 +288,44 @@ fn input_from_vec(dir: Vec2, deadzone: f32) -> u8 {
     }
 }
 
+fn eligible_touch(touch: &ActiveTouch) -> bool {
+    !is_pause_hitbox(touch.start)
+}
+
 fn update_drive_owner(owner: Option<u64>, touches: &[ActiveTouch]) -> Option<u64> {
-    if owner.is_some_and(|id| touches.iter().any(|touch| touch.id == id)) {
-        owner
-    } else {
+    if owner.is_some_and(|id| {
         touches
             .iter()
-            .find(|touch| touch.start.x < 0.5)
+            .any(|touch| touch.id == id && eligible_touch(touch))
+    }) {
+        owner
+    } else {
+        // Touch iteration order is not stable. IDs provide a deterministic tie
+        // break when multiple eligible touches begin in the same update.
+        touches
+            .iter()
+            .filter(|touch| eligible_touch(touch))
             .map(|touch| touch.id)
+            .min()
     }
 }
 
 fn touch_intent(owner: Option<u64>, touches: &[ActiveTouch], window_size: Vec2) -> TouchIntent {
     let direction = owner
-        .and_then(|id| touches.iter().find(|touch| touch.id == id))
+        .and_then(|id| {
+            touches
+                .iter()
+                .find(|touch| touch.id == id && eligible_touch(touch))
+        })
         .map(|touch| {
             let delta = (touch.start - touch.current) * window_size;
             input_from_vec(delta, adaptive_deadzone(window_size))
         })
         .unwrap_or(0);
-    let action = touches
-        .iter()
-        .any(|touch| touch.start.x >= 0.5 && !is_pause_hitbox(touch.start));
+    let action = owner.is_some()
+        && touches
+            .iter()
+            .any(|touch| eligible_touch(touch) && Some(touch.id) != owner);
     TouchIntent { direction, action }
 }
 
@@ -448,11 +441,6 @@ fn read_touch_input(
     mut owner: ResMut<DriveTouchOwner>,
     mut input: ResMut<PlayerInput>,
 ) {
-    if frozen.0 {
-        *input = PlayerInput::default();
-        owner.0 = None;
-        return;
-    }
     let Some(window_size) = primary_window_size(&windows) else {
         return;
     };
@@ -468,6 +456,12 @@ fn read_touch_input(
         })
         .collect();
     owner.0 = update_drive_owner(owner.0, &active_touches);
+    if frozen.0 {
+        *input = PlayerInput::default();
+        // Track role ownership during countdown/input freezes, but suppress its
+        // effect. Playing state exit is the sole unconditional owner reset.
+        return;
+    }
     let intent = touch_intent(owner.0, &active_touches, window_size);
     let speed = car.single().map_or(0.0, |car| car.speed);
     *input = merge_touch_input(*input, intent, speed);
@@ -501,59 +495,34 @@ fn spawn_touch_hud(mut commands: Commands, active: Res<TouchControlsActive>) {
             root.spawn((
                 Node {
                     position_type: PositionType::Absolute,
-                    left: px(DRIVE_PAD_LEFT),
-                    bottom: px(DRIVE_PAD_BOTTOM),
-                    width: px(DRIVE_PAD_SIZE),
-                    height: px(DRIVE_PAD_SIZE),
-                    border: UiRect::all(px(3.0)),
-                    border_radius: BorderRadius::all(Val::Percent(50.0)),
+                    left: px(TOUCH_INSTRUCTION_INSET),
+                    right: px(TOUCH_INSTRUCTION_INSET),
+                    bottom: px(0.0),
+                    height: px(TOUCH_INSTRUCTION_HEIGHT),
+                    flex_direction: FlexDirection::Row,
                     align_items: AlignItems::Center,
-                    justify_content: JustifyContent::Center,
                     ..default()
                 },
-                BorderColor::all(Color::srgba(1.0, 1.0, 1.0, 0.34)),
-                BackgroundColor(Color::srgba(0.02, 0.02, 0.03, 0.18)),
-                Text::new("DRIVE"),
-                TextFont {
-                    font_size: FontSize::Px(19.0),
-                    ..default()
-                },
-                TextColor(Color::srgba(1.0, 1.0, 1.0, 0.58)),
-            ));
-            root.spawn((
-                Node {
-                    position_type: PositionType::Absolute,
-                    right: px(ACTION_PAD_RIGHT),
-                    bottom: px(ACTION_PAD_BOTTOM),
-                    width: px(ACTION_PAD_WIDTH),
-                    height: px(ACTION_PAD_HEIGHT),
-                    border: UiRect::all(px(3.0)),
-                    border_radius: BorderRadius::all(px(24.0)),
-                    flex_direction: FlexDirection::Column,
-                    align_items: AlignItems::Center,
-                    justify_content: JustifyContent::Center,
-                    ..default()
-                },
-                BorderColor::all(Color::srgba(1.0, 0.55, 0.4, 0.44)),
-                BackgroundColor(Color::srgba(0.08, 0.02, 0.02, 0.24)),
+                BackgroundColor(Color::srgba(0.02, 0.02, 0.03, 0.22)),
             ))
-            .with_children(|button| {
-                button.spawn((
-                    Text::new("BRAKE"),
-                    TextFont {
-                        font_size: FontSize::Px(23.0),
-                        ..default()
-                    },
-                    TextColor(Color::srgba(1.0, 0.86, 0.8, 0.72)),
-                ));
-                button.spawn((
-                    Text::new("REVERSE"),
-                    TextFont {
-                        font_size: FontSize::Px(13.0),
-                        ..default()
-                    },
-                    TextColor(Color::srgba(1.0, 1.0, 1.0, 0.48)),
-                ));
+            .with_children(|band| {
+                for label in ["1ST TOUCH: DRAG TO DRIVE", "2ND TOUCH: BRAKE / REVERSE"] {
+                    band.spawn((
+                        Node {
+                            width: Val::Percent(50.0),
+                            height: Val::Percent(100.0),
+                            align_items: AlignItems::Center,
+                            justify_content: JustifyContent::Center,
+                            ..default()
+                        },
+                        Text::new(label),
+                        TextFont {
+                            font_size: FontSize::Px(15.0),
+                            ..default()
+                        },
+                        TextColor(Color::srgba(1.0, 1.0, 1.0, 0.58)),
+                    ));
+                }
             });
             root.spawn((
                 Node {
@@ -694,27 +663,22 @@ mod tests {
     }
 
     #[test]
-    fn touch_bands_and_labels_match_hitboxes_at_target_viewports() {
+    fn full_width_instruction_band_is_low_profile_and_disjoint_from_hud() {
         for viewport in [Vec2::new(844.0, 390.0), Vec2::new(1440.0, 900.0)] {
             let band = touch_driving_band_bounds(viewport);
-            assert_eq!(band.top, viewport.y * ACTIVE_Y);
-            assert_eq!(band.bottom, viewport.y);
+            assert_eq!(band, fixed_bounds(0.0, viewport.y - 44.0, viewport.x, 44.0));
 
-            for zone in touch_control_zone_bounds(viewport) {
-                assert!(band.contains(zone));
-            }
-            for label in touch_control_label_bounds(viewport) {
-                assert!(band.contains(label));
+            let [first, second] = touch_control_label_bounds(viewport);
+            assert!(band.contains(first));
+            assert!(band.contains(second));
+            assert_eq!(first.left, TOUCH_INSTRUCTION_INSET);
+            assert_eq!(second.right, viewport.x - TOUCH_INSTRUCTION_INSET);
+            assert_eq!(first.right, second.left);
+            assert!(!first.overlaps(second));
+            for panel in touch_hud_bounds(viewport) {
+                assert!(!panel.overlaps(band), "{panel:?} overlaps {band:?}");
             }
         }
-    }
-
-    #[test]
-    fn control_visuals_are_disjoint_at_844x390() {
-        let [drive, action] = touch_control_label_bounds(Vec2::new(844.0, 390.0));
-        assert!(!drive.overlaps(action));
-        assert!(drive.right <= 844.0 * 0.5);
-        assert!(action.left >= 844.0 * 0.5);
     }
 
     #[test]
@@ -758,17 +722,49 @@ mod tests {
     }
 
     #[test]
-    fn first_left_touch_owns_until_release_then_hands_off() {
-        let first = touch(70, Vec2::new(0.2, 0.8), Vec2::new(0.2, 0.6));
-        let second = touch(9, Vec2::new(0.3, 0.8), Vec2::new(0.1, 0.8));
-        assert_eq!(update_drive_owner(None, &[first, second]), Some(70));
+    fn owner_is_position_independent_sticky_and_promotes_on_release() {
+        let first = touch(70, Vec2::new(0.84, 0.31), Vec2::new(0.74, 0.11));
+        assert_eq!(update_drive_owner(None, &[first]), Some(70));
+
+        // A later lower-ID touch cannot steal the live owner's role, regardless
+        // of position or iteration order.
+        let second = touch(9, Vec2::new(0.08, 0.42), Vec2::new(0.18, 0.22));
         assert_eq!(update_drive_owner(Some(70), &[second, first]), Some(70));
-        assert_eq!(update_drive_owner(Some(70), &[second]), Some(9));
-        assert_eq!(update_drive_owner(Some(70), &[]), None);
+        assert_eq!(update_drive_owner(Some(70), &[first, second]), Some(70));
+        let size = Vec2::new(844.0, 390.0);
         assert_eq!(
-            update_drive_owner(None, &[touch(1, Vec2::new(0.8, 0.8), Vec2::ZERO)]),
-            None
+            touch_intent(Some(70), &[second, first], size),
+            touch_intent(Some(70), &[first, second], size)
         );
+        assert!(touch_intent(Some(70), &[second, first], size).action);
+
+        // Releasing the owner promotes the remaining touch; with one eligible
+        // touch left the action role clears and direction comes from the new owner.
+        let promoted = update_drive_owner(Some(70), &[second]);
+        assert_eq!(promoted, Some(9));
+        let promoted_intent = touch_intent(promoted, &[second], size);
+        assert!(!promoted_intent.action);
+        assert_eq!(promoted_intent.direction, INPUT_RIGHT | INPUT_UP);
+        assert_eq!(update_drive_owner(promoted, &[]), None);
+    }
+
+    #[test]
+    fn simultaneous_owner_tie_uses_lowest_id_independent_of_iteration() {
+        let low = touch(3, Vec2::new(0.9, 0.7), Vec2::new(0.8, 0.5));
+        let high = touch(40, Vec2::new(0.1, 0.2), Vec2::new(0.1, 0.2));
+        assert_eq!(update_drive_owner(None, &[low, high]), Some(3));
+        assert_eq!(update_drive_owner(None, &[high, low]), Some(3));
+    }
+
+    #[test]
+    fn pause_start_is_never_eligible_for_either_role() {
+        let pause = touch(1, Vec2::new(0.5, 0.1), Vec2::new(0.1, 0.9));
+        let drive = touch(8, Vec2::new(0.7, 0.4), Vec2::new(0.6, 0.2));
+        assert_eq!(update_drive_owner(None, &[pause]), None);
+        assert_eq!(update_drive_owner(None, &[pause, drive]), Some(8));
+        let intent = touch_intent(Some(8), &[pause, drive], Vec2::new(844.0, 390.0));
+        assert!(!intent.action);
+        assert_ne!(intent.direction, 0);
     }
 
     #[test]
@@ -825,21 +821,21 @@ mod tests {
     }
 
     #[test]
-    fn simultaneous_drive_and_action_and_keyboard_preservation() {
+    fn direction_on_right_action_on_left_and_keyboard_preservation() {
         let size = Vec2::new(844.0, 390.0);
         let touches = [
-            touch(1, Vec2::new(0.25, 0.85), Vec2::new(0.15, 0.65)),
-            touch(2, Vec2::new(0.8, 0.85), Vec2::new(0.8, 0.85)),
+            touch(1, Vec2::new(0.85, 0.85), Vec2::new(0.75, 0.65)),
+            touch(2, Vec2::new(0.15, 0.35), Vec2::new(0.95, 0.05)),
         ];
-        let touch_intent = touch_intent(Some(1), &touches, size);
-        assert_eq!(touch_intent.direction, INPUT_LEFT | INPUT_UP);
-        assert!(touch_intent.action);
+        let combined_intent = touch_intent(Some(1), &touches, size);
+        assert_eq!(combined_intent.direction, INPUT_LEFT | INPUT_UP);
+        assert!(combined_intent.action);
         let keyboard = PlayerInput {
             throttle: 0.4,
             steer: -0.3,
             brake: false,
         };
-        let merged = merge_touch_input(keyboard, touch_intent, 4.0);
+        let merged = merge_touch_input(keyboard, combined_intent, 4.0);
         assert_eq!(
             merged,
             PlayerInput {
@@ -849,6 +845,13 @@ mod tests {
             }
         );
 
+        // The second touch's large drag cannot alter owner direction.
+        let stationary_action = touch(2, touches[1].start, touches[1].start);
+        assert_eq!(
+            touch_intent(Some(1), &[touches[0], stationary_action], size).direction,
+            combined_intent.direction
+        );
+        assert_eq!(merge_touch_input(keyboard, intent(0, false), 0.0), keyboard);
         let up_only = merge_touch_input(keyboard, intent(INPUT_UP, false), 0.0);
         assert_eq!(up_only.steer, 0.0);
         assert_eq!(up_only.brake, keyboard.brake);
@@ -909,14 +912,5 @@ mod tests {
             resolve_touch_actions([StateAction::Playing, StateAction::Menu]),
             StateAction::Menu
         );
-    }
-
-    #[test]
-    fn right_half_is_action_except_pause_hitbox() {
-        let size = Vec2::new(844.0, 390.0);
-        let action = touch(1, Vec2::new(0.7, 0.2), Vec2::new(0.7, 0.2));
-        assert!(touch_intent(None, &[action], size).action);
-        let pause = touch(2, Vec2::new(0.5, 0.1), Vec2::new(0.5, 0.1));
-        assert!(!touch_intent(None, &[pause], size).action);
     }
 }

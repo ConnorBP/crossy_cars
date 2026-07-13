@@ -59,20 +59,21 @@ Every new round cycles through one of five road conditions:
 
 ### Touch controls
 
-On-screen touch controls appear after the first touch and stay available for the rest of the session; landscape orientation is recommended. Mobile driving uses the same two-zone drag/action scheme as the companion ghost game:
+On-screen touch controls appear after the first touch and stay available for the rest of the session; landscape orientation is recommended. Touch roles are position-independent:
 
-| Zone | Action |
+| Touch | Action |
 | --- | --- |
-| **DRIVE** (left half) | Drag upward to accelerate and diagonally/sideways to steer. The first left-side finger owns direction until released. |
-| **BRAKE / REVERSE** (right half) | Hold to brake while moving forward; once stopped, keep holding to reverse. |
+| **1ST TOUCH: DRAG TO DRIVE** | The first eligible live touch anywhere owns direction until released. Drag upward to accelerate and diagonally/sideways to steer. |
+| **2ND TOUCH: BRAKE / REVERSE** | Any other eligible live touch anywhere brakes at speed >0.15 and holds reverse at speed ≤0.15. |
 
-- Direction and the action button support simultaneous touches. A downward DRIVE drag never bypasses the dedicated brake-to-reverse action.
+- The direction owner remains fixed while live. When it is released, the remaining eligible touch is promoted to direction and brake/reverse clears if only one touch remains. Simultaneous touches are resolved deterministically by lowest touch ID.
+- Touches that start inside the top-center **PAUSE** hitbox are excluded from both driving roles. A second touch never changes direction, and a downward direction drag never bypasses the brake-to-reverse action.
 - Tap the top-center **PAUSE** button while driving to pause.
 - From the menu, tap anywhere to start a round.
 - On the pause screen, tap the left third to resume, the middle third to restart, or the right third to return to the menu.
 - On the game-over screen, tap the left two-thirds to play again, or the right third to return to the menu.
 
-Mute is available from the touch-accessible Settings panel. Reverse is available by holding **BRAKE / REVERSE** through a complete stop.
+Mute is available from the touch-accessible Settings panel. Reverse is available by keeping a second eligible touch held through a complete stop.
 
 ## Run natively
 
@@ -122,7 +123,7 @@ Production deployment to Cloudflare Pages is configured through GitHub Actions. 
 `src/main.rs` composes the game from focused Bevy plugins:
 
 - `game/` owns states, shared resources and messages, round timing, pause/restart/menu transitions, and fresh-round ordering.
-- `car.rs` and `camera.rs` implement arcade driving, collisions, vehicle animation, fixed isometric following, zoom, and impact shake; `touch.rs` adds on-screen touch driving zones, multi-touch merging, and touch-driven menu/pause/game-over transitions.
+- `car.rs` and `camera.rs` implement arcade driving, collisions, vehicle animation, fixed isometric following, zoom, and impact shake; `touch.rs` adds position-independent touch roles, multi-touch merging, and touch-driven menu/pause/game-over transitions.
 - `world.rs` streams the deterministic city grid, roads, buildings, props, obstacles, and coins; `textures.rs` generates tiled surface textures and normal maps.
 - `chickens.rs` and `critters.rs` own the wandering targets, hit rules, recycling, models, and particles.
 - `combos.rs`, `countdown.rs`, `modifiers.rs`, `difficulty.rs`, `pickups.rs`, and `health.rs` implement round scoring, conditions, traffic, power-ups, and survival systems.
