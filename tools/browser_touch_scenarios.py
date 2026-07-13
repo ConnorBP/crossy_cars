@@ -2,9 +2,10 @@
 """Strict mobile/touch browser scenario for Roady Car.
 
 Uses Playwright touch emulation plus Chrome DevTools multi-touch dispatch.
-Canvas-rendered state transitions are covered by Rust pure tests; this scenario
-asserts responsive canvas fit, exercises every touch path, captures screenshots,
-and fails on browser/network/runtime errors.
+State transitions are behaviorally probed through touch-accessible Settings and
+exact localStorage changes. The scenario also asserts responsive canvas fit,
+exercises every touch path, captures screenshots, and fails on browser/network/
+runtime errors.
 """
 
 from __future__ import annotations
@@ -17,6 +18,14 @@ import time
 import traceback
 from pathlib import Path
 from typing import Any
+
+
+STORAGE_KEY = "roady_car_settings"
+LEGACY_KEY = "roady_car_audio_muted"
+INITIAL_SETTINGS = "v2:100:0:0:"
+STORAGE_ASSERT_TIMEOUT_MS = 60_000
+STORAGE_POLL_INTERVAL_MS = 250
+UNCHANGED_ASSERT_WAIT_MS = 2_000
 
 
 def args() -> argparse.Namespace:
@@ -32,6 +41,42 @@ def args() -> argparse.Namespace:
 
 def channel(value: str) -> str | None:
     return None if value.lower() in {"", "chromium", "playwright", "bundled"} else value
+
+
+def read_settings(page: Any) -> str | None:
+    return page.evaluate(f"localStorage.getItem({json.dumps(STORAGE_KEY)})")
+
+
+def wait_for_exact_settings(page: Any, expected: str, checkpoint: str) -> None:
+    try:
+        page.wait_for_function(
+            f"localStorage.getItem({json.dumps(STORAGE_KEY)}) === {json.dumps(expected)}",
+            timeout=STORAGE_ASSERT_TIMEOUT_MS,
+            polling=STORAGE_POLL_INTERVAL_MS,
+        )
+    except Exception as exc:  # noqa: BLE001 - replace opaque polling timeout
+        actual = read_settings(page)
+        raise AssertionError(
+            f"{checkpoint}: expected exact settings {expected!r} within "
+            f"{STORAGE_ASSERT_TIMEOUT_MS}ms, got {actual!r}"
+        ) from exc
+
+    actual = read_settings(page)
+    if actual != expected:
+        raise AssertionError(
+            f"{checkpoint}: expected exact settings {expected!r}, got {actual!r}"
+        )
+
+
+def assert_settings_unchanged(page: Any, expected: str, checkpoint: str) -> None:
+    page.wait_for_timeout(UNCHANGED_ASSERT_WAIT_MS)
+    actual = read_settings(page)
+    if actual != expected:
+        raise AssertionError(
+            f"{checkpoint}: settings changed during the conservative "
+            f"{UNCHANGED_ASSERT_WAIT_MS}ms observation; expected {expected!r}, "
+            f"got {actual!r}"
+        )
 
 
 def main() -> int:
@@ -64,6 +109,20 @@ def main() -> int:
                 has_touch=True,
                 is_mobile=True,
                 device_scale_factor=1,
+            )
+            # Install deterministic settings before the first navigation so the
+            # state probes below never depend on settings left by an earlier run.
+            context.add_init_script(
+                script=f"""
+(() => {{
+    try {{
+        localStorage.setItem(
+            {json.dumps(STORAGE_KEY)}, {json.dumps(INITIAL_SETTINGS)}
+        );
+        localStorage.removeItem({json.dumps(LEGACY_KEY)});
+    }} catch (_) {{}}
+}})();
+"""
             )
             page = context.new_page()
             page.on(
@@ -101,16 +160,53 @@ def main() -> int:
             page.locator("#loading").wait_for(state="hidden", timeout=120_000)
             page.wait_for_timeout(800)
             rect = canvas.evaluate(
-                "e => { const r=e.getBoundingClientRect(); return {width:r.width,height:r.height}; }"
+                "e => { const r=e.getBoundingClientRect(); return "
+                "{left:r.left,top:r.top,width:r.width,height:r.height}; }"
             )
             if abs(rect["width"] - 844) > 1 or abs(rect["height"] - 390) > 1:
                 raise AssertionError(f"canvas did not fit mobile viewport: {rect}")
             summary["canvas"] = rect
+
+            wait_for_exact_settings(page, INITIAL_SETTINGS, "deterministic boot")
+
+            def settings_tap(fx: float, fy: float) -> None:
+                page.touchscreen.tap(
+                    rect["left"] + fx * rect["width"],
+                    rect["top"] + fy * rect["height"],
+                )
+                page.wait_for_timeout(170)
+
+            def settings_volume_minus(expected: str, checkpoint: str) -> None:
+                """Open Settings, tap Volume -, close Back, and require the change."""
+                # These are the mobile row coordinates proven by
+                # browser_settings_scenarios.py: opener, Volume left, Back.
+                settings_tap(0.88, 0.12)
+                settings_tap(0.20, 0.26)
+                settings_tap(0.50, 0.77)
+                # Assert only after Back so a failed checkpoint cannot leave a
+                # successfully opened modal covering the game.
+                wait_for_exact_settings(page, expected, checkpoint)
+
+            def settings_volume_minus_must_not_change(
+                expected: str, checkpoint: str
+            ) -> None:
+                """Try the same touch path where Settings must be inaccessible."""
+                settings_tap(0.88, 0.12)
+                settings_tap(0.20, 0.26)
+                settings_tap(0.50, 0.77)
+                # Two seconds allows delayed frame/event processing to expose an
+                # accidental modal opening or settings mutation.
+                assert_settings_unchanged(page, expected, checkpoint)
+
             shot("00_mobile_menu.png")
 
             # Any touch starts Menu, activates touch controls, and unlocks audio.
             page.touchscreen.tap(422, 195)
             page.wait_for_timeout(3_800)
+            settings_volume_minus_must_not_change(
+                "v2:100:0:0:",
+                "after touch start: Playing must reject Settings adjustment",
+            )
             shot("01_touch_hud.png")
 
             # The first eligible touch owns direction regardless of position:
@@ -139,12 +235,24 @@ def main() -> int:
             page.wait_for_timeout(400)
             shot("02_after_multitouch.png")
 
-            # Pause zone; left third resumes.
+            # Pause zone; Settings is touch-accessible only because state is
+            # Paused. The helper closes the modal through its Back row.
             page.touchscreen.tap(422, 25)
             page.wait_for_timeout(500)
             shot("03_paused.png")
+            settings_volume_minus(
+                "v2:90:0:0:",
+                "first pause: Paused must allow Settings volume 100 -> 90",
+            )
+
+            # Left third resumes. Playing must make the identical Settings touch
+            # sequence inert, preserving the exact schema.
             page.touchscreen.tap(100, 195)
             page.wait_for_timeout(500)
+            settings_volume_minus_must_not_change(
+                "v2:90:0:0:",
+                "after resume: Playing must reject Settings adjustment",
+            )
             shot("04_resumed.png")
 
             # Middle third performs restart through Menu and a fresh countdown.
@@ -154,13 +262,39 @@ def main() -> int:
             page.wait_for_timeout(800)
             shot("05_touch_restart_countdown.png")
             page.wait_for_timeout(3_200)
+            settings_volume_minus_must_not_change(
+                "v2:90:0:0:",
+                "after restart countdown: Playing must reject Settings adjustment",
+            )
 
-            # Right third returns to Menu.
+            # Pause once more, adjust while Paused, and close Back before the
+            # right-third action returns to Menu. Menu then allows one final
+            # touch-only adjustment, whose modal is also closed through Back.
             page.touchscreen.tap(422, 25)
             page.wait_for_timeout(350)
+            settings_volume_minus(
+                "v2:80:0:0:",
+                "second pause: Paused must allow Settings volume 90 -> 80",
+            )
             page.touchscreen.tap(760, 195)
             page.wait_for_timeout(700)
+            settings_volume_minus(
+                "v2:70:0:0:",
+                "right-third return: Menu must allow Settings volume 80 -> 70",
+            )
             shot("06_touch_menu.png")
+
+            # Distinguish Menu from Paused rather than treating both as the
+            # same Settings-accessible state. In Menu this touch starts a round;
+            # if the preceding right-third transition failed and state remained
+            # Paused, the same touch merely returns to Menu. Settings must be
+            # inaccessible after the fresh countdown only in the correct path.
+            page.touchscreen.tap(760, 195)
+            page.wait_for_timeout(3_800)
+            settings_volume_minus_must_not_change(
+                "v2:70:0:0:",
+                "menu proof: a touch must start Playing, not leave Paused/Menu",
+            )
             page.wait_for_timeout(300)
 
             for key in ("console_errors", "page_errors", "network_failures", "http_errors"):
