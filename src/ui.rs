@@ -1,9 +1,9 @@
-use bevy::{prelude::*, text::FontSize};
+use bevy::{prelude::*, text::FontSize, window::PrimaryWindow};
 
 use crate::car::Car;
-use crate::game::SpawnSet;
 use crate::game::resources::{GameOverReason, Score, TimeLeft};
 use crate::game::state::GameState;
+use crate::game::{SpawnSet, TouchStateSet};
 use crate::modifiers::{ActiveModifier, ModifierKind};
 use crate::objectives::ActiveObjective;
 use crate::palette;
@@ -11,7 +11,10 @@ use crate::persist::{
     BestAtRoundStart, ConditionBests, ConditionBestsAtRoundStart, Medal, medal_for,
 };
 use crate::settings::Settings;
-use crate::touch::TouchControlsActive;
+use crate::touch::{
+    TOUCH_COCKPIT_HEIGHT, TOUCH_COCKPIT_LEFT, TOUCH_COCKPIT_TOP, TOUCH_COCKPIT_WIDTH,
+    TouchControlsActive,
+};
 
 const ALL_CONDITIONS: [ModifierKind; 5] = [
     ModifierKind::Standard,
@@ -131,11 +134,172 @@ fn total_medal_points(condition_bests: &ConditionBests) -> u32 {
         .sum()
 }
 
+/// Compact, non-color-only state for one condition in the Menu gallery.
+/// `[X]` is earned and `[-]` is still locked; the B/S/G letters keep all
+/// three tiers identifiable even when color is unavailable.
+fn medal_gallery_state(kind: ModifierKind, best: u32) -> String {
+    let earned = medal_points(medal_for(kind, best));
+    let symbol = |tier: u32| if earned >= tier { "[X]" } else { "[-]" };
+    format!(
+        "BEST {best}   B{}  S{}  G{}",
+        symbol(1),
+        symbol(2),
+        symbol(3)
+    )
+}
+
+/// Conservative fixed-content budget for the compact Menu composition. The
+/// actual root remains centered on large screens, while this bound keeps its
+/// title, controls, five gallery rows, and start prompt inside the 390px-high
+/// landscape mobile viewport targeted by the HUD.
+#[cfg(test)]
+const MENU_CONTENT_HEIGHT: f32 = 310.0;
+#[cfg(test)]
+const MENU_GALLERY_WIDTH: f32 = 360.0;
+
+#[cfg(test)]
+fn menu_content_fits(viewport_width: f32, viewport_height: f32) -> bool {
+    viewport_width >= MENU_GALLERY_WIDTH + 16.0 && viewport_height >= MENU_CONTENT_HEIGHT
+}
+
+/// One single-line item in the fixed Game Over vertical budget. `margin` is
+/// the separation after the item (before it for the final replay prompt).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct GameOverTextSpec {
+    font: f32,
+    margin: f32,
+}
+
+/// Responsive Game Over typography. The desktop values intentionally mirror
+/// the original composition exactly; only short/narrow mobile viewports use
+/// the compact budget.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct GameOverLayout {
+    root_padding: f32,
+    content_width_budget: f32,
+    title: GameOverTextSpec,
+    score_label: GameOverTextSpec,
+    score: GameOverTextSpec,
+    chicken: GameOverTextSpec,
+    coins: GameOverTextSpec,
+    best: GameOverTextSpec,
+    condition: GameOverTextSpec,
+    new_condition_best: GameOverTextSpec,
+    medal_upgrade: GameOverTextSpec,
+    objective: GameOverTextSpec,
+    prompt: GameOverTextSpec,
+}
+
+const fn gameover_text(font: f32, margin: f32) -> GameOverTextSpec {
+    GameOverTextSpec { font, margin }
+}
+
+const GAMEOVER_DESKTOP_LAYOUT: GameOverLayout = GameOverLayout {
+    root_padding: 0.0,
+    content_width_budget: 700.0,
+    title: gameover_text(56.0, 14.0),
+    score_label: gameover_text(16.0, 2.0),
+    score: gameover_text(38.0, 10.0),
+    chicken: gameover_text(21.0, 2.0),
+    coins: gameover_text(21.0, 14.0),
+    best: gameover_text(24.0, 10.0),
+    condition: gameover_text(22.0, 6.0),
+    new_condition_best: gameover_text(20.0, 4.0),
+    medal_upgrade: gameover_text(20.0, 8.0),
+    objective: gameover_text(20.0, 8.0),
+    prompt: gameover_text(19.0, 8.0),
+};
+
+const GAMEOVER_COMPACT_LAYOUT: GameOverLayout = GameOverLayout {
+    root_padding: 6.0,
+    // Covers the replay prompt and the longest completed objective summary at
+    // these font sizes without relying on wrapping for the height budget.
+    content_width_budget: 540.0,
+    title: gameover_text(40.0, 4.0),
+    score_label: gameover_text(12.0, 1.0),
+    score: gameover_text(28.0, 3.0),
+    chicken: gameover_text(16.0, 1.0),
+    coins: gameover_text(16.0, 5.0),
+    best: gameover_text(18.0, 3.0),
+    condition: gameover_text(17.0, 2.0),
+    new_condition_best: gameover_text(15.0, 2.0),
+    medal_upgrade: gameover_text(15.0, 4.0),
+    objective: gameover_text(15.0, 4.0),
+    prompt: gameover_text(14.0, 4.0),
+};
+
+/// Default font metrics are below this deliberately conservative multiplier.
+/// Keeping it in the pure budget makes the maximal optional state testable
+/// without coupling tests to Bevy's renderer or an installed font.
+const GAMEOVER_LINE_HEIGHT_BUDGET: f32 = 1.4;
+const GAMEOVER_DESKTOP_SAFETY_MARGIN: f32 = 6.0;
+
+fn gameover_layout(viewport_width: f32, viewport_height: f32) -> GameOverLayout {
+    if viewport_height
+        <= maximal_gameover_content_height(GAMEOVER_DESKTOP_LAYOUT) + GAMEOVER_DESKTOP_SAFETY_MARGIN
+        || viewport_width <= GAMEOVER_DESKTOP_LAYOUT.content_width_budget
+    {
+        GAMEOVER_COMPACT_LAYOUT
+    } else {
+        GAMEOVER_DESKTOP_LAYOUT
+    }
+}
+
+fn gameover_title(reason: GameOverReason) -> &'static str {
+    match reason {
+        GameOverReason::Wrecked => "Wrecked!",
+        GameOverReason::TimeUp => "Time's up!",
+    }
+}
+
+/// Pure fixed-budget height for the maximal terminal state: both record
+/// notices, the medal upgrade, and the objective summary are all visible.
+fn maximal_gameover_content_height(layout: GameOverLayout) -> f32 {
+    let rows = [
+        layout.title,
+        layout.score_label,
+        layout.score,
+        layout.chicken,
+        layout.coins,
+        layout.best,
+        layout.condition,
+        layout.new_condition_best,
+        layout.medal_upgrade,
+        layout.objective,
+        layout.prompt,
+    ];
+    layout.root_padding * 2.0
+        + rows
+            .into_iter()
+            .map(|row| row.font * GAMEOVER_LINE_HEIGHT_BUDGET + row.margin)
+            .sum::<f32>()
+}
+
+/// Pure viewport check used to guard the worst-case mobile composition. The
+/// reason participates in the width check so both terminal titles are covered.
+#[cfg(test)]
+fn maximal_gameover_state_fits(
+    viewport_width: f32,
+    viewport_height: f32,
+    reason: GameOverReason,
+) -> bool {
+    let layout = gameover_layout(viewport_width, viewport_height);
+    let title_width_budget =
+        gameover_title(reason).chars().count() as f32 * layout.title.font * 0.75;
+    let required_width =
+        layout.content_width_budget.max(title_width_budget) + layout.root_padding * 2.0;
+    required_width <= viewport_width && maximal_gameover_content_height(layout) <= viewport_height
+}
+
 // --- UI root markers ---
 #[derive(Component)]
 struct MenuRoot;
 #[derive(Component)]
 struct HudRoot;
+#[derive(Component)]
+struct CockpitRoot;
+#[derive(Component)]
+struct CompactCockpitApplied;
 #[derive(Component)]
 struct HintRoot;
 #[derive(Component)]
@@ -158,6 +322,8 @@ struct CoinsText;
 struct TimerText;
 #[derive(Component)]
 struct MenuMedalsText;
+#[derive(Component)]
+struct MenuMedalRow(ModifierKind);
 
 /// Countdown for the transient controls hint; entity is despawned when it hits zero.
 #[derive(Component)]
@@ -194,7 +360,8 @@ impl Plugin for UiPlugin {
                     update_chickens_text,
                     update_coins_text,
                     update_timer_text,
-                    update_hint,
+                    update_hint.after(TouchStateSet),
+                    update_cockpit_layout.after(TouchStateSet),
                 )
                     .run_if(in_state(GameState::Playing)),
             )
@@ -219,93 +386,131 @@ fn spawn_menu(mut commands: Commands, condition_bests: Res<ConditionBests>) {
                 align_items: AlignItems::Center,
                 justify_content: JustifyContent::Center,
                 flex_direction: FlexDirection::Column,
+                padding: UiRect::all(px(8.0)),
                 ..default()
             },
-            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.55)),
+            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.62)),
             MenuRoot,
         ))
         .with_children(|p| {
-            // Title
             p.spawn((
                 Text::new("ROADY CAR"),
                 TextFont {
-                    font_size: FontSize::Px(72.0),
+                    font_size: FontSize::Px(48.0),
                     ..default()
                 },
                 TextColor(palette::HUD_ACCENT.into()),
                 Node {
-                    margin: UiRect::bottom(px(10.0)),
+                    margin: UiRect::bottom(px(2.0)),
                     ..default()
                 },
             ));
-            // Subtitle
             p.spawn((
-                Text::new("Hit wandering chickens for score! Coins give bonus time."),
+                Text::new("Hit wandering chickens for score!\nCoins give bonus time."),
                 TextFont {
-                    font_size: FontSize::Px(22.0),
+                    font_size: FontSize::Px(15.0),
                     ..default()
                 },
                 TextColor(palette::HUD_TEXT.into()),
                 Node {
-                    margin: UiRect::bottom(px(30.0)),
+                    margin: UiRect::bottom(px(7.0)),
                     ..default()
                 },
             ));
-            // Controls list
+
+            // Compact controls stay legible without pushing the five-row
+            // gallery or start affordance below a short mobile viewport.
             p.spawn((
-                Text::new("WASD / Arrows  —  Drive"),
+                Text::new("WASD / Arrows — Drive   •   Space — Brake   •   Esc — Pause"),
                 TextFont {
-                    font_size: FontSize::Px(20.0),
+                    font_size: FontSize::Px(13.0),
                     ..default()
                 },
-                TextColor(Color::srgba(0.8, 0.8, 0.85, 1.0).into()),
+                TextColor(Color::srgba(0.84, 0.84, 0.90, 1.0).into()),
                 Node {
-                    margin: UiRect::bottom(px(4.0)),
+                    margin: UiRect::bottom(px(6.0)),
                     ..default()
                 },
             ));
+
+            // Per-condition medal gallery. Rows use explicit B/S/G labels and
+            // earned/locked symbols, so state never depends on medal color.
             p.spawn((
-                Text::new("Space  —  Brake"),
-                TextFont {
-                    font_size: FontSize::Px(20.0),
-                    ..default()
-                },
-                TextColor(Color::srgba(0.8, 0.8, 0.85, 1.0).into()),
                 Node {
-                    margin: UiRect::bottom(px(4.0)),
+                    width: px(360.0),
+                    max_width: Val::Percent(96.0),
+                    flex_direction: FlexDirection::Column,
+                    padding: UiRect::axes(px(10.0), px(6.0)),
+                    margin: UiRect::bottom(px(7.0)),
                     ..default()
                 },
-            ));
-            p.spawn((
-                Text::new("Esc  —  Pause"),
-                TextFont {
-                    font_size: FontSize::Px(20.0),
-                    ..default()
-                },
-                TextColor(Color::srgba(0.8, 0.8, 0.85, 1.0).into()),
-                Node {
-                    margin: UiRect::bottom(px(18.0)),
-                    ..default()
-                },
-            ));
-            p.spawn((
-                Text::new(format!("MEDALS: {earned_medals} / 15")),
-                TextFont {
-                    font_size: FontSize::Px(20.0),
-                    ..default()
-                },
-                TextColor(palette::HUD_TEXT.into()),
-                Node {
-                    margin: UiRect::bottom(px(18.0)),
-                    ..default()
-                },
-                MenuMedalsText,
-            ));
-            // Prompt
+                BackgroundColor(Color::srgba(0.015, 0.02, 0.035, 0.78)),
+            ))
+            .with_children(|gallery| {
+                gallery.spawn((
+                    Text::new(format!("MEDAL GALLERY  {earned_medals} / 15")),
+                    TextFont {
+                        font_size: FontSize::Px(16.0),
+                        ..default()
+                    },
+                    TextColor(palette::HUD_ACCENT.into()),
+                    Node {
+                        align_self: AlignSelf::Center,
+                        margin: UiRect::bottom(px(1.0)),
+                        ..default()
+                    },
+                    MenuMedalsText,
+                ));
+                gallery.spawn((
+                    Text::new("B/S/G = BRONZE/SILVER/GOLD   [X] EARNED   [-] LOCKED"),
+                    TextFont {
+                        font_size: FontSize::Px(9.0),
+                        ..default()
+                    },
+                    TextColor(Color::srgba(0.72, 0.74, 0.80, 1.0).into()),
+                    Node {
+                        align_self: AlignSelf::Center,
+                        margin: UiRect::bottom(px(2.0)),
+                        ..default()
+                    },
+                ));
+
+                for kind in ALL_CONDITIONS {
+                    let best = condition_bests.by_kind[kind.index()];
+                    gallery
+                        .spawn((Node {
+                            width: Val::Percent(100.0),
+                            justify_content: JustifyContent::SpaceBetween,
+                            align_items: AlignItems::Center,
+                            ..default()
+                        },))
+                        .with_children(|row| {
+                            row.spawn((
+                                Text::new(kind.display_name()),
+                                TextFont {
+                                    font_size: FontSize::Px(13.0),
+                                    ..default()
+                                },
+                                TextColor(palette::HUD_TEXT.into()),
+                            ));
+                            row.spawn((
+                                Text::new(medal_gallery_state(kind, best)),
+                                TextFont {
+                                    font_size: FontSize::Px(12.0),
+                                    ..default()
+                                },
+                                TextColor(palette::HUD_ACCENT.into()),
+                                MenuMedalsText,
+                                MenuMedalRow(kind),
+                            ));
+                        });
+                }
+            });
+
             p.spawn((
                 Text::new("Press ENTER / SPACE to drive"),
                 TextFont {
-                    font_size: FontSize::Px(30.0),
+                    font_size: FontSize::Px(22.0),
                     ..default()
                 },
                 TextColor(palette::HUD_ACCENT.into()),
@@ -313,20 +518,18 @@ fn spawn_menu(mut commands: Commands, condition_bests: Res<ConditionBests>) {
         });
 }
 
-fn spawn_hud(mut commands: Commands, active_modifier: Res<ActiveModifier>) {
+fn spawn_hud(
+    mut commands: Commands,
+    active_modifier: Res<ActiveModifier>,
+    touch: Res<TouchControlsActive>,
+) {
     // --- Top-left cockpit cluster on a semi-transparent panel ---
     commands
         .spawn((
-            Node {
-                position_type: PositionType::Absolute,
-                top: px(12.0),
-                left: px(14.0),
-                flex_direction: FlexDirection::Column,
-                padding: UiRect::all(px(10.0)),
-                ..default()
-            },
+            cockpit_root_node(touch.0),
             BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.35)),
             HudRoot,
+            CockpitRoot,
         ))
         .with_children(|p| {
             // SPEED label
@@ -516,8 +719,10 @@ fn spawn_hud(mut commands: Commands, active_modifier: Res<ActiveModifier>) {
                 position_type: PositionType::Absolute,
                 top: px(12.0),
                 right: px(16.0),
+                padding: UiRect::axes(px(9.0), px(7.0)),
                 ..default()
             },
+            BackgroundColor(Color::srgba(0.015, 0.02, 0.035, 0.72)),
             HudRoot,
             Text::new("Time Left: "),
             TextFont {
@@ -535,6 +740,88 @@ fn spawn_hud(mut commands: Commands, active_modifier: Res<ActiveModifier>) {
             TextColor(palette::HUD_ACCENT.into()),
             TimerText,
         ));
+}
+
+fn cockpit_root_node(touch_active: bool) -> Node {
+    if touch_active {
+        Node {
+            position_type: PositionType::Absolute,
+            top: px(TOUCH_COCKPIT_TOP),
+            left: px(TOUCH_COCKPIT_LEFT),
+            width: px(TOUCH_COCKPIT_WIDTH),
+            height: px(TOUCH_COCKPIT_HEIGHT),
+            flex_direction: FlexDirection::Column,
+            padding: UiRect::all(px(6.0)),
+            ..default()
+        }
+    } else {
+        Node {
+            position_type: PositionType::Absolute,
+            top: px(12.0),
+            left: px(14.0),
+            flex_direction: FlexDirection::Column,
+            padding: UiRect::all(px(10.0)),
+            ..default()
+        }
+    }
+}
+
+fn scale_cockpit_descendant(
+    entity: Entity,
+    children: &Query<&Children>,
+    fonts: &mut Query<&mut TextFont>,
+    nodes: &mut Query<&mut Node>,
+) {
+    if let Ok(mut font) = fonts.get_mut(entity) {
+        if let FontSize::Px(size) = font.font_size {
+            font.font_size = FontSize::Px((size * 0.35).max(7.0));
+        }
+    }
+    if let Ok(mut node) = nodes.get_mut(entity) {
+        let scale = |value: &mut Val| {
+            if let Val::Px(pixels) = value {
+                *pixels *= 0.25;
+            }
+        };
+        scale(&mut node.margin.left);
+        scale(&mut node.margin.right);
+        scale(&mut node.margin.top);
+        scale(&mut node.margin.bottom);
+    }
+    if let Ok(descendants) = children.get(entity) {
+        for child in descendants.iter() {
+            scale_cockpit_descendant(child, children, fonts, nodes);
+        }
+    }
+}
+
+/// Touch activation is sticky, so compact typography is applied at most once
+/// per cockpit entity. Running after touch-state detection makes the first
+/// touch rearrange the already-spawned HUD in the same update.
+fn update_cockpit_layout(
+    mut commands: Commands,
+    touch: Res<TouchControlsActive>,
+    roots: Query<(Entity, Option<&CompactCockpitApplied>), With<CockpitRoot>>,
+    children: Query<&Children>,
+    mut fonts: Query<&mut TextFont>,
+    mut nodes: Query<&mut Node>,
+) {
+    if !touch.0 {
+        return;
+    }
+    for (entity, applied) in &roots {
+        if let Ok(mut node) = nodes.get_mut(entity) {
+            *node = cockpit_root_node(true);
+        }
+        if applied.is_none() {
+            if let Ok(descendants) = children.get(entity) {
+                for child in descendants.iter() {
+                    scale_cockpit_descendant(child, &children, &mut fonts, &mut nodes);
+                }
+            }
+            commands.entity(entity).insert(CompactCockpitApplied);
+        }
+    }
 }
 
 fn spawn_hint(mut commands: Commands, touch_active: Res<TouchControlsActive>) {
@@ -625,6 +912,7 @@ fn spawn_pause(mut commands: Commands) {
 
 fn spawn_gameover(
     mut commands: Commands,
+    primary_window: Query<&Window, With<PrimaryWindow>>,
     score: Res<Score>,
     reason: Res<GameOverReason>,
     best_at_start: Res<BestAtRoundStart>,
@@ -644,11 +932,12 @@ fn spawn_gameover(
     let condition_result =
         terminal_condition_result(kind, conditions_at_start.by_kind[kind.index()], total);
     let condition_summary = condition_summary(kind, condition_result.displayed_best);
-
-    let title = match *reason {
-        GameOverReason::Wrecked => "Wrecked!",
-        GameOverReason::TimeUp => "Time's up!",
-    };
+    let (viewport_width, viewport_height) = primary_window
+        .single()
+        .map(|window| (window.width(), window.height()))
+        .unwrap_or((1440.0, 900.0));
+    let layout = gameover_layout(viewport_width, viewport_height);
+    let title = gameover_title(*reason);
     commands
         .spawn((
             Node {
@@ -660,6 +949,7 @@ fn spawn_gameover(
                 align_items: AlignItems::Center,
                 justify_content: JustifyContent::Center,
                 flex_direction: FlexDirection::Column,
+                padding: UiRect::all(px(layout.root_padding)),
                 ..default()
             },
             BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.6)),
@@ -670,12 +960,12 @@ fn spawn_gameover(
             p.spawn((
                 Text::new(title),
                 TextFont {
-                    font_size: FontSize::Px(56.0),
+                    font_size: FontSize::Px(layout.title.font),
                     ..default()
                 },
                 TextColor(palette::HUD_ACCENT.into()),
                 Node {
-                    margin: UiRect::bottom(px(14.0)),
+                    margin: UiRect::bottom(px(layout.title.margin)),
                     ..default()
                 },
             ));
@@ -683,24 +973,24 @@ fn spawn_gameover(
             p.spawn((
                 Text::new("SCORE"),
                 TextFont {
-                    font_size: FontSize::Px(16.0),
+                    font_size: FontSize::Px(layout.score_label.font),
                     ..default()
                 },
                 TextColor(Color::srgba(0.7, 0.7, 0.75, 1.0).into()),
                 Node {
-                    margin: UiRect::bottom(px(2.0)),
+                    margin: UiRect::bottom(px(layout.score_label.margin)),
                     ..default()
                 },
             ));
             p.spawn((
                 Text::new(format!("{}", total)),
                 TextFont {
-                    font_size: FontSize::Px(38.0),
+                    font_size: FontSize::Px(layout.score.font),
                     ..default()
                 },
                 TextColor(palette::HUD_ACCENT.into()),
                 Node {
-                    margin: UiRect::bottom(px(10.0)),
+                    margin: UiRect::bottom(px(layout.score.margin)),
                     ..default()
                 },
             ));
@@ -708,12 +998,12 @@ fn spawn_gameover(
             p.spawn((
                 Text::new(format!("Chickens: {}", score.chickens)),
                 TextFont {
-                    font_size: FontSize::Px(21.0),
+                    font_size: FontSize::Px(layout.chicken.font),
                     ..default()
                 },
                 TextColor(palette::HUD_TEXT.into()),
                 Node {
-                    margin: UiRect::bottom(px(2.0)),
+                    margin: UiRect::bottom(px(layout.chicken.margin)),
                     ..default()
                 },
             ));
@@ -721,12 +1011,12 @@ fn spawn_gameover(
             p.spawn((
                 Text::new(format!("Coins: {}", score.coins)),
                 TextFont {
-                    font_size: FontSize::Px(21.0),
+                    font_size: FontSize::Px(layout.coins.font),
                     ..default()
                 },
                 TextColor(palette::HUD_TEXT.into()),
                 Node {
-                    margin: UiRect::bottom(px(14.0)),
+                    margin: UiRect::bottom(px(layout.coins.margin)),
                     ..default()
                 },
             ));
@@ -735,7 +1025,7 @@ fn spawn_gameover(
             p.spawn((
                 Text::new(best_summary),
                 TextFont {
-                    font_size: FontSize::Px(24.0),
+                    font_size: FontSize::Px(layout.best.font),
                     ..default()
                 },
                 TextColor(if new_best {
@@ -744,19 +1034,19 @@ fn spawn_gameover(
                     palette::HUD_TEXT.into()
                 }),
                 Node {
-                    margin: UiRect::bottom(px(10.0)),
+                    margin: UiRect::bottom(px(layout.best.margin)),
                     ..default()
                 },
             ));
             p.spawn((
                 Text::new(condition_summary),
                 TextFont {
-                    font_size: FontSize::Px(22.0),
+                    font_size: FontSize::Px(layout.condition.font),
                     ..default()
                 },
                 TextColor(active_modifier.color()),
                 Node {
-                    margin: UiRect::bottom(px(6.0)),
+                    margin: UiRect::bottom(px(layout.condition.margin)),
                     ..default()
                 },
             ));
@@ -764,12 +1054,12 @@ fn spawn_gameover(
                 p.spawn((
                     Text::new("NEW CONDITION BEST"),
                     TextFont {
-                        font_size: FontSize::Px(20.0),
+                        font_size: FontSize::Px(layout.new_condition_best.font),
                         ..default()
                     },
                     TextColor(palette::HUD_ACCENT.into()),
                     Node {
-                        margin: UiRect::bottom(px(4.0)),
+                        margin: UiRect::bottom(px(layout.new_condition_best.margin)),
                         ..default()
                     },
                 ));
@@ -778,12 +1068,12 @@ fn spawn_gameover(
                 p.spawn((
                     Text::new(format!("MEDAL UPGRADE: {}", condition_result.medal.label())),
                     TextFont {
-                        font_size: FontSize::Px(20.0),
+                        font_size: FontSize::Px(layout.medal_upgrade.font),
                         ..default()
                     },
                     TextColor(palette::HUD_ACCENT.into()),
                     Node {
-                        margin: UiRect::bottom(px(8.0)),
+                        margin: UiRect::bottom(px(layout.medal_upgrade.margin)),
                         ..default()
                     },
                 ));
@@ -791,7 +1081,7 @@ fn spawn_gameover(
             p.spawn((
                 Text::new(format!("OBJECTIVE: {}", objective.summary())),
                 TextFont {
-                    font_size: FontSize::Px(20.0),
+                    font_size: FontSize::Px(layout.objective.font),
                     ..default()
                 },
                 TextColor(if objective.completed {
@@ -800,7 +1090,7 @@ fn spawn_gameover(
                     palette::HUD_TEXT.into()
                 }),
                 Node {
-                    margin: UiRect::bottom(px(8.0)),
+                    margin: UiRect::bottom(px(layout.objective.margin)),
                     ..default()
                 },
             ));
@@ -808,12 +1098,12 @@ fn spawn_gameover(
             p.spawn((
                 Text::new("R / ENTER / SPACE to play again  •  Q / ESC for menu"),
                 TextFont {
-                    font_size: FontSize::Px(19.0),
+                    font_size: FontSize::Px(layout.prompt.font),
                     ..default()
                 },
                 TextColor(Color::srgba(0.8, 0.8, 0.85, 1.0).into()),
                 Node {
-                    margin: UiRect::top(px(8.0)),
+                    margin: UiRect::top(px(layout.prompt.margin)),
                     ..default()
                 },
             ));
@@ -828,14 +1118,18 @@ fn despawn_marker<M: Component>(mut commands: Commands, q: Query<Entity, With<M>
 
 fn update_menu_medals(
     condition_bests: Res<ConditionBests>,
-    mut query: Query<&mut Text, With<MenuMedalsText>>,
+    mut query: Query<(Option<&MenuMedalRow>, &mut Text), With<MenuMedalsText>>,
 ) {
     if !condition_bests.is_changed() {
         return;
     }
     let earned = total_medal_points(&condition_bests);
-    for mut text in &mut query {
-        **text = format!("MEDALS: {earned} / 15");
+    for (row, mut text) in &mut query {
+        **text = if let Some(row) = row {
+            medal_gallery_state(row.0, condition_bests.by_kind[row.0.index()])
+        } else {
+            format!("MEDAL GALLERY  {earned} / 15")
+        };
     }
 }
 
@@ -906,8 +1200,17 @@ fn update_timer_text(
     }
 }
 
-fn update_hint(mut commands: Commands, time: Res<Time>, mut q: Query<(Entity, &mut Hint)>) {
+fn update_hint(
+    mut commands: Commands,
+    time: Res<Time>,
+    touch: Res<TouchControlsActive>,
+    mut q: Query<(Entity, &mut Hint)>,
+) {
     for (e, mut hint) in &mut q {
+        if touch.0 {
+            commands.entity(e).despawn();
+            continue;
+        }
         hint.t -= time.delta_secs();
         if hint.t <= 0.0 {
             commands.entity(e).despawn();
@@ -918,9 +1221,13 @@ fn update_hint(mut commands: Commands, time: Res<Time>, mut q: Query<(Entity, &m
 #[cfg(test)]
 mod tests {
     use super::{
-        TimerUrgency, condition_summary, is_medal_upgrade, is_new_best, medal_points,
-        terminal_condition_result, timer_motion_flags, timer_style,
+        GAMEOVER_COMPACT_LAYOUT, GAMEOVER_DESKTOP_LAYOUT, MENU_CONTENT_HEIGHT, TimerUrgency,
+        condition_summary, gameover_layout, is_medal_upgrade, is_new_best,
+        maximal_gameover_content_height, maximal_gameover_state_fits, medal_gallery_state,
+        medal_points, menu_content_fits, terminal_condition_result, timer_motion_flags,
+        timer_style,
     };
+    use crate::game::resources::GameOverReason;
     use crate::modifiers::ModifierKind;
     use crate::persist::Medal;
 
@@ -1007,6 +1314,76 @@ mod tests {
         assert!(is_medal_upgrade(Medal::None, Medal::Gold));
         assert!(!is_medal_upgrade(Medal::Bronze, Medal::Bronze));
         assert!(!is_medal_upgrade(Medal::Gold, Medal::Silver));
+    }
+
+    #[test]
+    fn medal_gallery_has_five_condition_rows_and_non_color_tier_states() {
+        let scores = [19, 30, 100, 15, 80];
+        let rows =
+            super::ALL_CONDITIONS.map(|kind| medal_gallery_state(kind, scores[kind.index()]));
+
+        assert_eq!(rows.len(), 5);
+        assert_eq!(rows[0], "BEST 19   B[-]  S[-]  G[-]");
+        assert_eq!(rows[1], "BEST 30   B[X]  S[X]  G[-]");
+        assert_eq!(rows[2], "BEST 100   B[X]  S[X]  G[X]");
+        assert_eq!(rows[3], "BEST 15   B[X]  S[-]  G[-]");
+        assert_eq!(rows[4], "BEST 80   B[X]  S[X]  G[X]");
+    }
+
+    #[test]
+    fn compact_menu_budget_fits_short_mobile_and_desktop_viewports() {
+        assert!(menu_content_fits(844.0, 390.0));
+        assert!(menu_content_fits(1440.0, 900.0));
+        assert!(!menu_content_fits(844.0, MENU_CONTENT_HEIGHT - 1.0));
+        assert!(!menu_content_fits(360.0, 390.0));
+    }
+
+    #[test]
+    fn maximal_gameover_states_fit_target_mobile_viewport() {
+        let layout = gameover_layout(844.0, 390.0);
+        assert_eq!(layout, GAMEOVER_COMPACT_LAYOUT);
+        assert!(layout.prompt.font >= 14.0);
+        assert!(layout.objective.font >= 15.0);
+        assert!(layout.new_condition_best.font >= 15.0);
+        assert!(maximal_gameover_content_height(layout) <= 390.0);
+
+        // Exercise both terminal titles with every optional row budgeted:
+        // NEW BEST + NEW CONDITION BEST + MEDAL UPGRADE + objective summary.
+        assert!(maximal_gameover_state_fits(
+            844.0,
+            390.0,
+            GameOverReason::TimeUp
+        ));
+        assert!(maximal_gameover_state_fits(
+            844.0,
+            390.0,
+            GameOverReason::Wrecked
+        ));
+    }
+
+    #[test]
+    fn maximal_gameover_budget_rejects_clipping_and_preserves_desktop_style() {
+        let compact_height = maximal_gameover_content_height(GAMEOVER_COMPACT_LAYOUT);
+        assert!(!maximal_gameover_state_fits(
+            844.0,
+            compact_height - 1.0,
+            GameOverReason::Wrecked
+        ));
+        assert!(!maximal_gameover_state_fits(
+            GAMEOVER_COMPACT_LAYOUT.content_width_budget - 1.0,
+            390.0,
+            GameOverReason::TimeUp
+        ));
+
+        let desktop = gameover_layout(1440.0, 900.0);
+        assert_eq!(desktop, GAMEOVER_DESKTOP_LAYOUT);
+        assert_eq!(desktop.title.font, 56.0);
+        assert_eq!(desktop.prompt.font, 19.0);
+        assert!(maximal_gameover_state_fits(
+            1440.0,
+            900.0,
+            GameOverReason::TimeUp
+        ));
     }
 
     #[test]

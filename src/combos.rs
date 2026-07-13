@@ -37,10 +37,70 @@ const BAR_WIDTH: f32 = 120.0;
 /// Height of the depleting timer bar (px).
 const BAR_HEIGHT: f32 = 6.0;
 
-/// Combo display top offset — sits below the top-right timer (`top:12`,
-/// ~24px text => ends ~y=40). Centered horizontally so it never overlaps the
-/// timer or the minimap (both top-right).
-const COMBO_TOP: f32 = 48.0;
+/// Objective HUD occupies the centered strip beginning at y=54 and is about
+/// 38px tall including padding. Put combo below that strip rather than at its
+/// old y=48 position, which intersected the objective.
+#[cfg(test)]
+const OBJECTIVE_BOTTOM: f32 = 92.0;
+const COMBO_TOP: f32 = 98.0;
+const COMBO_PANEL_WIDTH: f32 = 144.0;
+// Includes the punch-expanded label, bar, and vertical panel padding. The
+// explicit budget keeps the largest punch inside the combo's own band.
+const COMBO_PANEL_HEIGHT: f32 = 80.0;
+#[cfg(test)]
+const MINIMAP_PANEL_SIZE: f32 = 132.0 + 2.0 * 2.0;
+// `minimap.rs` shifts the panel left to `right: 72` so the externally owned
+// level label can remain at `right: 16` without intersecting the 132px map.
+#[cfg(test)]
+const MINIMAP_RIGHT: f32 = 72.0;
+#[cfg(test)]
+const MINIMAP_TOP: f32 = 62.0;
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct UiRectBounds {
+    left: f32,
+    top: f32,
+    right: f32,
+    bottom: f32,
+}
+
+#[cfg(test)]
+fn rects_overlap(a: UiRectBounds, b: UiRectBounds) -> bool {
+    a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top
+}
+
+/// Pure bounds used to audit the combo against the objective strip and the
+/// actual 132px minimap content plus its 2px border on each side.
+#[cfg(test)]
+fn combo_layout_bounds(viewport_width: f32) -> (UiRectBounds, UiRectBounds, UiRectBounds) {
+    let combo_left = (viewport_width - COMBO_PANEL_WIDTH) * 0.5;
+    let combo = UiRectBounds {
+        left: combo_left,
+        top: COMBO_TOP,
+        right: combo_left + COMBO_PANEL_WIDTH,
+        bottom: COMBO_TOP + COMBO_PANEL_HEIGHT,
+    };
+    // The objective node spans the viewport for centering, but only its
+    // centered label is painted. Model that visual content rather than the
+    // transparent full-width flex wrapper.
+    let objective_width = 420.0_f32.min(viewport_width);
+    let objective_left = (viewport_width - objective_width) * 0.5;
+    let objective = UiRectBounds {
+        left: objective_left,
+        top: 54.0,
+        right: objective_left + objective_width,
+        bottom: OBJECTIVE_BOTTOM,
+    };
+    let minimap_right = viewport_width - MINIMAP_RIGHT;
+    let minimap = UiRectBounds {
+        left: minimap_right - MINIMAP_PANEL_SIZE,
+        top: MINIMAP_TOP,
+        right: minimap_right,
+        bottom: MINIMAP_TOP + MINIMAP_PANEL_SIZE,
+    };
+    (combo, objective, minimap)
+}
 
 /// Presentation-only animation tuning. These animate existing UI components;
 /// combo hits never spawn transient entities.
@@ -106,8 +166,8 @@ fn combo_bonus_for_hit(multiplier: u32, modifier: &ActiveModifier, event: &Activ
 #[cfg(test)]
 mod tests {
     use super::{
-        BASE_FONT_SIZE, Combo, PUNCH_FONT_BOOST, combo_bonus_for_hit, combo_motion_flags,
-        combo_visual_values,
+        BASE_FONT_SIZE, Combo, PUNCH_FONT_BOOST, combo_bonus_for_hit, combo_layout_bounds,
+        combo_motion_flags, combo_visual_values, rects_overlap,
     };
     use crate::modifiers::{ActiveModifier, ModifierKind};
     use crate::run_events::{ActiveEvent, EventKind};
@@ -190,6 +250,16 @@ mod tests {
             combo_bonus_for_hit(event_saturates, &glass_cannon, &frenzy),
             u32::MAX
         );
+    }
+
+    #[test]
+    fn combo_layout_clears_objective_and_actual_132px_minimap() {
+        for viewport_width in [844.0, 1440.0] {
+            let (combo, objective, minimap) = combo_layout_bounds(viewport_width);
+            assert!(!rects_overlap(combo, objective));
+            assert!(!rects_overlap(combo, minimap));
+            assert!(combo.top >= objective.bottom + 6.0);
+        }
     }
 
     #[test]
@@ -409,51 +479,67 @@ fn spawn_combo_ui(mut commands: Commands, combo: Res<Combo>) {
             },
             Visibility::Hidden,
         ))
-        .with_children(|col| {
-            // "x{multiplier}" — the "x" prefix is static, the number is a
-            // dynamic span refreshed by `update_combo_ui`.
-            col.spawn((
-                Text::new("x"),
-                TextFont {
-                    font_size: FontSize::Px(BASE_FONT_SIZE),
-                    ..default()
-                },
-                TextColor(palette::HUD_ACCENT.into()),
+        .with_children(|root| {
+            // A compact contrast panel follows the badge without painting an
+            // opaque full-width strip across the objective/minimap HUD.
+            root.spawn((
                 Node {
-                    margin: UiRect::bottom(px(4.0)),
+                    width: px(COMBO_PANEL_WIDTH),
+                    height: px(COMBO_PANEL_HEIGHT),
+                    align_items: AlignItems::Center,
+                    justify_content: JustifyContent::Center,
+                    flex_direction: FlexDirection::Column,
+                    padding: UiRect::axes(px(12.0), px(6.0)),
                     ..default()
                 },
-                ComboLabel,
+                BackgroundColor(Color::srgba(0.015, 0.02, 0.035, 0.72)),
             ))
-            .with_child((
-                TextSpan::default(),
-                TextFont {
-                    font_size: FontSize::Px(BASE_FONT_SIZE),
-                    ..default()
-                },
-                TextColor(palette::HUD_ACCENT.into()),
-                ComboText,
-                ComboLabel,
-            ));
-            // Timer bar track (dark background) with the colored fill child.
-            col.spawn((
-                Node {
-                    width: px(BAR_WIDTH),
-                    height: px(BAR_HEIGHT),
-                    ..default()
-                },
-                BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.0)),
-                ComboBarTrack,
-            ))
-            .with_child((
-                Node {
-                    width: px(BAR_WIDTH),
-                    height: Val::Percent(100.0),
-                    ..default()
-                },
-                BackgroundColor(palette::HUD_ACCENT),
-                ComboBarFill,
-            ));
+            .with_children(|col| {
+                // "x{multiplier}" — the "x" prefix is static, the number is a
+                // dynamic span refreshed by `update_combo_ui`.
+                col.spawn((
+                    Text::new("x"),
+                    TextFont {
+                        font_size: FontSize::Px(BASE_FONT_SIZE),
+                        ..default()
+                    },
+                    TextColor(palette::HUD_ACCENT.into()),
+                    Node {
+                        margin: UiRect::bottom(px(4.0)),
+                        ..default()
+                    },
+                    ComboLabel,
+                ))
+                .with_child((
+                    TextSpan::default(),
+                    TextFont {
+                        font_size: FontSize::Px(BASE_FONT_SIZE),
+                        ..default()
+                    },
+                    TextColor(palette::HUD_ACCENT.into()),
+                    ComboText,
+                    ComboLabel,
+                ));
+                // Timer bar track (dark background) with the colored fill child.
+                col.spawn((
+                    Node {
+                        width: px(BAR_WIDTH),
+                        height: px(BAR_HEIGHT),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.0)),
+                    ComboBarTrack,
+                ))
+                .with_child((
+                    Node {
+                        width: px(BAR_WIDTH),
+                        height: Val::Percent(100.0),
+                        ..default()
+                    },
+                    BackgroundColor(palette::HUD_ACCENT),
+                    ComboBarFill,
+                ));
+            });
         });
 }
 

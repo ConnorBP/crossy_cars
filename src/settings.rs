@@ -1,7 +1,9 @@
 //! Persistent player settings and the Menu/Paused settings overlay.
 //!
-//! Reduced motion is persisted here as a foundation setting. Gameplay and
-//! presentation systems do not consume it yet.
+//! On the web, reduced motion defaults to the operating-system/browser
+//! `prefers-reduced-motion` value only when no settings schema exists. A
+//! persisted player choice (including an explicit `false`) always takes
+//! precedence; native platforms use the conservative `false` default.
 
 use bevy::{prelude::*, text::FontSize, window::PrimaryWindow};
 
@@ -780,9 +782,15 @@ fn decode_settings(value: &str) -> Settings {
 }
 
 /// Decode the current schema, or import the old web-only mute bit only when
-/// the settings schema is absent. The bool reports a successful migration.
+/// the settings schema is absent. A persisted schema has precedence over the
+/// OS reduced-motion default, including when it explicitly stores `false`.
+/// The bool reports a successful migration that should be saved canonically.
 #[cfg_attr(not(any(test, target_arch = "wasm32")), allow(dead_code))]
-fn decode_or_migrate(schema: Option<&str>, legacy_muted: Option<&str>) -> (Settings, bool) {
+fn decode_or_migrate(
+    schema: Option<&str>,
+    legacy_muted: Option<&str>,
+    prefers_reduced_motion: bool,
+) -> (Settings, bool) {
     if let Some(schema) = schema {
         let loaded = decode_settings(schema);
         let canonical_v1 = format!(
@@ -794,13 +802,37 @@ fn decode_or_migrate(schema: Option<&str>, legacy_muted: Option<&str>) -> (Setti
         let migrated = schema.trim() == canonical_v1;
         return (loaded, migrated);
     }
+
+    let mut loaded = Settings {
+        reduced_motion: prefers_reduced_motion,
+        ..default()
+    };
     if let Some(muted) = legacy_muted.and_then(|value| value.trim().parse::<bool>().ok()) {
-        return (Settings { muted, ..default() }, true);
+        loaded.muted = muted;
+        return (loaded, true);
     }
-    (Settings::default(), false)
+    (loaded, false)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn os_prefers_reduced_motion() -> bool {
+    web_sys::window()
+        .and_then(|window| {
+            window
+                .match_media("(prefers-reduced-motion: reduce)")
+                .ok()
+                .flatten()
+        })
+        .is_some_and(|media_query| media_query.matches())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn os_prefers_reduced_motion() -> bool {
+    false
 }
 
 fn load_settings(mut settings: ResMut<Settings>) {
+    let prefers_reduced_motion = os_prefers_reduced_motion();
     #[cfg(target_arch = "wasm32")]
     {
         let (loaded, migrated) = web_sys::window()
@@ -812,9 +844,9 @@ fn load_settings(mut settings: ResMut<Settings>) {
                 } else {
                     None
                 };
-                decode_or_migrate(schema.as_deref(), legacy.as_deref())
+                decode_or_migrate(schema.as_deref(), legacy.as_deref(), prefers_reduced_motion)
             })
-            .unwrap_or((Settings::default(), false));
+            .unwrap_or_else(|| decode_or_migrate(None, None, prefers_reduced_motion));
         *settings = loaded;
         if migrated {
             let _ = save_settings(&*settings);
@@ -824,8 +856,8 @@ fn load_settings(mut settings: ResMut<Settings>) {
     {
         let (loaded, migrated) = std::fs::read_to_string(FILE_PATH)
             .ok()
-            .map(|value| decode_or_migrate(Some(&value), None))
-            .unwrap_or((Settings::default(), false));
+            .map(|value| decode_or_migrate(Some(&value), None, prefers_reduced_motion))
+            .unwrap_or_else(|| decode_or_migrate(None, None, prefers_reduced_motion));
         *settings = loaded;
         if migrated {
             let _ = save_settings(&*settings);
@@ -935,7 +967,7 @@ mod tests {
 
     #[test]
     fn v1_schema_migrates_with_an_empty_leaderboard_name() {
-        let (migrated, did_migrate) = decode_or_migrate(Some("v1:30:1:0"), None);
+        let (migrated, did_migrate) = decode_or_migrate(Some("v1:30:1:0"), None, true);
         assert!(did_migrate);
         assert_eq!(migrated.master_volume, 30);
         assert!(migrated.muted);
@@ -1019,15 +1051,41 @@ mod tests {
     }
 
     #[test]
+    fn reduced_motion_precedence_uses_os_only_without_a_schema() {
+        let (os_reduced, did_migrate) = decode_or_migrate(None, None, true);
+        assert!(!did_migrate);
+        assert!(os_reduced.reduced_motion);
+
+        let (os_standard, did_migrate) = decode_or_migrate(None, None, false);
+        assert!(!did_migrate);
+        assert!(!os_standard.reduced_motion);
+
+        let (explicit_false, did_migrate) = decode_or_migrate(Some("v2:100:0:0:"), None, true);
+        assert!(!did_migrate);
+        assert!(!explicit_false.reduced_motion);
+
+        let (explicit_true, did_migrate) = decode_or_migrate(Some("v2:100:0:1:"), None, false);
+        assert!(!did_migrate);
+        assert!(explicit_true.reduced_motion);
+    }
+
+    #[test]
     fn legacy_mute_migrates_only_when_schema_is_absent() {
-        let (migrated, did_migrate) = decode_or_migrate(None, Some("true"));
+        let (migrated, did_migrate) = decode_or_migrate(None, Some("true"), true);
         assert!(did_migrate);
         assert!(migrated.muted);
+        assert!(migrated.reduced_motion);
         assert_eq!(migrated.master_volume, 100);
 
-        let (schema, did_migrate) = decode_or_migrate(Some("broken"), Some("true"));
+        let (schema, did_migrate) = decode_or_migrate(Some("broken"), Some("true"), true);
         assert!(!did_migrate);
         assert_eq!(schema, Settings::default());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_os_reduced_motion_default_is_safe() {
+        assert!(!os_prefers_reduced_motion());
     }
 
     #[test]

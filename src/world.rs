@@ -12,7 +12,8 @@
 //! placement can never deadlock — and the random choice among matching tiles
 //! is WEIGHTED toward through-roads/intersections (Cross / RoadNS / RoadEW)
 //! so the road network stays connected and drivable, with occasional parks,
-//! bigger blocks, T-intersections, corners and missing roads for variety.
+//! fields, orchards, bigger blocks, T-intersections, corners and missing roads
+//! for variety. Countryside kinds are visual all-None socket aliases only.
 //! The tile choice is deterministic per `(gx, gz, seed)` (folded into the
 //! block's LCG seed via `seed_for`), so a recycled block reproduces the same
 //! layout it had the first time it was spawned at those coordinates.
@@ -147,7 +148,7 @@ pub enum Edge {
 /// A Wang-tile kind from the road-network tile set. Each variant fixes the
 /// `Edge` socket on each of the four sides (W, E, S, N). The set is
 /// **complete**: for any combination of fixed-edge constraints there is at
-/// least one `TileKind` whose sockets match (see `all_tiles` / `pick_tile`).
+/// least one `TileKind` whose sockets match (see `ALL_TILES` / `tile_from_edges`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TileKind {
     /// All edges None — a full block of buildings.
@@ -155,6 +156,12 @@ pub enum TileKind {
     /// All edges None — a park (grass + trees, no buildings). Visual variant
     /// of `Empty` chosen for variety when no roads touch the block.
     Park,
+    /// All edges None — a cultivated field with furrows and a small bounded
+    /// set of farm props. It never changes the road socket graph.
+    Field,
+    /// All edges None — an orchard whose trees are placed in aligned rows.
+    /// It never changes the road socket graph.
+    Orchard,
     /// Through-road running S↔N (W=None, E=None, S=Road, N=Road).
     RoadNS,
     /// Through-road running W↔E (W=Road, E=Road, S=None, N=None).
@@ -204,6 +211,8 @@ pub fn sockets(kind: TileKind) -> [Edge; 4] {
     match kind {
         Empty => [None, None, None, None],
         Park => [None, None, None, None],
+        Field => [None, None, None, None],
+        Orchard => [None, None, None, None],
         RoadNS => [None, None, Road, Road],
         RoadEW => [Road, Road, None, None],
         Cross => [Road, Road, Road, Road],
@@ -274,13 +283,15 @@ fn window_row_heights(height: f32) -> Vec<f32> {
         .collect()
 }
 
-/// All tiles in the set (used by `pick_tile` to find matches). Includes the
+/// All tiles in the set (used by `tile_from_edges` to find matches). Includes the
 /// four single-edge `Stub*` tiles so the set is COMPLETE: every fixed-edge
 /// combination (including a single fixed-Road edge with the rest free) has at
 /// least one matching tile.
-const ALL_TILES: [TileKind; 17] = [
+const ALL_TILES: [TileKind; 19] = [
     TileKind::Empty,
     TileKind::Park,
+    TileKind::Field,
+    TileKind::Orchard,
     TileKind::RoadNS,
     TileKind::RoadEW,
     TileKind::Cross,
@@ -360,23 +371,19 @@ pub(crate) fn is_road_line(axis: bool, idx: i32) -> bool {
 }
 
 /// Derive a block's 4 edge sockets (W, E, S, N) from the road lines it sits
-/// between, then return the unique `TileKind` matching those edges. The tile
-/// set covers all 16 edge combinations, so this always finds exactly one
-/// (all-None maps to Empty or Park — pick Park ~half the time for variety via
-/// a deterministic hash of (gx,gz)).
+/// between, then return the `TileKind` matching those edges. The tile set
+/// covers all 16 edge combinations. The all-None socket combination has four
+/// visual variants selected by a coordinate hash; the choice is visual only
+/// and therefore cannot alter the road graph.
 fn tile_from_edges(gx: i32, gz: i32) -> TileKind {
     let w = vertical_line_road(gx);
     let e = vertical_line_road(gx + 1);
     let s = horizontal_line_road(gz);
     let n = horizontal_line_road(gz + 1);
-    // all-None block -> Park vs Empty for variety.
+    // All-None blocks get one of four deterministic VISUAL variants. Their
+    // sockets are identical, so this selection cannot change a shared edge.
     if !w && !e && !s && !n {
-        // Deterministic ~50/50 park vs empty-block-of-buildings.
-        return if line_hash(gx.wrapping_add(gz.wrapping_mul(7))) < 0.5 {
-            TileKind::Park
-        } else {
-            TileKind::Empty
-        };
+        return all_none_variant(gx, gz);
     }
     // Find the tile whose sockets match (W,E,S,N) exactly. There is exactly
     // one for every non-all-None combo (the set is complete + each non-empty
@@ -393,6 +400,28 @@ fn tile_from_edges(gx: i32, gz: i32) -> TileKind {
             rw == w && re == e && rs == s && rn == n
         })
         .unwrap_or(TileKind::Cross)
+}
+
+/// Stable, well-mixed coordinate hash for visual variation. This is kept
+/// separate from road-line hashing so adding/changing countryside visuals can
+/// never perturb the socket graph.
+fn visual_coordinate_hash(gx: i32, gz: i32) -> u32 {
+    let mut h =
+        (gx as u32).wrapping_mul(0x9e37_79b1) ^ (gz as u32).wrapping_mul(0x85eb_ca77) ^ 0xc2b2_ae3d;
+    h ^= h >> 16;
+    h = h.wrapping_mul(0x7feb_352d);
+    h ^= h >> 15;
+    h = h.wrapping_mul(0x846c_a68b);
+    h ^ (h >> 16)
+}
+
+fn all_none_variant(gx: i32, gz: i32) -> TileKind {
+    match visual_coordinate_hash(gx, gz) & 3 {
+        0 => TileKind::Empty,
+        1 => TileKind::Park,
+        2 => TileKind::Field,
+        _ => TileKind::Orchard,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -485,8 +514,20 @@ pub struct WorldAssets {
     materials: WorldMaterialAssets,
 }
 
+// Rural prop mesh dimensions. Their roots receive arbitrary yaw, so collision
+// and placement use the horizontal diagonal derived from these dimensions
+// rather than the unrotated axis extents.
+const HAY_BALE_RADIUS: f32 = 0.7;
+const HAY_BALE_LENGTH: f32 = 1.1;
+const FARM_CRATE_SIDE: f32 = 1.1;
+const FARM_CRATE_HEIGHT: f32 = 0.7;
+
 struct WorldMeshAssets {
     ground: Handle<Mesh>,
+    field_ground: Handle<Mesh>,
+    field_furrow: Handle<Mesh>,
+    hay_bale: Handle<Mesh>,
+    farm_crate: Handle<Mesh>,
     road_z: Handle<Mesh>,
     road_x: Handle<Mesh>,
     curb_z: [Handle<Mesh>; 3],
@@ -525,6 +566,11 @@ struct WorldMaterialAssets {
     line: Handle<StandardMaterial>,
     shadow: Handle<StandardMaterial>,
     park: Handle<StandardMaterial>,
+    field: Handle<StandardMaterial>,
+    field_furrow: Handle<StandardMaterial>,
+    orchard: Handle<StandardMaterial>,
+    hay: Handle<StandardMaterial>,
+    farm_wood: Handle<StandardMaterial>,
     trunk: Handle<StandardMaterial>,
     foliage: Handle<StandardMaterial>,
     building_body: [Handle<StandardMaterial>; 3],
@@ -546,6 +592,16 @@ impl FromWorld for WorldAssets {
         // never overlap.
         let meshes = world.resource_scope(|_, mut a: Mut<Assets<Mesh>>| WorldMeshAssets {
             ground: a.add(Plane3d::default().mesh().size(42.0, 42.0)),
+            // Countryside geometry is procedural but created once and cached;
+            // recycled blocks only clone these lightweight handles.
+            field_ground: a.add(Plane3d::default().mesh().size(42.0, 42.0)),
+            field_furrow: a.add(Cuboid::new(36.0, 0.025, 0.16)),
+            hay_bale: a.add(Cylinder::new(HAY_BALE_RADIUS, HAY_BALE_LENGTH)),
+            farm_crate: a.add(Cuboid::new(
+                FARM_CRATE_SIDE,
+                FARM_CRATE_HEIGHT,
+                FARM_CRATE_SIDE,
+            )),
             road_z: a.add(Plane3d::default().mesh().size(8.0, 40.0)),
             road_x: a.add(Plane3d::default().mesh().size(40.0, 8.0)),
             curb_z: [
@@ -614,6 +670,31 @@ impl FromWorld for WorldAssets {
                     park: a.add(StandardMaterial {
                         base_color: Color::srgb(0.24, 0.52, 0.20),
                         perceptual_roughness: 1.0,
+                        ..default()
+                    }),
+                    field: a.add(StandardMaterial {
+                        base_color: Color::srgb(0.55, 0.43, 0.16),
+                        perceptual_roughness: 1.0,
+                        ..default()
+                    }),
+                    field_furrow: a.add(StandardMaterial {
+                        base_color: Color::srgb(0.31, 0.23, 0.09),
+                        perceptual_roughness: 1.0,
+                        ..default()
+                    }),
+                    orchard: a.add(StandardMaterial {
+                        base_color: Color::srgb(0.27, 0.43, 0.16),
+                        perceptual_roughness: 1.0,
+                        ..default()
+                    }),
+                    hay: a.add(StandardMaterial {
+                        base_color: Color::srgb(0.82, 0.64, 0.20),
+                        perceptual_roughness: 0.95,
+                        ..default()
+                    }),
+                    farm_wood: a.add(StandardMaterial {
+                        base_color: Color::srgb(0.38, 0.22, 0.09),
+                        perceptual_roughness: 0.95,
                         ..default()
                     }),
                     trunk: a.add(StandardMaterial {
@@ -968,9 +1049,8 @@ fn lamp_arm_aabb_half_extents(dir_x: f32, dir_z: f32) -> Vec3 {
 /// 6u margin; `None` edges can use the full half-block); for `Park`: trees +
 /// a park-green ground tint, no buildings; coins on the `Road` edges only.
 ///
-/// `fixed` is NOT needed here (the `kind` is already chosen by the caller
-/// via `pick_tile`); the caller passes the resolved `kind` directly. The
-/// decorations are laid out relative to the 40u block size.
+/// The caller passes the resolved `kind` directly. Decorations are laid out
+/// relative to the 40u block size.
 #[allow(clippy::too_many_arguments)]
 pub fn populate_block(
     commands: &mut Commands,
@@ -994,6 +1074,8 @@ pub fn populate_block(
     let road_n = sock[N] == Edge::Road;
     let any_road = road_w || road_e || road_s || road_n;
     let is_park = kind == TileKind::Park;
+    let is_field = kind == TileKind::Field;
+    let is_orchard = kind == TileKind::Orchard;
 
     // Block-local interior bounds: keep a 6.0u margin from any Road edge (so
     // obstacles never straddle a road), while None edges can use the full
@@ -1006,17 +1088,39 @@ pub fn populate_block(
 
     let shadow_mat = world_assets.materials.shadow.clone();
     let park_mat = world_assets.materials.park.clone();
+    let field_mat = world_assets.materials.field.clone();
+    let orchard_mat = world_assets.materials.orchard.clone();
 
     let _ = (gx, gz); // available for callers; layout uses the seed instead.
 
     commands.entity(root).with_children(|p| {
-        // --- Grass cell (block-wide, slightly oversized to avoid seams) ---
-        // For Park tiles, use a flat park-green tint over the grass for a
-        // distinct look; for non-park tiles, use the textured grass.
+        // --- Ground cell (block-wide, slightly oversized to avoid seams) ---
+        // Countryside variants use only cached procedural meshes/materials.
         if is_park {
             p.spawn((
                 Mesh3d(world_assets.meshes.ground.clone()),
                 MeshMaterial3d(park_mat.clone()),
+                Transform::from_xyz(0.0, 0.01, 0.0),
+            ));
+        } else if is_field {
+            p.spawn((
+                Mesh3d(world_assets.meshes.field_ground.clone()),
+                MeshMaterial3d(field_mat.clone()),
+                Transform::from_xyz(0.0, 0.01, 0.0),
+            ));
+            // Parallel low ridges make the procedural field readable while
+            // reusing one cached strip mesh for every furrow.
+            for z in [-15.0_f32, -10.0, -5.0, 0.0, 5.0, 10.0, 15.0] {
+                p.spawn((
+                    Mesh3d(world_assets.meshes.field_furrow.clone()),
+                    MeshMaterial3d(world_assets.materials.field_furrow.clone()),
+                    Transform::from_xyz(0.0, 0.025, z),
+                ));
+            }
+        } else if is_orchard {
+            p.spawn((
+                Mesh3d(world_assets.meshes.ground.clone()),
+                MeshMaterial3d(orchard_mat.clone()),
                 Transform::from_xyz(0.0, 0.01, 0.0),
             ));
         } else {
@@ -1378,6 +1482,10 @@ pub fn populate_block(
         let hedge_box_mesh = a.meshes.hedge_box.clone();
         let hedge_mat = a.materials.hedge.clone();
         let hedge_shadow_mesh = a.meshes.hedge_shadow.clone();
+        let hay_bale_mesh = a.meshes.hay_bale.clone();
+        let hay_mat = a.materials.hay.clone();
+        let farm_crate_mesh = a.meshes.farm_crate.clone();
+        let farm_wood_mat = a.materials.farm_wood.clone();
 
         // --- Deterministic per-block LCG for placement variety ---
         let mut s = seed;
@@ -1478,10 +1586,10 @@ pub fn populate_block(
         let _ = road_edges;
 
         // --- Interior decorations ---
-        // For Park tiles: trees + park-green tint (already applied above), no
-        // buildings. For Empty/non-park tiles: buildings + trees + lamps +
-        // T12 obstacles. The interior bounds are shrunk away from each Road
-        // edge (6u margin); None edges use the full half-block.
+        // Park, Field and Orchard are dedicated non-urban branches: none can
+        // reach the buildings/lamps/T12 branch below. Empty and road-bearing
+        // tiles retain the existing urban decoration behavior. Interior
+        // bounds are shrunk away from Road edges; None edges use the block.
         if is_park {
             // --- Park: more trees, no buildings/lamps/obstacles ---
             for _ in 0..6 {
@@ -1501,6 +1609,101 @@ pub fn populate_block(
                 };
                 p.spawn((
                     Transform::from_xyz(tx, 0.0, tz),
+                    Visibility::default(),
+                    Collider {
+                        half_x: 0.3,
+                        half_z: 0.3,
+                    },
+                    Tree,
+                ))
+                .with_children(|tp| {
+                    tp.spawn((
+                        Mesh3d(trunk_mesh.clone()),
+                        MeshMaterial3d(trunk_mat.clone()),
+                        Transform::from_xyz(0.0, 0.45, 0.0),
+                    ));
+                    tp.spawn((
+                        Mesh3d(foliage_mesh.clone()),
+                        MeshMaterial3d(foliage_mat.clone()),
+                        Transform::from_xyz(0.0, 1.35, 0.0),
+                    ));
+                    tp.spawn((
+                        Mesh3d(tree_shadow_mesh.clone()),
+                        MeshMaterial3d(shadow_mat.clone()),
+                        Transform::from_xyz(0.0, 0.05, 0.0),
+                    ));
+                });
+            }
+        } else if is_field {
+            // --- Field: a bounded deterministic set of cached farm props ---
+            // The layout helper uses widely separated slots, so full collider
+            // footprints remain in bounds and never overlap.
+            let (props, count) = field_prop_layout(seed);
+            // Keep the existing slot/jitter layout, but admit each fixed
+            // candidate through the same footprint path as other obstacles.
+            // Degenerate center ranges mean `try_place` validates/registers
+            // the candidate without changing its visual position. The exact
+            // same rotation-independent half-extent is assigned to Collider.
+            let mut footprint_seed = seed ^ 0xa511_e9b3;
+            for prop in props.into_iter().take(count) {
+                let half_extent = field_prop_collider_half_extent(prop.kind);
+                let Some((prop_x, prop_z)) = try_place(
+                    &mut placed,
+                    &mut footprint_seed,
+                    half_extent,
+                    half_extent,
+                    prop.position.x,
+                    prop.position.x,
+                    prop.position.y,
+                    prop.position.y,
+                    0.0,
+                    1,
+                ) else {
+                    // Slots are intentionally much farther apart than the
+                    // largest conservative footprint, so this is unreachable
+                    // unless that layout invariant is changed.
+                    debug_assert!(false, "field prop layout produced overlapping footprints");
+                    continue;
+                };
+                p.spawn((
+                    Transform::from_xyz(prop_x, 0.0, prop_z)
+                        .with_rotation(Quat::from_rotation_y(prop.rotation)),
+                    Visibility::default(),
+                    Collider {
+                        half_x: half_extent,
+                        half_z: half_extent,
+                    },
+                    FarmProp,
+                ))
+                .with_children(|fp| {
+                    match prop.kind {
+                        FieldPropKind::HayBale => {
+                            fp.spawn((
+                                Mesh3d(hay_bale_mesh.clone()),
+                                MeshMaterial3d(hay_mat.clone()),
+                                // Cylinder axis Y -> rotate onto its side along X.
+                                Transform::from_xyz(0.0, HAY_BALE_RADIUS, 0.0).with_rotation(
+                                    Quat::from_rotation_z(std::f32::consts::FRAC_PI_2),
+                                ),
+                            ));
+                        }
+                        FieldPropKind::FarmCrate => {
+                            fp.spawn((
+                                Mesh3d(farm_crate_mesh.clone()),
+                                MeshMaterial3d(farm_wood_mat.clone()),
+                                Transform::from_xyz(0.0, FARM_CRATE_HEIGHT / 2.0, 0.0),
+                            ));
+                        }
+                    }
+                });
+            }
+        } else if is_orchard {
+            // --- Orchard: fixed-cardinality, aligned rows of trees ---
+            // Row orientation varies by seed, but spacing and alignment stay
+            // exact. No buildings, lamps or T12 street obstacles are emitted.
+            for pos in orchard_tree_layout(seed) {
+                p.spawn((
+                    Transform::from_xyz(pos.x, 0.0, pos.y),
                     Visibility::default(),
                     Collider {
                         half_x: 0.3,
@@ -1871,6 +2074,125 @@ pub fn populate_block(
             }
         }
     });
+}
+
+/// Marker for collidable field dressing. `Collider` also keeps these props on
+/// the existing minimap obstacle path without any minimap-specific entities.
+#[derive(Component)]
+struct FarmProp;
+
+const FIELD_PROP_MIN: usize = 3;
+const FIELD_PROP_MAX: usize = 5;
+#[cfg(test)]
+const FIELD_PROP_LIMIT: f32 = 16.0;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FieldPropKind {
+    HayBale,
+    FarmCrate,
+}
+
+/// Rotation-independent square half-extent for a field prop's XZ collider.
+///
+/// Hay is a cylinder laid on its side: before root yaw its horizontal extents
+/// are half its axial length and its radius. A crate has square horizontal
+/// extents. In both cases the rectangle's half-diagonal contains its AABB at
+/// every yaw, so collision cannot underbound a randomly rotated mesh.
+fn field_prop_collider_half_extent(kind: FieldPropKind) -> f32 {
+    let (local_half_x, local_half_z) = field_prop_local_horizontal_half_extents(kind);
+    local_half_x.hypot(local_half_z)
+}
+
+fn field_prop_local_horizontal_half_extents(kind: FieldPropKind) -> (f32, f32) {
+    match kind {
+        FieldPropKind::HayBale => (HAY_BALE_LENGTH / 2.0, HAY_BALE_RADIUS),
+        FieldPropKind::FarmCrate => (FARM_CRATE_SIDE / 2.0, FARM_CRATE_SIDE / 2.0),
+    }
+}
+
+/// Exact horizontal AABB half-extents of the prop geometry after root yaw.
+/// Used to test the conservative collider against the full rotation range.
+#[cfg(test)]
+fn field_prop_geometry_aabb_half_extents(kind: FieldPropKind, yaw: f32) -> Vec2 {
+    let (half_x, half_z) = field_prop_local_horizontal_half_extents(kind);
+    let (sin, cos) = yaw.sin_cos();
+    Vec2::new(
+        cos.abs() * half_x + sin.abs() * half_z,
+        sin.abs() * half_x + cos.abs() * half_z,
+    )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct FieldPropPlacement {
+    position: Vec2,
+    rotation: f32,
+    kind: FieldPropKind,
+}
+
+/// Deterministic bounded field layout with no heap allocation. Slots are far
+/// enough apart that the largest conservative collider footprints cannot
+/// overlap; small jitter avoids making every field identical.
+fn field_prop_layout(seed: u32) -> ([FieldPropPlacement; FIELD_PROP_MAX], usize) {
+    let mut s = seed ^ 0x6d2b_79f5;
+    let mut slots = [
+        Vec2::new(-11.0, -11.0),
+        Vec2::new(0.0, -11.0),
+        Vec2::new(11.0, -11.0),
+        Vec2::new(-11.0, 0.0),
+        Vec2::ZERO,
+        Vec2::new(11.0, 0.0),
+        Vec2::new(-11.0, 11.0),
+        Vec2::new(0.0, 11.0),
+        Vec2::new(11.0, 11.0),
+    ];
+    // In-place Fisher-Yates shuffle; clamp handles rand's inclusive 1.0 edge.
+    for i in (1..slots.len()).rev() {
+        let j = ((rand(&mut s) * (i + 1) as f32) as usize).min(i);
+        slots.swap(i, j);
+    }
+    let span = FIELD_PROP_MAX - FIELD_PROP_MIN + 1;
+    let count = FIELD_PROP_MIN + ((rand(&mut s) * span as f32) as usize).min(span - 1);
+    let placements = std::array::from_fn(|i| {
+        let jitter = Vec2::new(rand(&mut s) * 2.0 - 1.0, rand(&mut s) * 2.0 - 1.0);
+        // The minimum count is three, so forcing the first two kinds ensures
+        // every field visibly contains both hay and a second farm prop.
+        let kind = match i {
+            0 => FieldPropKind::HayBale,
+            1 => FieldPropKind::FarmCrate,
+            _ if rand(&mut s) < 0.7 => FieldPropKind::HayBale,
+            _ => FieldPropKind::FarmCrate,
+        };
+        FieldPropPlacement {
+            position: slots[i] + jitter,
+            rotation: rand(&mut s) * std::f32::consts::TAU,
+            kind,
+        }
+    });
+    (placements, count)
+}
+
+const ORCHARD_ROWS: usize = 3;
+const ORCHARD_TREES_PER_ROW: usize = 4;
+const ORCHARD_TREE_COUNT: usize = ORCHARD_ROWS * ORCHARD_TREES_PER_ROW;
+#[cfg(test)]
+const ORCHARD_LIMIT: f32 = 16.0;
+
+/// Deterministic aligned orchard rows, returned as a fixed array to avoid a
+/// transient allocation during streaming. The seed selects X- or Z-running
+/// rows; every position remains comfortably inside the all-None block.
+fn orchard_tree_layout(seed: u32) -> [Vec2; ORCHARD_TREE_COUNT] {
+    const ACROSS: [f32; ORCHARD_ROWS] = [-10.0, 0.0, 10.0];
+    const ALONG: [f32; ORCHARD_TREES_PER_ROW] = [-13.5, -4.5, 4.5, 13.5];
+    let rows_run_x = visual_coordinate_hash(seed as i32, (seed >> 16) as i32) & 1 == 0;
+    std::array::from_fn(|i| {
+        let row = i / ORCHARD_TREES_PER_ROW;
+        let tree = i % ORCHARD_TREES_PER_ROW;
+        if rows_run_x {
+            Vec2::new(ALONG[tree], ACROSS[row])
+        } else {
+            Vec2::new(ACROSS[row], ALONG[tree])
+        }
+    })
 }
 
 /// Tiny LCG for deterministic-but-varied placement without pulling in `rand`.
@@ -2435,6 +2757,48 @@ mod tests {
         assert!(horizontal_line_road(0));
     }
 
+    #[test]
+    fn all_none_visual_variants_have_only_none_sockets() {
+        for kind in [
+            TileKind::Empty,
+            TileKind::Park,
+            TileKind::Field,
+            TileKind::Orchard,
+        ] {
+            assert_eq!(sockets(kind), [Edge::None; 4], "{kind:?}");
+        }
+    }
+
+    /// Every visual variant is selected at reachable all-None coordinates,
+    /// and selection is stable across repeated generation/recycling calls.
+    #[test]
+    fn all_none_visual_variants_are_deterministic_and_reachable() {
+        let mut reached = [false; 4];
+        for gx in -200..=200 {
+            for gz in -200..=200 {
+                if vertical_line_road(gx)
+                    || vertical_line_road(gx + 1)
+                    || horizontal_line_road(gz)
+                    || horizontal_line_road(gz + 1)
+                {
+                    continue;
+                }
+                let first = tile_from_edges(gx, gz);
+                assert_eq!(first, tile_from_edges(gx, gz));
+                assert_eq!(first, all_none_variant(gx, gz));
+                assert_eq!(sockets(first), [Edge::None; 4]);
+                match first {
+                    TileKind::Empty => reached[0] = true,
+                    TileKind::Park => reached[1] = true,
+                    TileKind::Field => reached[2] = true,
+                    TileKind::Orchard => reached[3] = true,
+                    other => panic!("all-None coordinate selected {other:?}"),
+                }
+            }
+        }
+        assert_eq!(reached, [true; 4], "not all visual variants were reachable");
+    }
+
     /// Repeated calls with the same index MUST return the same answer —
     /// there is no time/state dependence, only a pure hash of the index.
     /// Covers a broad spread of negative and positive indices on both axes
@@ -2612,6 +2976,8 @@ mod tests {
         let cases = [
             (Empty, [false; 4]),
             (Park, [false; 4]),
+            (Field, [false; 4]),
+            (Orchard, [false; 4]),
             (RoadNS, [false; 4]),
             (RoadEW, [false; 4]),
             (Cross, [true; 4]),
@@ -2712,6 +3078,111 @@ mod tests {
         assert_ne!(base, seed_for(4, 5), "seed unchanged moving -X");
         assert_ne!(base, seed_for(5, 6), "seed unchanged moving +Z");
         assert_ne!(base, seed_for(5, 4), "seed unchanged moving -Z");
+    }
+
+    #[test]
+    fn field_prop_colliders_contain_geometry_at_every_sampled_yaw() {
+        for kind in [FieldPropKind::HayBale, FieldPropKind::FarmCrate] {
+            let collider_half = field_prop_collider_half_extent(kind);
+            // Include axis-aligned, diagonal, and dense arbitrary rotations.
+            for step in 0..=720 {
+                let yaw = step as f32 * std::f32::consts::TAU / 720.0;
+                let geometry = field_prop_geometry_aabb_half_extents(kind, yaw);
+                assert!(
+                    geometry.x <= collider_half + 1e-6 && geometry.y <= collider_half + 1e-6,
+                    "{kind:?} geometry {geometry:?} escapes collider half {collider_half} at {yaw} rad"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn field_props_are_deterministic_bounded_and_nonoverlapping_with_collider_footprints() {
+        for seed in 0..512_u32 {
+            let (a, count_a) = field_prop_layout(seed);
+            let (b, count_b) = field_prop_layout(seed);
+            assert_eq!(a, b);
+            assert_eq!(count_a, count_b);
+            assert!((FIELD_PROP_MIN..=FIELD_PROP_MAX).contains(&count_a));
+
+            let props = &a[..count_a];
+            assert!(props.iter().any(|p| p.kind == FieldPropKind::HayBale));
+            assert!(props.iter().any(|p| p.kind == FieldPropKind::FarmCrate));
+
+            // Mirror populate_block's try_place registration. Each stored
+            // footprint must be exactly the Collider square, remain bounded,
+            // and be accepted without overlap for every generated rotation
+            // and kind combination.
+            let mut placed = Vec::new();
+            let mut footprint_seed = seed ^ 0xa511_e9b3;
+            for prop in props {
+                let half = field_prop_collider_half_extent(prop.kind);
+                let accepted = try_place(
+                    &mut placed,
+                    &mut footprint_seed,
+                    half,
+                    half,
+                    prop.position.x,
+                    prop.position.x,
+                    prop.position.y,
+                    prop.position.y,
+                    0.0,
+                    1,
+                );
+                assert_eq!(accepted, Some((prop.position.x, prop.position.y)));
+                assert!(prop.position.x.abs() + half <= FIELD_PROP_LIMIT);
+                assert!(prop.position.y.abs() + half <= FIELD_PROP_LIMIT);
+                assert!((0.0..=std::f32::consts::TAU).contains(&prop.rotation));
+
+                let footprint = placed.last().unwrap();
+                assert_eq!(
+                    *footprint,
+                    [
+                        prop.position.x - half,
+                        prop.position.x + half,
+                        prop.position.y - half,
+                        prop.position.y + half,
+                    ]
+                );
+            }
+            assert_eq!(placed.len(), count_a);
+            for (i, footprint) in placed.iter().enumerate() {
+                for other in &placed[..i] {
+                    assert!(
+                        footprint[1] <= other[0]
+                            || footprint[0] >= other[1]
+                            || footprint[3] <= other[2]
+                            || footprint[2] >= other[3],
+                        "field collider footprints overlap at seed {seed}: {footprint:?} / {other:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn orchard_rows_are_deterministic_aligned_bounded_and_fixed_size() {
+        for seed in 0..128_u32 {
+            let trees = orchard_tree_layout(seed);
+            assert_eq!(trees, orchard_tree_layout(seed));
+            assert_eq!(trees.len(), ORCHARD_TREE_COUNT);
+            assert!(
+                trees.iter().all(|p| {
+                    p.x.abs() + 0.3 <= ORCHARD_LIMIT && p.y.abs() + 0.3 <= ORCHARD_LIMIT
+                })
+            );
+
+            let rows_run_x = trees[0].y == trees[1].y;
+            for row in trees.chunks_exact(ORCHARD_TREES_PER_ROW) {
+                if rows_run_x {
+                    assert!(row.iter().all(|p| p.y == row[0].y));
+                    assert!(row.windows(2).all(|pair| pair[0].x < pair[1].x));
+                } else {
+                    assert!(row.iter().all(|p| p.x == row[0].x));
+                    assert!(row.windows(2).all(|pair| pair[0].y < pair[1].y));
+                }
+            }
+        }
     }
 
     /// `try_place` must NEVER return a footprint that overlaps an already-

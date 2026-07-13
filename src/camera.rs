@@ -7,7 +7,7 @@ use bevy::{camera::ScalingMode, prelude::*};
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::post_process::bloom::Bloom;
 
-use crate::car::Car;
+use crate::car::{Car, DrivingSet};
 use crate::game::events::ObstacleHit;
 use crate::game::resources::GameConfig;
 use crate::game::state::GameState;
@@ -43,16 +43,30 @@ pub struct Shake {
     noise: f32,
 }
 
+#[derive(SystemSet, Clone, Debug, PartialEq, Eq, Hash)]
+struct CameraObstacleFeedbackSet;
+
+/// Keep the ordering contract in one helper so plugin wiring and its focused
+/// schedule test exercise the same relation.
+fn configure_obstacle_feedback_order(app: &mut App) {
+    app.configure_sets(Update, CameraObstacleFeedbackSet.after(DrivingSet));
+}
+
 pub struct CameraPlugin;
 
 impl Plugin for CameraPlugin {
     fn build(&self, app: &mut App) {
+        configure_obstacle_feedback_order(app);
         app.init_resource::<Shake>()
             .add_systems(Startup, spawn_camera)
             .add_systems(
                 Update,
                 (handle_obstacle_hits, follow_camera)
                     .chain()
+                    // The hit reader must observe collision messages emitted
+                    // by this frame's driving chain, not schedule-dependent
+                    // previous-frame data.
+                    .in_set(CameraObstacleFeedbackSet)
                     .run_if(in_state(GameState::Playing)),
             );
     }
@@ -150,14 +164,9 @@ fn follow_camera(
         }
     }
 
-    // Speed zoom: widen the orthographic viewport as speed rises. The current
-    // viewport_height lives in the projection itself, so we read-modify it.
-    let ratio = if cfg.max_speed > 0.0 {
-        car.speed.abs() / cfg.max_speed
-    } else {
-        0.0
-    };
-    let target_vh = 10.0 + ratio * 2.0;
+    // Speed zoom: widen the orthographic viewport as speed rises. Reduced
+    // motion pins the viewport immediately to its fixed baseline: no residual
+    // smoothing from a previously fast frame and no speed-driven zoom motion.
     let current_vh = match &*proj {
         Projection::Orthographic(o) => match o.scaling_mode {
             ScalingMode::FixedVertical { viewport_height } => viewport_height,
@@ -165,7 +174,13 @@ fn follow_camera(
         },
         _ => 10.0,
     };
-    let vh = current_vh + (target_vh - current_vh) * t;
+    let vh = camera_viewport_height(
+        current_vh,
+        car.speed,
+        cfg.max_speed,
+        t,
+        settings.reduced_motion,
+    );
     if let Projection::Orthographic(ref mut o) = *proj {
         o.scaling_mode = ScalingMode::FixedVertical {
             viewport_height: vh,
@@ -195,9 +210,61 @@ fn next_trauma(current: f32, impact_speed: f32, reduced_motion: bool) -> f32 {
     }
 }
 
+/// Orthographic zoom transition shared with focused accessibility tests.
+fn camera_viewport_height(
+    current: f32,
+    speed: f32,
+    max_speed: f32,
+    smoothing: f32,
+    reduced_motion: bool,
+) -> f32 {
+    const FIXED_VIEWPORT_HEIGHT: f32 = 10.0;
+    if reduced_motion {
+        return FIXED_VIEWPORT_HEIGHT;
+    }
+    let ratio = if max_speed > 0.0 {
+        speed.abs() / max_speed
+    } else {
+        0.0
+    };
+    let target = FIXED_VIEWPORT_HEIGHT + ratio * 2.0;
+    current + (target - current) * smoothing
+}
+
 #[cfg(test)]
 mod tests {
-    use super::next_trauma;
+    use super::{
+        CameraObstacleFeedbackSet, camera_viewport_height, configure_obstacle_feedback_order,
+        next_trauma,
+    };
+    use crate::car::DrivingSet;
+    use bevy::prelude::*;
+
+    #[derive(Resource, Default)]
+    struct ExecutionOrder(Vec<&'static str>);
+
+    fn record_driving(mut order: ResMut<ExecutionOrder>) {
+        order.0.push("driving");
+    }
+
+    fn record_feedback(mut order: ResMut<ExecutionOrder>) {
+        order.0.push("camera feedback");
+    }
+
+    #[test]
+    fn feedback_order_helper_runs_reader_after_driving() {
+        let mut app = App::new();
+        app.init_resource::<ExecutionOrder>();
+        configure_obstacle_feedback_order(&mut app);
+        app.add_systems(Update, record_driving.in_set(DrivingSet));
+        app.add_systems(Update, record_feedback.in_set(CameraObstacleFeedbackSet));
+        app.update();
+
+        assert_eq!(
+            app.world().resource::<ExecutionOrder>().0,
+            ["driving", "camera feedback"]
+        );
+    }
 
     #[test]
     fn normal_motion_adds_and_clamps_trauma() {
@@ -208,5 +275,12 @@ mod tests {
     #[test]
     fn reduced_motion_does_not_add_trauma() {
         assert_eq!(next_trauma(0.35, 12.0, true), 0.35);
+    }
+
+    #[test]
+    fn reduced_motion_uses_fixed_zoom_at_every_speed() {
+        assert_eq!(camera_viewport_height(12.0, 12.0, 12.0, 0.1, true), 10.0);
+        assert_eq!(camera_viewport_height(9.0, 0.0, 12.0, 0.9, true), 10.0);
+        assert!(camera_viewport_height(10.0, 12.0, 12.0, 0.5, false) > 10.0);
     }
 }

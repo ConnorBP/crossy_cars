@@ -24,9 +24,10 @@
 
 use bevy::prelude::*;
 
-use crate::car::{Car, Handbrake, InputFrozen, PlayerInput};
+use crate::car::{Car, DrivingSet, Handbrake, InputFrozen, PlayerInput};
 use crate::game::events::ObstacleHit;
 use crate::game::state::GameState;
+use crate::settings::Settings;
 
 // ===========================================================================
 // Constants — tuned for the car in `car.rs`
@@ -238,15 +239,28 @@ struct Smoke {
 // Plugin
 // ===========================================================================
 
+#[derive(SystemSet, Clone, Debug, PartialEq, Eq, Hash)]
+struct EffectsObstacleFeedbackSet;
+
+/// Centralize the collision-to-feedback dependency for plugin wiring and a
+/// focused schedule test.
+fn configure_obstacle_feedback_order(app: &mut App) {
+    app.configure_sets(Update, EffectsObstacleFeedbackSet.after(DrivingSet));
+}
+
 pub struct EffectsPlugin;
 
 impl Plugin for EffectsPlugin {
     fn build(&self, app: &mut App) {
+        configure_obstacle_feedback_order(app);
         app.init_resource::<EffectsAssets>()
             .add_systems(
                 Update,
                 (emit_tire_effects, fade_tire_marks, update_smoke)
                     .chain()
+                    // Impact smoke reads ObstacleHit, so collision emission
+                    // must complete first in the same update.
+                    .in_set(EffectsObstacleFeedbackSet)
                     .run_if(in_state(GameState::Playing)),
             )
             // Pausing preserves both visible effects and their reusable pool
@@ -307,6 +321,9 @@ fn emit_tire_effects(
         (With<Smoke>, Without<TireMark>),
     >,
     mut obstacle_hits: MessageReader<ObstacleHit>,
+    settings: Res<Settings>,
+    mut mark_emissions: Local<Vec<MarkEmission>>,
+    mut smoke_emissions: Local<Vec<SmokeEmission>>,
 ) {
     // Respect the countdown/freeze schedule: while input is frozen the car is
     // stationary and no new drift/brake skid emits. (The car's heading/speed
@@ -320,8 +337,17 @@ fn emit_tire_effects(
         return;
     };
     let dt = time.delta_secs();
-    let mut mark_emissions = Vec::with_capacity(2);
-    let mut smoke_emissions = Vec::with_capacity(10);
+    let smoke_enabled = transient_smoke_enabled(settings.reduced_motion);
+    // Retain bounded request buffers between frames. Reduced motion never
+    // reserves the smoke buffer, so it introduces no transient allocation.
+    mark_emissions.clear();
+    if mark_emissions.capacity() < 2 {
+        mark_emissions.reserve_exact(2);
+    }
+    smoke_emissions.clear();
+    if smoke_enabled && smoke_emissions.capacity() < 10 {
+        smoke_emissions.reserve_exact(10);
+    }
 
     // --- First-frame init: seed prev_heading so we don't emit on frame 0. ---
     if !state.initialized {
@@ -365,7 +391,7 @@ fn emit_tire_effects(
     }
 
     state.smoke_timer -= dt;
-    if skidding && state.smoke_timer <= 0.0 {
+    if smoke_enabled && skidding && state.smoke_timer <= 0.0 {
         state.smoke_timer = SMOKE_EMIT_INTERVAL;
         for &pos in &[left_w, right_w] {
             for _ in 0..2 {
@@ -380,7 +406,7 @@ fn emit_tire_effects(
     // pool are immaterial (there cannot be more than the cap visible at once),
     // so do not accumulate an unbounded message burst.
     for hit in obstacle_hits.read() {
-        if hit.impact_speed >= HIT_SMOKE_SPEED {
+        if smoke_enabled && hit.impact_speed >= HIT_SMOKE_SPEED {
             let center = car_t.translation + fwd * 0.9;
             for _ in 0..6 {
                 if smoke_emissions.len() >= SMOKE_POOL_CAP {
@@ -398,8 +424,12 @@ fn emit_tire_effects(
         }
     }
 
-    apply_mark_emissions(&mut commands, &assets, &mut marks, &mark_emissions);
-    apply_smoke_emissions(&mut commands, &assets, &mut smokes, &smoke_emissions);
+    if !mark_emissions.is_empty() {
+        apply_mark_emissions(&mut commands, &assets, &mut marks, &mark_emissions);
+    }
+    if smoke_enabled && !smoke_emissions.is_empty() {
+        apply_smoke_emissions(&mut commands, &assets, &mut smokes, &smoke_emissions);
+    }
 }
 
 /// Compute the world-space ground-contact points of the two rear wheels from
@@ -618,6 +648,7 @@ fn fade_tire_marks(
 fn update_smoke(
     time: Res<Time>,
     assets: Res<EffectsAssets>,
+    settings: Res<Settings>,
     mut smokes: Query<(
         &mut Smoke,
         &mut Transform,
@@ -628,6 +659,13 @@ fn update_smoke(
     let dt = time.delta_secs();
     let last = SMOKE_FADE_STEPS - 1;
     for (mut smoke, mut tf, mut visibility, mut mat) in smokes.iter_mut() {
+        if !transient_smoke_enabled(settings.reduced_motion) {
+            // Retire any puff that was already visible when the setting was
+            // enabled. Keeping the hidden entity preserves the bounded pool.
+            smoke.age = SMOKE_LIFETIME;
+            *visibility = Visibility::Hidden;
+            continue;
+        }
         smoke.age += dt;
         if smoke.age >= SMOKE_LIFETIME {
             *visibility = Visibility::Hidden;
@@ -734,6 +772,12 @@ fn pool_has_spawn_capacity(existing: usize, pending_spawns: usize, cap: usize) -
     existing.saturating_add(pending_spawns) < cap
 }
 
+/// Tire marks remain as static skid feedback, while transient smoke is
+/// disabled by the accessibility setting.
+const fn transient_smoke_enabled(reduced_motion: bool) -> bool {
+    !reduced_motion
+}
+
 /// Pure skid decision shared by the emitter and focused behavior tests.
 /// Cornering keeps the existing angular-velocity/speed proxy, while hard
 /// service braking can independently produce the same rear mark/smoke pools.
@@ -750,9 +794,38 @@ fn should_skid(angular_velocity: f32, speed: f32, input: PlayerInput, handbrake:
 #[cfg(test)]
 mod tests {
     use super::{
-        HANDBRAKE_SKID_SPEED, PoolSlot, pool_has_spawn_capacity, should_skid, take_pool_slot,
+        EffectsObstacleFeedbackSet, HANDBRAKE_SKID_SPEED, PoolSlot,
+        configure_obstacle_feedback_order, pool_has_spawn_capacity, should_skid, take_pool_slot,
+        transient_smoke_enabled,
     };
-    use crate::car::PlayerInput;
+    use crate::car::{DrivingSet, PlayerInput};
+    use bevy::prelude::*;
+
+    #[derive(Resource, Default)]
+    struct ExecutionOrder(Vec<&'static str>);
+
+    fn record_driving(mut order: ResMut<ExecutionOrder>) {
+        order.0.push("driving");
+    }
+
+    fn record_feedback(mut order: ResMut<ExecutionOrder>) {
+        order.0.push("effects feedback");
+    }
+
+    #[test]
+    fn feedback_order_helper_runs_reader_after_driving() {
+        let mut app = App::new();
+        app.init_resource::<ExecutionOrder>();
+        configure_obstacle_feedback_order(&mut app);
+        app.add_systems(Update, record_driving.in_set(DrivingSet));
+        app.add_systems(Update, record_feedback.in_set(EffectsObstacleFeedbackSet));
+        app.update();
+
+        assert_eq!(
+            app.world().resource::<ExecutionOrder>().0,
+            ["driving", "effects feedback"]
+        );
+    }
 
     #[test]
     fn reuse_prefers_expired_then_oldest_with_stable_ties() {
@@ -785,6 +858,13 @@ mod tests {
         assert!(!pool_has_spawn_capacity(78, 2, 80));
         assert!(!pool_has_spawn_capacity(80, 0, 80));
         assert!(!pool_has_spawn_capacity(usize::MAX, 1, 80));
+    }
+
+    #[test]
+    fn reduced_motion_suppresses_smoke_without_changing_skid_detection() {
+        assert!(transient_smoke_enabled(false));
+        assert!(!transient_smoke_enabled(true));
+        assert!(should_skid(1.3, 6.0, PlayerInput::default(), false));
     }
 
     #[test]

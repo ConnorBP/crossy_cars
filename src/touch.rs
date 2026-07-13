@@ -13,6 +13,151 @@ const BRAKE_END_X: f32 = 0.75;
 const STEER_CENTER_X: f32 = STEER_END_X * 0.5;
 const STEER_DEADZONE: f32 = 0.12;
 
+// Fixed touch-only HUD composition. These values are shared by the live
+// nodes in their owning modules and the pure all-panel layout audit below.
+pub(crate) const TOUCH_COCKPIT_LEFT: f32 = 14.0;
+pub(crate) const TOUCH_COCKPIT_TOP: f32 = 12.0;
+pub(crate) const TOUCH_COCKPIT_WIDTH: f32 = 170.0;
+pub(crate) const TOUCH_COCKPIT_HEIGHT: f32 = 116.0;
+pub(crate) const TOUCH_HEALTH_LEFT: f32 = 14.0;
+pub(crate) const TOUCH_HEALTH_TOP: f32 = 136.0;
+pub(crate) const TOUCH_HEALTH_WIDTH: f32 = 190.0;
+pub(crate) const TOUCH_HEALTH_HEIGHT: f32 = 52.0;
+pub(crate) const TOUCH_POWERUP_LEFT: f32 = 205.0;
+pub(crate) const TOUCH_POWERUP_TOP: f32 = 136.0;
+pub(crate) const TOUCH_POWERUP_WIDTH: f32 = 142.0;
+pub(crate) const TOUCH_POWERUP_HEIGHT: f32 = 52.0;
+pub(crate) const TOUCH_EVENT_LEFT: f32 = 370.0;
+pub(crate) const TOUCH_EVENT_TOP: f32 = 182.0;
+pub(crate) const TOUCH_EVENT_WIDTH: f32 = 250.0;
+pub(crate) const TOUCH_EVENT_HEIGHT: f32 = 30.0;
+
+const CONTROL_LABEL_BOTTOM_PERCENT: f32 = 2.0;
+const CONTROL_LABEL_HEIGHT_PERCENT: f32 = 28.0;
+const CONTROL_LABEL_LAYOUTS: [(&str, f32, f32, f32); 4] = [
+    ("STEER", 2.0, 43.0, 21.0),
+    ("HANDBRAKE", 45.0, 10.0, 13.0),
+    ("BRAKE", 56.0, 21.0, 21.0),
+    ("GO", 78.0, 20.0, 21.0),
+];
+
+/// Top-left-origin pixel bounds used to verify HUD separation without an ECS
+/// world or renderer. Touch, health, and pickup UI share this representation.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct ScreenBounds {
+    pub(crate) left: f32,
+    pub(crate) top: f32,
+    pub(crate) right: f32,
+    pub(crate) bottom: f32,
+}
+
+#[allow(dead_code)]
+impl ScreenBounds {
+    pub(crate) fn overlaps(self, other: Self) -> bool {
+        self.left < other.right
+            && self.right > other.left
+            && self.top < other.bottom
+            && self.bottom > other.top
+    }
+
+    #[cfg(test)]
+    fn contains(self, other: Self) -> bool {
+        self.left <= other.left
+            && self.top <= other.top
+            && self.right >= other.right
+            && self.bottom >= other.bottom
+    }
+}
+
+const fn fixed_bounds(left: f32, top: f32, width: f32, height: f32) -> ScreenBounds {
+    ScreenBounds {
+        left,
+        top,
+        right: left + width,
+        bottom: top + height,
+    }
+}
+
+fn centered_bounds(viewport_width: f32, top: f32, width: f32, height: f32) -> ScreenBounds {
+    let width = width.min(viewport_width);
+    fixed_bounds((viewport_width - width) * 0.5, top, width, height)
+}
+
+/// Painted bounds for every persistent/active touch HUD panel. Objective and
+/// combo retain their existing centered placement, and the minimap keeps its
+/// current right-side placement; the other four use the compact composition.
+#[allow(dead_code)]
+pub(crate) fn touch_hud_bounds(viewport: Vec2) -> [ScreenBounds; 7] {
+    [
+        fixed_bounds(
+            TOUCH_COCKPIT_LEFT,
+            TOUCH_COCKPIT_TOP,
+            TOUCH_COCKPIT_WIDTH,
+            TOUCH_COCKPIT_HEIGHT,
+        ),
+        fixed_bounds(
+            TOUCH_HEALTH_LEFT,
+            TOUCH_HEALTH_TOP,
+            TOUCH_HEALTH_WIDTH,
+            TOUCH_HEALTH_HEIGHT,
+        ),
+        fixed_bounds(
+            TOUCH_POWERUP_LEFT,
+            TOUCH_POWERUP_TOP,
+            TOUCH_POWERUP_WIDTH,
+            TOUCH_POWERUP_HEIGHT,
+        ),
+        centered_bounds(viewport.x, 54.0, 420.0, 38.0),
+        centered_bounds(viewport.x, 98.0, 144.0, 80.0),
+        fixed_bounds(
+            TOUCH_EVENT_LEFT,
+            TOUCH_EVENT_TOP,
+            TOUCH_EVENT_WIDTH,
+            TOUCH_EVENT_HEIGHT,
+        ),
+        fixed_bounds(viewport.x - 72.0 - 136.0, 62.0, 136.0, 136.0),
+    ]
+}
+
+/// Union of all lower driving hitboxes in top-left-origin screen pixels.
+#[allow(dead_code)]
+pub(crate) fn touch_driving_band_bounds(viewport: Vec2) -> ScreenBounds {
+    ScreenBounds {
+        left: 0.0,
+        top: viewport.y * ACTIVE_Y,
+        right: viewport.x,
+        bottom: viewport.y,
+    }
+}
+
+#[cfg(test)]
+fn touch_control_zone_bounds(viewport: Vec2) -> [ScreenBounds; 4] {
+    let xs = [
+        (0.0, STEER_END_X),
+        (STEER_END_X, BRAKE_START_X),
+        (BRAKE_START_X, BRAKE_END_X),
+        (BRAKE_END_X, 1.0),
+    ];
+    xs.map(|(left, right)| ScreenBounds {
+        left: viewport.x * left,
+        top: viewport.y * ACTIVE_Y,
+        right: viewport.x * right,
+        bottom: viewport.y,
+    })
+}
+
+#[cfg(test)]
+fn touch_control_label_bounds(viewport: Vec2) -> [ScreenBounds; 4] {
+    CONTROL_LABEL_LAYOUTS.map(|(_, left, width, _)| ScreenBounds {
+        left: viewport.x * left / 100.0,
+        top: viewport.y
+            * (1.0 - (CONTROL_LABEL_BOTTOM_PERCENT + CONTROL_LABEL_HEIGHT_PERCENT) / 100.0),
+        right: viewport.x * (left + width) / 100.0,
+        bottom: viewport.y * (1.0 - CONTROL_LABEL_BOTTOM_PERCENT / 100.0),
+    })
+}
+
 /// Becomes sticky after the first touch so touch-only guidance does not appear
 /// for keyboard/mouse players.
 #[derive(Resource, Default, Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,7 +214,7 @@ impl Plugin for TouchPlugin {
                 OnExit(GameState::GameOver),
                 despawn_marker::<TouchGuidanceRoot>,
             )
-            .add_systems(Update, update_touch_visibility);
+            .add_systems(Update, update_touch_visibility.after(TouchStateSet));
     }
 }
 
@@ -290,10 +435,9 @@ fn spawn_touch_hud(mut commands: Commands, active: Res<TouchControlsActive>) {
         .with_children(|root| {
             // Visual bands are intentionally shorter than their generous
             // logical touch zones so a short landscape viewport stays clear.
-            root.spawn(control_label("STEER", 2.0, 43.0, 28.0, 21.0));
-            root.spawn(control_label("HANDBRAKE", 45.0, 10.0, 28.0, 13.0));
-            root.spawn(control_label("BRAKE", 56.0, 21.0, 28.0, 21.0));
-            root.spawn(control_label("GO", 78.0, 20.0, 28.0, 21.0));
+            for (label, left, width, font_size) in CONTROL_LABEL_LAYOUTS {
+                root.spawn(control_label(label, left, width, font_size));
+            }
             root.spawn((
                 Node {
                     position_type: PositionType::Absolute,
@@ -320,16 +464,15 @@ fn control_label(
     label: &'static str,
     left_percent: f32,
     width_percent: f32,
-    height_percent: f32,
     font_size: f32,
 ) -> impl Bundle {
     (
         Node {
             position_type: PositionType::Absolute,
-            bottom: Val::Percent(2.0),
+            bottom: Val::Percent(CONTROL_LABEL_BOTTOM_PERCENT),
             left: Val::Percent(left_percent),
             width: Val::Percent(width_percent),
-            height: Val::Percent(height_percent),
+            height: Val::Percent(CONTROL_LABEL_HEIGHT_PERCENT),
             align_items: AlignItems::Center,
             justify_content: JustifyContent::Center,
             ..default()
@@ -419,6 +562,57 @@ mod tests {
             normalize_position(Vec2::new(-10.0, 120.0), Vec2::splat(100.0)),
             Some(Vec2::new(0.0, 1.0))
         );
+    }
+
+    fn assert_touch_hud_layout(viewport: Vec2) {
+        let bounds = touch_hud_bounds(viewport);
+        let driving = touch_driving_band_bounds(viewport);
+        for (index, left) in bounds.into_iter().enumerate() {
+            assert!(left.left >= 0.0 && left.top >= 0.0, "{left:?}");
+            assert!(
+                left.right <= viewport.x && left.bottom <= viewport.y,
+                "{left:?}"
+            );
+            assert!(!left.overlaps(driving), "{left:?} overlaps driving band");
+            for right in bounds.into_iter().skip(index + 1) {
+                assert!(!left.overlaps(right), "{left:?} overlaps {right:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn compact_touch_hud_is_pairwise_disjoint_at_844x390() {
+        let viewport = Vec2::new(844.0, 390.0);
+        assert_touch_hud_layout(viewport);
+        let [cockpit, health, powerups, objective, combo, event, _minimap] =
+            touch_hud_bounds(viewport);
+        assert_eq!(cockpit, fixed_bounds(14.0, 12.0, 170.0, 116.0));
+        assert_eq!(health, fixed_bounds(14.0, 136.0, 190.0, 52.0));
+        assert_eq!(powerups, fixed_bounds(205.0, 136.0, 142.0, 52.0));
+        assert_eq!(objective, fixed_bounds(212.0, 54.0, 420.0, 38.0));
+        assert_eq!(combo, fixed_bounds(350.0, 98.0, 144.0, 80.0));
+        assert_eq!(event, fixed_bounds(370.0, 182.0, 250.0, 30.0));
+    }
+
+    #[test]
+    fn compact_touch_hud_is_pairwise_disjoint_at_1440x900() {
+        assert_touch_hud_layout(Vec2::new(1440.0, 900.0));
+    }
+
+    #[test]
+    fn touch_bands_and_labels_match_hitboxes_at_target_viewports() {
+        for viewport in [Vec2::new(844.0, 390.0), Vec2::new(1440.0, 900.0)] {
+            let band = touch_driving_band_bounds(viewport);
+            assert_eq!(band.top, viewport.y * ACTIVE_Y);
+            assert_eq!(band.bottom, viewport.y);
+
+            for zone in touch_control_zone_bounds(viewport) {
+                assert!(band.contains(zone));
+            }
+            for label in touch_control_label_bounds(viewport) {
+                assert!(band.contains(label));
+            }
+        }
     }
 
     #[test]

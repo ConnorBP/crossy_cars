@@ -6,6 +6,21 @@
 
 **Headline conflict resolved:** The README and `LEADERBOARD_ARCHITECTURE.md` §8 state the round is "capped at 90 seconds." The code has **two distinct caps**: coins cap `TimeLeft` at **90 s** (`world.rs::MAX_ROUND_TIME`), but Time power-ups cap at **99 s** (`pickups.rs::TIME_CAP`). The true maximum round length is **99 s**. Any leaderboard cap derived from a 90 s assumption is miscalibrated (see §7, §8).
 
+## Post-audit implementation status — 2026-07-13
+
+The findings below intentionally preserve the audited source snapshot. The following high-confidence recommendations have since been implemented and validated:
+
+- Browser/OS `prefers-reduced-motion` is inherited when no persisted choice exists; an explicit saved preference takes precedence.
+- Reduced Motion now suppresses smoke and hit particles, pickup bob/spin/flash, creature bob/waddle, water ripples, speed zoom, camera trauma, and stale damage flashes while preserving gameplay information.
+- Timer and combo contrast panels were added; objective, combo, event, minimap, and level-label bands were separated.
+- The event banner now includes a non-color signature, explicit seconds remaining, and segmented duration progress.
+- The Menu now includes a five-condition medal gallery, and maximal Game Over content has a compact mobile layout.
+- The touch HUD now uses a coordinated compact cockpit, health, power-up, event, minimap, and driving-control layout at the 844×390 target viewport.
+- Static-obstacle damage now requires impact strictly above 5 u/s, uses a 0.5 s cooldown, and deterministically applies only the strongest qualifying contact per frame. Sub-threshold closing contacts still stop inward motion.
+- Deterministic Field and Orchard tile variants and conservative rotation-independent farm-prop colliders were added without changing road socket compatibility.
+
+Current validation for this implementation wave: **283 Rust tests**, zero native/WASM warnings, strict desktop/touch/Settings browser scenarios passed, and release WASM **22.832 MiB** (25 MiB limit). Telemetry-dependent balance proposals remain intentionally unimplemented.
+
 ---
 
 ## Executive Summary

@@ -9,7 +9,25 @@ Live site: `https://roady-car.pages.dev`
 
 This is the durable handoff for resuming work after context compaction. It distinguishes implemented work from verified work, records everything left unfinished by the primary agent and prior swarm agents, and defines the order in which work should restart.
 
-## Current checkpoint
+## 2026-07-13 current checkpoint (supersedes the historical plan below)
+
+The high-confidence `GAMEPLAY_AUDIT.md` implementation wave is complete locally and ready for publication. It includes deterministic Field/Orchard tiles, corrected obstacle collision/damage semantics, comprehensive Reduced Motion behavior with OS preference inheritance, HUD contrast/layout fixes, event duration/signature feedback, the five-condition medal gallery, compact mobile Game Over presentation, and a coordinated 844×390 touch HUD.
+
+Validation at this checkpoint:
+
+```text
+cargo test --locked                                  PASS — 283 tests
+cargo check --locked                                 PASS — 0 warnings
+cargo check --locked --target wasm32-unknown-unknown PASS — 0 warnings
+trunk build --release --cargo-profile wasm-release   PASS
+python tools/check_release.py --dist dist             PASS — 22.832 MiB WASM
+strict browser runtime audit                          PASS — 0 errors
+browser desktop/touch/Settings scenarios              PASS
+```
+
+The earlier Wave O material below remains useful as historical context, but its unfinished-work inventory is no longer authoritative. Production verification after the audit-wave push is the only immediate remaining release task; telemetry-dependent tuning in `GAMEPLAY_AUDIT.md` remains deliberately deferred.
+
+## Historical checkpoint
 
 Wave O was committed and pushed as:
 

@@ -63,6 +63,9 @@ const ACCEL_RESPONSE_RATE: f32 = 3.0;
 const COAST_RESPONSE_RATE: f32 = 2.0;
 const BRAKE_RESPONSE_RATE: f32 = 4.0;
 const STOP_SPEED_THRESHOLD: f32 = 0.01;
+/// Static-obstacle and relative-traffic impacts must exceed this speed to
+/// damage the player. Collision pushout remains unconditional on contact.
+const MIN_OBSTACLE_DAMAGE_SPEED: f32 = 5.0;
 
 // Arcade handbrake drift tuning. Drift is a bounded slip angle between the
 // car's facing (`heading`) and its travel direction (`heading + drift`). It
@@ -835,8 +838,116 @@ fn traffic_velocity(axis: bool, dir: f32, speed: f32) -> Vec2 {
 /// Impact magnitude against either an immobile obstacle or moving traffic.
 /// Static obstacles retain the player's absolute speed; traffic uses relative
 /// velocity, covering a parked player being rammed as well as closing speeds.
+#[cfg(test)]
 fn obstacle_impact_speed(player: Vec2, traffic: Option<Vec2>) -> f32 {
     (player - traffic.unwrap_or(Vec2::ZERO)).length()
+}
+
+/// Damage uses a strict boundary: a 5 u/s tap is harmless, while any impact
+/// above it qualifies. Kept separate from overlap resolution so changing the
+/// damage threshold can never disable collision pushout.
+fn is_damaging_obstacle_impact(impact_speed: f32) -> bool {
+    impact_speed > MIN_OBSTACLE_DAMAGE_SPEED
+}
+
+/// A solid contact evaluated from the player's pre-resolution position and
+/// velocity. Keeping the immutable snapshot in every contact prevents an
+/// earlier query item from changing the impact reported for a later one.
+#[derive(Clone, Copy, Debug)]
+struct SolidContact {
+    normal: Vec2,
+    penetration: f32,
+    relative_velocity: Vec2,
+    impact_speed: f32,
+    /// Entity index: deterministic resolution order and equal-impact tie-break.
+    tie_breaker: u32,
+}
+
+impl SolidContact {
+    fn is_closing(self) -> bool {
+        self.relative_velocity.dot(self.normal) < 0.0
+    }
+}
+
+#[derive(Debug)]
+struct CollisionOutcome {
+    pushout: Vec2,
+    stop_player: bool,
+    strongest_hit: Option<SolidContact>,
+}
+
+/// Resolve a complete frame's contacts in stable entity order. Pushout is
+/// accumulated for every overlap, while every closing overlap stops inward
+/// player motion regardless of whether it clears the damage threshold. Only
+/// the strongest damaging closing contact is retained; equal impacts use the
+/// lower entity index so query iteration order can never affect the result.
+fn collision_outcome(mut contacts: Vec<SolidContact>) -> CollisionOutcome {
+    contacts.sort_by_key(|contact| contact.tie_breaker);
+
+    let mut pushout = Vec2::ZERO;
+    let mut stop_player = false;
+    let mut strongest_hit: Option<SolidContact> = None;
+    for contact in contacts {
+        pushout += contact.normal * contact.penetration;
+        if !contact.is_closing() {
+            continue;
+        }
+        stop_player = true;
+        if !contact.impact_speed.is_finite() || !is_damaging_obstacle_impact(contact.impact_speed) {
+            continue;
+        }
+        let replace = match strongest_hit {
+            None => true,
+            Some(current) => {
+                contact
+                    .impact_speed
+                    .total_cmp(&current.impact_speed)
+                    .is_gt()
+                    || (contact
+                        .impact_speed
+                        .total_cmp(&current.impact_speed)
+                        .is_eq()
+                        && contact.tie_breaker < current.tie_breaker)
+            }
+        };
+        if replace {
+            strongest_hit = Some(contact);
+        }
+    }
+
+    CollisionOutcome {
+        pushout,
+        stop_player,
+        strongest_hit,
+    }
+}
+
+/// Circle-vs-AABB contact from immutable world-space positions.
+fn solid_contact_geometry(player: Vec2, obstacle: Vec2, half_extents: Vec2) -> Option<(Vec2, f32)> {
+    let delta = player - obstacle;
+    let closest = delta.clamp(-half_extents, half_extents);
+    let outside = delta - closest;
+    let dist2 = outside.length_squared();
+    if dist2 >= CAR_RADIUS * CAR_RADIUS {
+        return None;
+    }
+
+    if dist2 > 1e-6 {
+        let dist = dist2.sqrt();
+        return Some((outside / dist, CAR_RADIUS - dist));
+    }
+
+    // Center inside the box: eject along the least-penetrated axis. Exact
+    // corner ties consistently choose Z.
+    let pen_x = half_extents.x - delta.x.abs();
+    let pen_z = half_extents.y - delta.y.abs();
+    if pen_x < pen_z {
+        let sign = if delta.x >= 0.0 { 1.0 } else { -1.0 };
+        Some((Vec2::new(sign, 0.0), pen_x + CAR_RADIUS))
+    } else {
+        let sign = if delta.y >= 0.0 { 1.0 } else { -1.0 };
+        Some((Vec2::new(0.0, sign), pen_z + CAR_RADIUS))
+    }
 }
 
 /// Ground-level physics + obstacle collisions, run right after `move_car`:
@@ -849,7 +960,7 @@ pub fn physics_collisions(
     mut car: Query<(&mut Car, &mut Transform), (With<Car>, Without<Traffic>)>,
     curbs: Query<(&Curb, &GlobalTransform), (With<Curb>, Without<Car>, Without<Collider>)>,
     obstacles: Query<
-        (&Collider, &GlobalTransform, Option<&Traffic>),
+        (Entity, &Collider, &GlobalTransform, Option<&Traffic>),
         (With<Collider>, Without<Car>, Without<Curb>, Without<Cone>),
     >,
     time: Res<Time>,
@@ -874,12 +985,15 @@ pub fn physics_collisions(
     }
     tf.translation.y += (target_y - tf.translation.y) * (1.0 - (-10.0 * dt).exp());
 
-    // --- Obstacle collision: circle-vs-AABB pushout + kill speed into it. ---
-    // Minimum relative speed for a hit to deal damage — low-speed wall taps
-    // and gentle traffic contacts should not hurt.
-    const MIN_IMPACT_SPEED: f32 = 3.0;
-    for (collider, ot, traffic) in &obstacles {
-        let opos = ot.translation();
+    // --- Obstacle collision: snapshot, evaluate all contacts, then resolve. ---
+    // Neither pushout nor a previous stop may alter another contact's impact.
+    // This is especially important for moving traffic, whose relative impact
+    // must use the player's velocity at the start of collision resolution.
+    let player_pos = Vec2::new(tf.translation.x, tf.translation.z);
+    let player_speed = car.speed;
+    let player_vel = player_velocity(car.heading + car.drift, player_speed);
+    let mut contacts = Vec::new();
+    for (entity, collider, ot, traffic) in &obstacles {
         // Skip colliders whose GlobalTransform hasn't propagated yet (still
         // IDENTITY at the world origin). No real obstacle sits at the origin
         // (all are at |x| >= 6), so this filters the 1-frame stale transform
@@ -887,46 +1001,46 @@ pub fn physics_collisions(
         if *ot == GlobalTransform::IDENTITY {
             continue;
         }
-        let dx = tf.translation.x - opos.x;
-        let dz = tf.translation.z - opos.z;
-        let closest_x = dx.clamp(-collider.half_x, collider.half_x);
-        let closest_z = dz.clamp(-collider.half_z, collider.half_z);
-        let px = dx - closest_x;
-        let pz = dz - closest_z;
-        let dist2 = px * px + pz * pz;
-        if dist2 < CAR_RADIUS * CAR_RADIUS {
-            let (nx, nz, pen) = if dist2 > 1e-6 {
-                let dist = dist2.sqrt();
-                (px / dist, pz / dist, CAR_RADIUS - dist)
-            } else {
-                // Center inside the box: eject along the least-penetrated axis.
-                let pen_x = collider.half_x - dx.abs();
-                let pen_z = collider.half_z - dz.abs();
-                if pen_x < pen_z {
-                    let s = if dx >= 0.0 { 1.0 } else { -1.0 };
-                    (s, 0.0, pen_x + CAR_RADIUS)
-                } else {
-                    let s = if dz >= 0.0 { 1.0 } else { -1.0 };
-                    (0.0, s, pen_z + CAR_RADIUS)
-                }
-            };
-            tf.translation.x += nx * pen;
-            tf.translation.z += nz * pen;
+        let opos = ot.translation();
+        let obstacle_pos = Vec2::new(opos.x, opos.z);
+        let Some((normal, penetration)) = solid_contact_geometry(
+            player_pos,
+            obstacle_pos,
+            Vec2::new(collider.half_x, collider.half_z),
+        ) else {
+            continue;
+        };
+        let traffic_vel =
+            traffic.map(|traffic| traffic_velocity(traffic.axis, traffic.dir, traffic.speed));
+        contacts.push(SolidContact {
+            normal,
+            penetration,
+            relative_velocity: player_vel - traffic_vel.unwrap_or(Vec2::ZERO),
+            impact_speed: traffic_vel.map_or(player_speed.abs(), |velocity| {
+                (player_vel - velocity).length()
+            }),
+            tie_breaker: entity.index().index(),
+        });
+    }
 
-            let player_vel = player_velocity(car.heading + car.drift, car.speed);
-            let traffic_vel =
-                traffic.map(|traffic| traffic_velocity(traffic.axis, traffic.dir, traffic.speed));
-            let relative_velocity = player_vel - traffic_vel.unwrap_or(Vec2::ZERO);
-            let impact_speed = obstacle_impact_speed(player_vel, traffic_vel);
-            let collision_normal = Vec2::new(nx, nz);
-            if impact_speed > MIN_IMPACT_SPEED && relative_velocity.dot(collision_normal) < 0.0 {
-                // The player and obstacle are closing fast enough to hurt.
-                // Report relative impact for traffic, then kill player speed
-                // exactly as for a static obstacle.
-                obstacle_hits.write(ObstacleHit { impact_speed });
-                car.speed = 0.0;
-            }
-        }
+    let outcome = collision_outcome(contacts);
+    let pushout = if outcome.pushout.is_finite() {
+        outcome.pushout
+    } else {
+        Vec2::ZERO
+    };
+    tf.translation.x += pushout.x;
+    tf.translation.z += pushout.y;
+    if outcome.stop_player {
+        // `Car` stores scalar longitudinal motion, so stopping it is the only
+        // representation-safe way to remove every inward normal component.
+        // This applies to harmless <=5 u/s wall contacts as well as damage.
+        car.speed = 0.0;
+    }
+    if let Some(hit) = outcome.strongest_hit {
+        obstacle_hits.write(ObstacleHit {
+            impact_speed: hit.impact_speed,
+        });
     }
 }
 
@@ -1276,6 +1390,63 @@ mod tests {
     fn static_obstacle_impact_is_absolute_player_speed() {
         let player = player_velocity(0.0, -7.0);
         assert!((obstacle_impact_speed(player, None) - 7.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn obstacle_damage_threshold_is_strictly_above_five() {
+        assert!(!is_damaging_obstacle_impact(5.0));
+        let just_above_five = f32::from_bits(5.0_f32.to_bits() + 1);
+        assert!(is_damaging_obstacle_impact(just_above_five));
+    }
+
+    #[test]
+    fn subthreshold_closing_wall_contact_still_stops_player() {
+        let outcome = collision_outcome(vec![SolidContact {
+            normal: Vec2::Y,
+            penetration: 0.2,
+            relative_velocity: Vec2::new(0.0, -4.0),
+            impact_speed: 4.0,
+            tie_breaker: 7,
+        }]);
+
+        assert!(outcome.stop_player);
+        assert!(outcome.strongest_hit.is_none());
+        assert_eq!(outcome.pushout, Vec2::new(0.0, 0.2));
+    }
+
+    #[test]
+    fn strongest_multi_hit_is_independent_of_contact_order() {
+        let weak = SolidContact {
+            normal: Vec2::X,
+            penetration: 0.1,
+            relative_velocity: Vec2::new(-7.0, 0.0),
+            impact_speed: 7.0,
+            tie_breaker: 20,
+        };
+        let strongest_high_tie = SolidContact {
+            normal: Vec2::Y,
+            penetration: 0.2,
+            relative_velocity: Vec2::new(0.0, -11.0),
+            impact_speed: 11.0,
+            tie_breaker: 30,
+        };
+        let strongest_low_tie = SolidContact {
+            tie_breaker: 10,
+            ..strongest_high_tie
+        };
+
+        for contacts in [
+            vec![weak, strongest_high_tie, strongest_low_tie],
+            vec![strongest_low_tie, weak, strongest_high_tie],
+            vec![strongest_high_tie, strongest_low_tie, weak],
+        ] {
+            let outcome = collision_outcome(contacts);
+            let hit = outcome.strongest_hit.expect("a damaging contact");
+            assert_eq!(hit.impact_speed, 11.0);
+            assert_eq!(hit.tie_breaker, 10);
+            assert!(outcome.stop_player);
+            assert_eq!(outcome.pushout, Vec2::new(0.1, 0.4));
+        }
     }
 
     #[test]

@@ -6,11 +6,12 @@ license = "MIT"
 
 [dependencies]
 bevy = { version = "0.19", features = ["webgl2", "wav"] }
-# Used directly by `persist.rs` for localStorage on web. Version MUST match the
-# one Bevy 0.19 pulls transitively (see Cargo.lock) to avoid duplicate crates.
+# Used directly for web persistence/browser APIs in `persist.rs`,
+# `settings.rs`, and the leaderboard client. Version MUST match the one Bevy
+# 0.19 pulls transitively (see Cargo.lock) to avoid duplicate crates.
 # Currently Bevy 0.19 -> web-sys 0.3.103.
 web-sys = { version = "0.3.103", features = [
-    "Window", "Storage",
+    "Window", "Storage", "MediaQueryList",
     # Leaderboard fetch (architecture §12): raw web-sys bindings instead of
     # reqwest to preserve WASM size.
     "Headers", "Request", "RequestInit", "Response",

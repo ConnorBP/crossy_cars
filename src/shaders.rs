@@ -18,6 +18,7 @@ use bevy::shader::ShaderRef;
 
 use crate::game::state::GameState;
 use crate::modifiers::{ActiveModifier, ModifierKind};
+use crate::settings::Settings;
 
 pub struct ShaderPlugin;
 
@@ -223,11 +224,20 @@ fn spawn_water(
 
 /// Advance the ripple phase every frame. `Assets::iter_mut` yields
 /// `(AssetId, &mut Asset)` pairs, so we discard the id and bump `time`.
-fn update_water(time: Res<Time>, mut water_materials: ResMut<Assets<WaterMaterial>>) {
-    let t = time.elapsed_secs();
+fn update_water(
+    time: Res<Time>,
+    settings: Res<Settings>,
+    mut water_materials: ResMut<Assets<WaterMaterial>>,
+) {
+    let t = water_ripple_time(time.elapsed_secs(), settings.reduced_motion);
     for (_, mat) in water_materials.iter_mut() {
         mat.time = Vec4::splat(t);
     }
+}
+
+/// Reduced motion freezes the shader phase at its neutral startup value.
+const fn water_ripple_time(elapsed: f32, reduced_motion: bool) -> f32 {
+    if reduced_motion { 0.0 } else { elapsed }
 }
 
 // ---------------------------------------------------------------------------
@@ -266,6 +276,12 @@ mod tests {
         ModifierKind::Stampede,
         ModifierKind::GlassCannon,
     ];
+
+    #[test]
+    fn reduced_motion_freezes_water_ripple_time() {
+        assert_eq!(water_ripple_time(42.0, true), 0.0);
+        assert_eq!(water_ripple_time(42.0, false), 42.0);
+    }
 
     #[test]
     fn modifier_atmospheres_are_distinct() {

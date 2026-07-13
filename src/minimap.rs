@@ -10,8 +10,9 @@
 //!   and assigned to the next pool dot (north = car forward). Unused dots are
 //!   hidden. The first dot is always the car (tall, red, and centered).
 //! - The panel is spawned on `OnEnter(Playing)` and despawned on
-//!   `OnExit(Playing)`, mirroring `health.rs`'s HUD lifecycle. Owns its UI;
-//!   does not touch `ui.rs`.
+//!   `OnExit(Playing)`, mirroring `health.rs`'s HUD lifecycle. It is inset
+//!   from the right to clear the separately owned difficulty-level label.
+//!   Owns its UI; does not touch `ui.rs`.
 
 use bevy::prelude::*;
 
@@ -41,10 +42,59 @@ const MAP_CENTER: f32 = MAP_SIZE / 2.0;
 /// Fixed pool size — bounds the entity count plotted per frame (web-friendly:
 /// no per-frame spawns). One slot is reserved for the car dot.
 const POOL_SIZE: usize = 64;
-/// Panel top offset: sits below the top-right timer (`top: 12`, ~24px text).
-const PANEL_TOP: f32 = 54.0;
-/// Panel right offset (matches the timer's `right: 16`).
-const PANEL_RIGHT: f32 = 16.0;
+/// Panel top offset: clears the timer's 24px text plus its new vertical panel
+/// padding (`top: 12`), leaving a visible gap below the contrast panel.
+const PANEL_TOP: f32 = 62.0;
+/// The separate difficulty label is fixed at `right: 16, top: 182` in its
+/// owning module. The actual minimap is 132px plus a 2px border on each side,
+/// so its bottom is y=198 rather than the old 174px assumption. Shift the map
+/// left to clear that label horizontally without moving either HUD into the
+/// timer/objective strips.
+const PANEL_RIGHT: f32 = 72.0;
+const PANEL_OUTER_SIZE: f32 = MAP_SIZE + PANEL_BORDER * 2.0;
+#[cfg(test)]
+const DIFFICULTY_RIGHT: f32 = 16.0;
+#[cfg(test)]
+const DIFFICULTY_TOP: f32 = 182.0;
+#[cfg(test)]
+const DIFFICULTY_WIDTH: f32 = 48.0;
+#[cfg(test)]
+const DIFFICULTY_HEIGHT: f32 = 26.0;
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct UiBounds {
+    left: f32,
+    top: f32,
+    right: f32,
+    bottom: f32,
+}
+
+#[cfg(test)]
+fn bounds_overlap(a: UiBounds, b: UiBounds) -> bool {
+    a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top
+}
+
+/// Pure HUD bounds used to keep this module's map clear of the externally
+/// owned level label while accounting for all 132 plotting pixels and border.
+#[cfg(test)]
+fn minimap_and_level_bounds(viewport_width: f32) -> (UiBounds, UiBounds) {
+    let map_right = viewport_width - PANEL_RIGHT;
+    let map = UiBounds {
+        left: map_right - PANEL_OUTER_SIZE,
+        top: PANEL_TOP,
+        right: map_right,
+        bottom: PANEL_TOP + PANEL_OUTER_SIZE,
+    };
+    let level_right = viewport_width - DIFFICULTY_RIGHT;
+    let level = UiBounds {
+        left: level_right - DIFFICULTY_WIDTH,
+        top: DIFFICULTY_TOP,
+        right: level_right,
+        bottom: DIFFICULTY_TOP + DIFFICULTY_HEIGHT,
+    };
+    (map, level)
+}
 
 // ---------------------------------------------------------------------------
 // Components
@@ -123,10 +173,10 @@ fn spawn_minimap(mut commands: Commands) {
                 position_type: PositionType::Absolute,
                 top: px(PANEL_TOP),
                 right: px(PANEL_RIGHT),
-                // The content box is exactly MAP_SIZE, keeping all plotting
-                // coordinates independent of the outer border's box model.
-                width: px(MAP_SIZE + PANEL_BORDER * 2.0),
-                height: px(MAP_SIZE + PANEL_BORDER * 2.0),
+                // The border-box is MAP_SIZE plus both 2px borders; plotting
+                // coordinates remain based on the 132px child surface.
+                width: px(PANEL_OUTER_SIZE),
+                height: px(PANEL_OUTER_SIZE),
                 border: UiRect::all(px(PANEL_BORDER)),
                 ..default()
             },
@@ -436,6 +486,19 @@ fn apply_dot_style(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn actual_132px_map_panel_clears_level_label_on_mobile_and_desktop() {
+        assert_eq!(PANEL_OUTER_SIZE, 136.0);
+        for viewport_width in [844.0, 1440.0] {
+            let (map, level) = minimap_and_level_bounds(viewport_width);
+            // Their vertical ranges overlap (the original bug), so clearance
+            // must be genuine horizontal separation rather than bad map math.
+            assert!(map.bottom > level.top);
+            assert!(!bounds_overlap(map, level));
+            assert!(map.right <= level.left - 8.0);
+        }
+    }
 
     #[test]
     fn dot_styles_have_distinct_non_color_signatures() {

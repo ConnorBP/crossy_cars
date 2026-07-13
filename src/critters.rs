@@ -4,7 +4,7 @@
 //! Distinct from chickens (which **award** score): hitting a critter is a
 //! **PENALTY** — at most once per short contact window the car loses 25 base
 //! health (scaled by the active modifier) and 2 chicken-score; every hit still
-//! fires particles, SFX, and `CritterHit`.
+//! fires SFX and `CritterHit`, while reduced motion may suppress particles.
 //!
 //! The module mirrors `chickens.rs` (wander + recycle-ahead + bob + particle
 //! burst + cleanup) but:
@@ -33,6 +33,7 @@ use crate::game::state::GameState;
 use crate::health::Health;
 use crate::modifiers::ActiveModifier;
 use crate::run_events::{EventKind, RoundEventStarted};
+use crate::settings::Settings;
 
 // ---------------------------------------------------------------------------
 // Tuning constants
@@ -762,6 +763,7 @@ fn wander_critters(
     >,
     mut bodies: Query<(&mut Transform, &CritterBody), (Without<Critter>, Without<Car>)>,
     time: Res<Time>,
+    settings: Res<Settings>,
     mut seed: Local<u32>,
 ) {
     ensure_seeded(&mut seed, 0x1357_9BDF);
@@ -811,13 +813,16 @@ fn wander_critters(
             continue;
         }
 
-        // --- Waddle: advance phase + animate the body group child ---
-        critter.bob += dt * WADDLE_SPEED;
-        let waddle = critter.bob.sin();
+        // --- Waddle: accessibility can freeze the visual body motion only. ---
+        if !settings.reduced_motion {
+            critter.bob += dt * WADDLE_SPEED;
+        }
         for child_e in children.iter() {
             if let Ok((mut body_tf, body)) = bodies.get_mut(child_e) {
-                body_tf.translation.y = body.base_y + waddle * 0.05;
-                body_tf.rotation = Quat::from_rotation_z(waddle * 0.08);
+                let (y, rotation) =
+                    creature_visual_pose(body.base_y, critter.bob, settings.reduced_motion);
+                body_tf.translation.y = y;
+                body_tf.rotation = rotation;
             }
         }
     }
@@ -833,8 +838,8 @@ fn wander_critters(
 /// write a `CritterHit` message, spawn a **red** particle burst, and respawn
 /// ahead. The penalty-hit thud SFX is owned and played by the audio core in
 /// reaction to the `CritterHit` message. Visual/message handling is retained
-/// for every clustered contact; lethal admitted damage ends the round as
-/// Wrecked.
+/// for every clustered contact; reduced motion suppresses only the visual
+/// particles. Lethal admitted damage ends the round as Wrecked.
 fn hit_critters(
     mut commands: Commands,
     assets: Res<CritterAssets>,
@@ -848,6 +853,7 @@ fn hit_critters(
     mut next: ResMut<NextState<GameState>>,
     mut reason: ResMut<GameOverReason>,
     time: Res<Time>,
+    settings: Res<Settings>,
     mut penalty_cooldown: ResMut<CritterPenaltyCooldown>,
     mut seed: Local<u32>,
 ) {
@@ -887,8 +893,15 @@ fn hit_critters(
             // --- Write the message (audio.rs / UI can react) ---
             critter_hits.write(CritterHit);
 
-            // --- Red particle burst ---
-            spawn_particle_burst(&mut commands, &assets, critter_t.translation, &mut seed);
+            // Consume the same random sequence either way so this visual
+            // preference cannot alter replacement gameplay placement.
+            spawn_particle_burst(
+                &mut commands,
+                &assets,
+                critter_t.translation,
+                &mut seed,
+                hit_particles_enabled(settings.reduced_motion),
+            );
 
             // --- Respawn a critter ahead so there's always something to avoid ---
             let new_pos = respawn_ahead_pos(car_pos, car_forward, &mut seed);
@@ -909,14 +922,15 @@ fn hit_critters(
     }
 }
 
-/// Spawn the penalty burst: ~8 red gib spheres (gravity + spin) + a few red
-/// smoke puffs (expand + drag). All despawn within ~0.5s via
-/// `update_particles`.
+/// Consume one penalty-burst random sequence and, when enabled, spawn ~8 red
+/// gib spheres plus a few red smoke puffs. This preserves gameplay RNG when
+/// reduced motion suppresses the visual entities.
 fn spawn_particle_burst(
     commands: &mut Commands,
     assets: &CritterAssets,
     pos: Vec3,
     seed: &mut u32,
+    enabled: bool,
 ) {
     let body_pos = pos + Vec3::new(0.0, 0.30, 0.0);
     let ground_pos = pos + Vec3::new(0.0, 0.10, 0.0);
@@ -929,16 +943,19 @@ fn spawn_particle_burst(
             2.0 + rand(seed) * 2.5, // upward pop
             angle.sin() * horiz_speed,
         );
-        commands.spawn((
-            Mesh3d(assets.gib_mesh.clone()),
-            MeshMaterial3d(assets.gib_mat.clone()),
-            Transform::from_translation(body_pos),
-            Gib {
-                vel,
-                life: GIB_LIFE,
-                spin: (rand(seed) * 2.0 - 1.0) * 10.0,
-            },
-        ));
+        let spin = (rand(seed) * 2.0 - 1.0) * 10.0;
+        if enabled {
+            commands.spawn((
+                Mesh3d(assets.gib_mesh.clone()),
+                MeshMaterial3d(assets.gib_mat.clone()),
+                Transform::from_translation(body_pos),
+                Gib {
+                    vel,
+                    life: GIB_LIFE,
+                    spin,
+                },
+            ));
+        }
     }
 
     for _ in 0..PUFF_COUNT {
@@ -949,16 +966,18 @@ fn spawn_particle_burst(
             0.5 + rand(seed) * 0.5,
             angle.sin() * horiz_speed,
         );
-        commands.spawn((
-            Mesh3d(assets.puff_mesh.clone()),
-            MeshMaterial3d(assets.puff_mat.clone()),
-            Transform::from_translation(ground_pos),
-            BloodPuff {
-                vel,
-                life: PUFF_LIFE,
-                max_life: PUFF_LIFE,
-            },
-        ));
+        if enabled {
+            commands.spawn((
+                Mesh3d(assets.puff_mesh.clone()),
+                MeshMaterial3d(assets.puff_mat.clone()),
+                Transform::from_translation(ground_pos),
+                BloodPuff {
+                    vel,
+                    life: PUFF_LIFE,
+                    max_life: PUFF_LIFE,
+                },
+            ));
+        }
     }
 }
 
@@ -971,11 +990,22 @@ fn spawn_particle_burst(
 fn update_particles(
     mut commands: Commands,
     time: Res<Time>,
+    settings: Res<Settings>,
     mut gibs: Query<(Entity, &mut Transform, &mut Gib)>,
     mut puffs: Query<(Entity, &mut Transform, &mut BloodPuff), Without<Gib>>,
 ) {
     let dt = time.delta_secs();
     let t = time.elapsed_secs();
+
+    if !hit_particles_enabled(settings.reduced_motion) {
+        for (e, _, _) in &mut gibs {
+            commands.entity(e).despawn();
+        }
+        for (e, _, _) in &mut puffs {
+            commands.entity(e).despawn();
+        }
+        return;
+    }
 
     for (e, mut tf, mut gib) in &mut gibs {
         gib.life -= dt;
@@ -1043,6 +1073,20 @@ fn cleanup_particles(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+const fn hit_particles_enabled(reduced_motion: bool) -> bool {
+    !reduced_motion
+}
+
+/// Body-only visual pose; gameplay movement and facing remain unchanged.
+fn creature_visual_pose(base_y: f32, bob: f32, reduced_motion: bool) -> (f32, Quat) {
+    if reduced_motion {
+        (base_y, Quat::IDENTITY)
+    } else {
+        let waddle = bob.sin();
+        (base_y + waddle * 0.05, Quat::from_rotation_z(waddle * 0.08))
+    }
+}
 
 /// Number of additional critters produced by a single event-start message.
 /// Keeping this independent from `ActiveEvent` prevents mid-run events from
@@ -1227,6 +1271,15 @@ fn critter_shadow_size(kind: CritterKind) -> (f32, f32) {
 mod tests {
     use super::*;
     use crate::modifiers::ModifierKind;
+
+    #[test]
+    fn reduced_motion_keeps_critter_body_static_and_suppresses_particles() {
+        let (y, rotation) = creature_visual_pose(0.75, 2.1, true);
+        assert_eq!(y, 0.75);
+        assert_eq!(rotation, Quat::IDENTITY);
+        assert!(!hit_particles_enabled(true));
+        assert!(hit_particles_enabled(false));
+    }
 
     #[test]
     fn only_critter_burst_spawns_one_mixed_base_count() {

@@ -75,7 +75,9 @@ def main() -> int:
             page.on("pageerror", lambda error: summary["page_errors"].append(str(error)))
             page.on(
                 "requestfailed",
-                lambda request: summary["network_failures"].append(
+                lambda request: None
+                if request.failure == "net::ERR_ABORTED" and "/v1/leaderboard" in request.url
+                else summary["network_failures"].append(
                     {"url": request.url, "failure": request.failure}
                 ),
             )

@@ -32,6 +32,7 @@ use crate::game::resources::{GameConfig, Score};
 use crate::game::state::GameState;
 use crate::modifiers::ActiveModifier;
 use crate::run_events::{ActiveEvent, EventKind, RoundEventStarted};
+use crate::settings::Settings;
 use crate::world::is_road_line;
 
 // ---------------------------------------------------------------------------
@@ -540,6 +541,7 @@ fn wander_chickens(
     )>,
     mut bodies: Query<(&mut Transform, &ChickenBody), (Without<Chicken>, Without<Car>)>,
     time: Res<Time>,
+    settings: Res<Settings>,
     mut seed: Local<u32>,
 ) {
     ensure_seeded(&mut seed, 0x9ABC_DEF0);
@@ -586,13 +588,16 @@ fn wander_chickens(
             continue;
         }
 
-        // --- Waddle: advance phase + animate the body group child ---
-        chicken.bob += dt * WADDLE_SPEED;
-        let waddle = chicken.bob.sin();
+        // --- Waddle: accessibility can freeze the visual body motion only. ---
+        if !settings.reduced_motion {
+            chicken.bob += dt * WADDLE_SPEED;
+        }
         for child_e in children.iter() {
             if let Ok((mut body_tf, body)) = bodies.get_mut(child_e) {
-                body_tf.translation.y = body.base_y + waddle * 0.05;
-                body_tf.rotation = Quat::from_rotation_z(waddle * 0.08);
+                let (y, rotation) =
+                    creature_visual_pose(body.base_y, chicken.bob, settings.reduced_motion);
+                body_tf.translation.y = y;
+                body_tf.rotation = rotation;
             }
         }
     }
@@ -617,6 +622,7 @@ fn hit_chickens(
     chickens: Query<(Entity, &Transform, Option<&ChickenBurstExtra>), With<Chicken>>,
     mut score: ResMut<Score>,
     mut chicken_hits: MessageWriter<ChickenHit>,
+    settings: Res<Settings>,
     mut seed: Local<u32>,
 ) {
     ensure_seeded(&mut seed, 0x5678_9ABC);
@@ -638,7 +644,15 @@ fn hit_chickens(
                 .chickens
                 .saturating_add(chicken_score_per_hit(&modifier, &event));
             chicken_hits.write(ChickenHit);
-            spawn_particle_burst(&mut commands, &assets, chicken_t.translation, &mut seed);
+            // Consume the same random sequence either way so this visual
+            // preference cannot alter replacement gameplay placement.
+            spawn_particle_burst(
+                &mut commands,
+                &assets,
+                chicken_t.translation,
+                &mut seed,
+                hit_particles_enabled(settings.reduced_motion),
+            );
             // Preserve both the modifier-adjusted baseline and the temporary
             // burst population through hits. Wander recycling alone retires
             // burst extras as they naturally leave the active area.
@@ -659,13 +673,15 @@ fn hit_chickens(
     }
 }
 
-/// Spawn the enhanced hit burst: ~8 feather spheres (gravity + spin) + a few
-/// puff quads (expand + drag). All despawn within ~0.5s via `update_particles`.
+/// Consume one hit-burst random sequence and, when enabled, spawn ~8 feather
+/// spheres plus a few puff quads. This preserves gameplay RNG when reduced
+/// motion suppresses the visual entities.
 fn spawn_particle_burst(
     commands: &mut Commands,
     assets: &ChickenAssets,
     pos: Vec3,
     seed: &mut u32,
+    enabled: bool,
 ) {
     let body_pos = pos + Vec3::new(0.0, 0.30, 0.0);
     let ground_pos = pos + Vec3::new(0.0, 0.10, 0.0);
@@ -678,16 +694,19 @@ fn spawn_particle_burst(
             2.0 + rand(seed) * 2.5, // upward pop
             angle.sin() * horiz_speed,
         );
-        commands.spawn((
-            Mesh3d(assets.feather_mesh.clone()),
-            MeshMaterial3d(assets.feather_mat.clone()),
-            Transform::from_translation(body_pos),
-            Feather {
-                vel,
-                life: FEATHER_LIFE,
-                spin: (rand(seed) * 2.0 - 1.0) * 10.0,
-            },
-        ));
+        let spin = (rand(seed) * 2.0 - 1.0) * 10.0;
+        if enabled {
+            commands.spawn((
+                Mesh3d(assets.feather_mesh.clone()),
+                MeshMaterial3d(assets.feather_mat.clone()),
+                Transform::from_translation(body_pos),
+                Feather {
+                    vel,
+                    life: FEATHER_LIFE,
+                    spin,
+                },
+            ));
+        }
     }
 
     for _ in 0..PUFF_COUNT {
@@ -698,16 +717,18 @@ fn spawn_particle_burst(
             0.5 + rand(seed) * 0.5,
             angle.sin() * horiz_speed,
         );
-        commands.spawn((
-            Mesh3d(assets.puff_mesh.clone()),
-            MeshMaterial3d(assets.puff_mat.clone()),
-            Transform::from_translation(ground_pos),
-            Puff {
-                vel,
-                life: PUFF_LIFE,
-                max_life: PUFF_LIFE,
-            },
-        ));
+        if enabled {
+            commands.spawn((
+                Mesh3d(assets.puff_mesh.clone()),
+                MeshMaterial3d(assets.puff_mat.clone()),
+                Transform::from_translation(ground_pos),
+                Puff {
+                    vel,
+                    life: PUFF_LIFE,
+                    max_life: PUFF_LIFE,
+                },
+            ));
+        }
     }
 }
 
@@ -720,11 +741,22 @@ fn spawn_particle_burst(
 fn update_particles(
     mut commands: Commands,
     time: Res<Time>,
+    settings: Res<Settings>,
     mut feathers: Query<(Entity, &mut Transform, &mut Feather)>,
     mut puffs: Query<(Entity, &mut Transform, &mut Puff), Without<Feather>>,
 ) {
     let dt = time.delta_secs();
     let t = time.elapsed_secs();
+
+    if !hit_particles_enabled(settings.reduced_motion) {
+        for (e, _, _) in &mut feathers {
+            commands.entity(e).despawn();
+        }
+        for (e, _, _) in &mut puffs {
+            commands.entity(e).despawn();
+        }
+        return;
+    }
 
     for (e, mut tf, mut feather) in &mut feathers {
         feather.life -= dt;
@@ -792,6 +824,20 @@ fn cleanup_particles(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+const fn hit_particles_enabled(reduced_motion: bool) -> bool {
+    !reduced_motion
+}
+
+/// Body-only visual pose; root movement and all gameplay continue unchanged.
+fn creature_visual_pose(base_y: f32, bob: f32, reduced_motion: bool) -> (f32, Quat) {
+    if reduced_motion {
+        (base_y, Quat::IDENTITY)
+    } else {
+        let waddle = bob.sin();
+        (base_y + waddle * 0.05, Quat::from_rotation_z(waddle * 0.08))
+    }
+}
 
 /// Fresh-round chicken population after applying the active road condition.
 const fn effective_chicken_target(modifier: &ActiveModifier) -> usize {
@@ -1020,6 +1066,15 @@ fn ensure_seeded(seed: &mut u32, initial: u32) {
 mod tests {
     use super::*;
     use crate::modifiers::ModifierKind;
+
+    #[test]
+    fn reduced_motion_keeps_chicken_body_static_and_suppresses_particles() {
+        let (y, rotation) = creature_visual_pose(0.35, 1.2, true);
+        assert_eq!(y, 0.35);
+        assert_eq!(rotation, Quat::IDENTITY);
+        assert!(!hit_particles_enabled(true));
+        assert!(hit_particles_enabled(false));
+    }
 
     #[test]
     fn chicken_frenzy_changes_only_the_population_target() {

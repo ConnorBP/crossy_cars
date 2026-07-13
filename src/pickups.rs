@@ -33,7 +33,8 @@
 //!   their effect + despawn immediately, with a brief colored screen flash
 //!   for feedback. Timed pickups (SpeedBoost/CoinMagnet) get UI bars.
 //! - Owns its UI (active-power-up icons + remaining-time bars, bottom-center
-//!   above the health bar); does not touch `ui.rs`.
+//!   on desktop or above the touch band at upper-right); does not touch
+//!   `ui.rs`.
 
 use bevy::audio::{AudioPlayer, AudioSource, PlaybackSettings, Volume};
 use bevy::color::LinearRgba;
@@ -42,11 +43,18 @@ use bevy::text::FontSize;
 
 use crate::audio::AudioBaseGain;
 use crate::car::Car;
-use crate::game::SpawnSet;
 use crate::game::events::CoinCollected;
 use crate::game::resources::{GameConfig, Score, TimeLeft};
 use crate::game::state::GameState;
+use crate::game::{SpawnSet, TouchStateSet};
 use crate::health::Health;
+use crate::settings::Settings;
+#[cfg(test)]
+use crate::touch::ScreenBounds;
+use crate::touch::{
+    TOUCH_POWERUP_HEIGHT, TOUCH_POWERUP_LEFT, TOUCH_POWERUP_TOP, TOUCH_POWERUP_WIDTH,
+    TouchControlsActive,
+};
 use crate::world::Coin;
 
 // ===========================================================================
@@ -110,11 +118,16 @@ const ORB_HOVER_Y: f32 = 1.0;
 
 /// UI: width of a power-up timer bar track (px).
 const UI_BAR_W: f32 = 110.0;
+const TOUCH_UI_BAR_W: f32 = 64.0;
 /// UI: height of a power-up timer bar fill (px).
 const UI_BAR_H: f32 = 8.0;
 /// UI: bottom offset — sits above the health bar (which is at `bottom: 12` +
 /// its panel padding ~ 8 + label + bar + text ≈ 70px tall, so 84 clears it).
 const UI_BOTTOM: f32 = 84.0;
+/// Explicit maximum footprint for both visible timed-effect rows. Touch uses
+/// this compact fixed root at upper-right, clear of all lower drive controls.
+#[cfg(test)]
+const POWERUP_PANEL_SIZE: Vec2 = Vec2::new(196.0, 52.0);
 
 /// Instant-pickup flash: full-screen tint lifetime (seconds).
 const PICKUP_FLASH_DURATION: f32 = 0.3;
@@ -281,8 +294,8 @@ pub struct PowerUp {
     kind: PowerKind,
 }
 
-/// UI root for the active-power-up panel (bottom-center, above the health
-/// bar). Despawned on exit from `Playing` and respawned on (re)enter.
+/// UI root for the active-power-up panel (bottom-center on desktop,
+/// upper-right above touch driving controls). Respawned with `Playing`.
 #[derive(Component)]
 struct PowerUpUiRoot;
 
@@ -294,6 +307,15 @@ struct BoostBarFill;
 /// Marker for the CoinMagnet timer-bar fill.
 #[derive(Component)]
 struct MagnetBarFill;
+
+#[derive(Component)]
+struct PowerUpPanel;
+
+#[derive(Component)]
+struct PowerUpTrack;
+
+#[derive(Component)]
+struct PowerUpLabel;
 
 /// Marker for a whole power-up UI row (icon + bar) carrying which effect it
 /// represents, so `update_powerup_ui` can show/hide + drive the right bar.
@@ -349,7 +371,10 @@ impl Plugin for PickupsPlugin {
             )
             // UI refresh runs in every state so the bars recolor even while
             // paused; the query is trivial when the UI root is absent.
-            .add_systems(Update, update_powerup_ui)
+            .add_systems(
+                Update,
+                (update_powerup_ui, update_powerup_layout).after(TouchStateSet),
+            )
             // Flash fade runs in every state so a flash spawned right before
             // a state transition still fades + despawns (it self-despawns,
             // so no separate OnExit cleanup is needed).
@@ -464,7 +489,8 @@ fn spawn_pickup(
 /// When the car is within `PICKUP_RADIUS` of a power-up orb, despawn the orb
 /// and apply the corresponding effect. Timed kinds (SpeedBoost / CoinMagnet)
 /// arm a timer resource; instant kinds (Health / Time / MegaCoin) apply their
-/// effect immediately + spawn a brief colored flash. Plays a pickup SFX
+/// effect immediately + normally spawn a brief colored flash (suppressed by
+/// reduced motion). Plays a pickup SFX
 /// (reuses coin.wav) via `AudioPlayer` + `PlaybackSettings::DESPAWN`.
 fn collect_pickup(
     car: Query<&Transform, With<Car>>,
@@ -477,6 +503,7 @@ fn collect_pickup(
     mut score: ResMut<Score>,
     mut coin_events: MessageWriter<CoinCollected>,
     audio: Res<PickupAudio>,
+    settings: Res<Settings>,
 ) {
     let Ok(car_t) = car.single() else {
         return;
@@ -497,11 +524,15 @@ fn collect_pickup(
                 PowerKind::CoinMagnet => magnet.0 = MAGNET_DURATION,
                 PowerKind::Health => {
                     health.0 = (health.0 + HEALTH_RESTORE).min(HEALTH_MAX);
-                    spawn_pickup_flash(&mut commands, health_flash_rgb());
+                    if pickup_flash_enabled(settings.reduced_motion) {
+                        spawn_pickup_flash(&mut commands, health_flash_rgb());
+                    }
                 }
                 PowerKind::Time => {
                     timeleft.0 = (timeleft.0 + TIME_BONUS).min(TIME_CAP);
-                    spawn_pickup_flash(&mut commands, time_flash_rgb());
+                    if pickup_flash_enabled(settings.reduced_motion) {
+                        spawn_pickup_flash(&mut commands, time_flash_rgb());
+                    }
                 }
                 PowerKind::MegaCoin => {
                     score.coins += MEGA_COIN_AMOUNT;
@@ -509,7 +540,9 @@ fn collect_pickup(
                     // applies the combo multiplier (the +5 score is applied
                     // directly above; the message is the "coin got" signal).
                     coin_events.write(CoinCollected);
-                    spawn_pickup_flash(&mut commands, megacoin_flash_rgb());
+                    if pickup_flash_enabled(settings.reduced_motion) {
+                        spawn_pickup_flash(&mut commands, megacoin_flash_rgb());
+                    }
                 }
             }
             // Despawn the orb (recursive in 0.19 — nukes the orb + pedestal
@@ -629,20 +662,26 @@ fn apply_coin_magnet(
 // ===========================================================================
 
 /// Bob each power-up orb vertically and spin it so it reads as a lively
-/// pickup. We animate the root entity's rotation (spin around Y) and its
+/// pickup, or restore a static hover pose under reduced motion. We animate
+/// the root entity's rotation (spin around Y) and its
 /// translation Y (gentle bob around the hover height, with a per-orb phase
 /// derived from its XZ position so multiple orbs don't bounce in lockstep).
 /// The orb + pedestal mesh children ride along with the root transform.
-fn animate_pickups(mut powerups: Query<(&mut Transform, &PowerUp)>, time: Res<Time>) {
+fn animate_pickups(
+    mut powerups: Query<(&mut Transform, &PowerUp)>,
+    time: Res<Time>,
+    settings: Res<Settings>,
+) {
     let t = time.elapsed_secs();
     for (mut tf, _power) in &mut powerups {
-        // Spin around Y.
-        let spin = t * 1.5;
-        tf.rotation = Quat::from_rotation_y(spin);
-        // Gentle bob around the hover height, with a per-orb phase so they
-        // don't all bounce in sync.
-        let phase = tf.translation.x * 1.7 + tf.translation.z * 0.9;
-        tf.translation.y = ORB_HOVER_Y + (t * 1.8 + phase).sin() * 0.18;
+        let (rotation, y) = pickup_visual_pose(
+            settings.reduced_motion,
+            t,
+            tf.translation.x,
+            tf.translation.z,
+        );
+        tf.rotation = rotation;
+        tf.translation.y = y;
     }
 }
 
@@ -700,47 +739,166 @@ fn despawn_marker<M: Component>(mut commands: Commands, q: Query<Entity, With<M>
 }
 
 // ===========================================================================
-// UI — active power-up icons + remaining-time bars (bottom-center, above
-// the health bar)
+// UI — active power-up icons + remaining-time bars (desktop bottom-center;
+// touch upper-right above the complete driving band)
 // ===========================================================================
 
-/// Spawn the bottom-center power-up panel. Two rows (SpeedBoost, CoinMagnet),
-/// each with a colored icon label and a timer bar. Instant kinds (Health /
+/// Spawn the desktop-centered or touch-aware power-up panel. Two rows
+/// (SpeedBoost, CoinMagnet), each with a colored icon label and a timer bar.
+/// Instant kinds (Health /
 /// Time / MegaCoin) have no row — they flash on collect instead. Lives only
 /// while `Playing` (despawned by [`despawn_marker::<PowerUpUiRoot>`] on exit).
-fn spawn_powerup_ui(mut commands: Commands) {
+fn spawn_powerup_ui(mut commands: Commands, touch: Res<TouchControlsActive>) {
     commands
-        .spawn((
-            Node {
-                position_type: PositionType::Absolute,
-                bottom: px(UI_BOTTOM),
-                left: px(0.0),
-                width: Val::Percent(100.0),
-                align_items: AlignItems::Center,
-                justify_content: JustifyContent::Center,
-                flex_direction: FlexDirection::Column,
-                ..default()
-            },
-            PowerUpUiRoot,
-        ))
+        .spawn((powerup_root_node(touch.0), PowerUpUiRoot))
         .with_children(|col| {
             // Inner panel so the rows sit in a tidy boxed cluster.
             col.spawn((
-                Node {
-                    flex_direction: FlexDirection::Column,
-                    padding: UiRect::all(px(6.0)),
-                    row_gap: px(4.0),
-                    ..default()
-                },
+                powerup_panel_node(touch.0),
                 BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.30)),
+                PowerUpPanel,
             ))
             .with_children(|panel| {
                 // SpeedBoost row (timed — has a bar).
-                powerup_row(panel, "BOOST", boost_color(), PowerKind::SpeedBoost);
+                powerup_row(
+                    panel,
+                    "BOOST",
+                    boost_color(),
+                    PowerKind::SpeedBoost,
+                    touch.0,
+                );
                 // CoinMagnet row (timed — has a bar).
-                powerup_row(panel, "MAGNET", magnet_color(), PowerKind::CoinMagnet);
+                powerup_row(
+                    panel,
+                    "MAGNET",
+                    magnet_color(),
+                    PowerKind::CoinMagnet,
+                    touch.0,
+                );
             });
         });
+}
+
+/// Desktop retains the original centered strip. Touch puts the compact panel
+/// at upper-right, opposite health and wholly above the driving hitboxes.
+fn powerup_root_node(touch_active: bool) -> Node {
+    if touch_active {
+        Node {
+            position_type: PositionType::Absolute,
+            top: px(TOUCH_POWERUP_TOP),
+            left: px(TOUCH_POWERUP_LEFT),
+            width: px(TOUCH_POWERUP_WIDTH),
+            height: px(TOUCH_POWERUP_HEIGHT),
+            align_items: AlignItems::Center,
+            justify_content: JustifyContent::Center,
+            flex_direction: FlexDirection::Column,
+            ..default()
+        }
+    } else {
+        Node {
+            position_type: PositionType::Absolute,
+            bottom: px(UI_BOTTOM),
+            left: px(0.0),
+            width: Val::Percent(100.0),
+            align_items: AlignItems::Center,
+            justify_content: JustifyContent::Center,
+            flex_direction: FlexDirection::Column,
+            ..default()
+        }
+    }
+}
+
+fn powerup_panel_node(touch_active: bool) -> Node {
+    Node {
+        flex_direction: FlexDirection::Column,
+        padding: UiRect::all(px(6.0)),
+        row_gap: px(if touch_active { 2.0 } else { 4.0 }),
+        ..default()
+    }
+}
+
+const fn powerup_track_width(touch_active: bool) -> f32 {
+    if touch_active {
+        TOUCH_UI_BAR_W
+    } else {
+        UI_BAR_W
+    }
+}
+
+fn update_powerup_layout(
+    touch: Res<TouchControlsActive>,
+    mut root: Query<
+        &mut Node,
+        (
+            With<PowerUpUiRoot>,
+            Without<PowerUpPanel>,
+            Without<PowerUpTrack>,
+            Without<PowerUpLabel>,
+        ),
+    >,
+    mut panels: Query<
+        &mut Node,
+        (
+            With<PowerUpPanel>,
+            Without<PowerUpUiRoot>,
+            Without<PowerUpTrack>,
+            Without<PowerUpLabel>,
+        ),
+    >,
+    mut tracks: Query<
+        &mut Node,
+        (
+            With<PowerUpTrack>,
+            Without<PowerUpUiRoot>,
+            Without<PowerUpPanel>,
+            Without<PowerUpLabel>,
+        ),
+    >,
+    mut labels: Query<
+        &mut Node,
+        (
+            With<PowerUpLabel>,
+            Without<PowerUpUiRoot>,
+            Without<PowerUpPanel>,
+            Without<PowerUpTrack>,
+        ),
+    >,
+) {
+    if !touch.is_changed() {
+        return;
+    }
+    for mut node in &mut root {
+        *node = powerup_root_node(touch.0);
+    }
+    for mut node in &mut panels {
+        *node = powerup_panel_node(touch.0);
+    }
+    for mut node in &mut tracks {
+        node.width = px(powerup_track_width(touch.0));
+    }
+    for mut node in &mut labels {
+        node.width = px(if touch.0 { 42.0 } else { 52.0 });
+    }
+}
+
+#[cfg(test)]
+fn powerup_panel_bounds(viewport: Vec2, touch_active: bool) -> ScreenBounds {
+    if touch_active {
+        ScreenBounds {
+            left: TOUCH_POWERUP_LEFT,
+            top: TOUCH_POWERUP_TOP,
+            right: TOUCH_POWERUP_LEFT + TOUCH_POWERUP_WIDTH,
+            bottom: TOUCH_POWERUP_TOP + TOUCH_POWERUP_HEIGHT,
+        }
+    } else {
+        let left = (viewport.x - POWERUP_PANEL_SIZE.x) * 0.5;
+        ScreenBounds {
+            left,
+            top: viewport.y - UI_BOTTOM - POWERUP_PANEL_SIZE.y,
+            right: left + POWERUP_PANEL_SIZE.x,
+            bottom: viewport.y - UI_BOTTOM,
+        }
+    }
 }
 
 /// Build one power-up UI row: an icon (colored dot + label) and a timer bar
@@ -748,13 +906,19 @@ fn spawn_powerup_ui(mut commands: Commands) {
 /// update system shows it when its effect is active. Only timed kinds get a
 /// real fill marker; the instant-kind arms exist purely for match
 /// exhaustiveness (no row is spawned for them).
-fn powerup_row(parent: &mut ChildSpawnerCommands, label: &str, color: Color, kind: PowerKind) {
+fn powerup_row(
+    parent: &mut ChildSpawnerCommands,
+    label: &str,
+    color: Color,
+    kind: PowerKind,
+    touch_active: bool,
+) {
     parent
         .spawn((
             Node {
                 flex_direction: FlexDirection::Row,
                 align_items: AlignItems::Center,
-                column_gap: px(6.0),
+                column_gap: px(if touch_active { 4.0 } else { 6.0 }),
                 ..default()
             },
             PowerUpRow { kind },
@@ -780,9 +944,10 @@ fn powerup_row(parent: &mut ChildSpawnerCommands, label: &str, color: Color, kin
                 },
                 TextColor(Color::srgba(0.85, 0.85, 0.9, 1.0)),
                 Node {
-                    width: px(52.0),
+                    width: px(if touch_active { 42.0 } else { 52.0 }),
                     ..default()
                 },
+                PowerUpLabel,
             ));
             // Bar track (dark) with a colored fill child. The fill carries a
             // kind-specific marker so `update_powerup_ui` can drive its width
@@ -790,7 +955,7 @@ fn powerup_row(parent: &mut ChildSpawnerCommands, label: &str, color: Color, kin
             // kinds get a bare track (no row is spawned for them, but the
             // match stays exhaustive).
             let track_node = Node {
-                width: px(UI_BAR_W),
+                width: px(powerup_track_width(touch_active)),
                 height: px(UI_BAR_H),
                 ..default()
             };
@@ -803,14 +968,14 @@ fn powerup_row(parent: &mut ChildSpawnerCommands, label: &str, color: Color, kin
             let fill_bg = BackgroundColor(color);
             match kind {
                 PowerKind::SpeedBoost => {
-                    row.spawn((track_node, track_bg)).with_child((
+                    row.spawn((track_node, track_bg, PowerUpTrack)).with_child((
                         fill_node,
                         fill_bg,
                         BoostBarFill,
                     ));
                 }
                 PowerKind::CoinMagnet => {
-                    row.spawn((track_node, track_bg)).with_child((
+                    row.spawn((track_node, track_bg, PowerUpTrack)).with_child((
                         fill_node,
                         fill_bg,
                         MagnetBarFill,
@@ -819,7 +984,7 @@ fn powerup_row(parent: &mut ChildSpawnerCommands, label: &str, color: Color, kin
                 // Instant kinds: no timer bar. These arms are unreachable
                 // (no row is spawned for them) but keep the match exhaustive.
                 PowerKind::Health | PowerKind::Time | PowerKind::MegaCoin => {
-                    row.spawn((track_node, track_bg));
+                    row.spawn((track_node, track_bg, PowerUpTrack));
                 }
             }
         });
@@ -833,6 +998,7 @@ fn powerup_row(parent: &mut ChildSpawnerCommands, label: &str, color: Color, kin
 fn update_powerup_ui(
     boost: Res<SpeedBoostTimer>,
     magnet: Res<MagnetTimer>,
+    touch: Res<TouchControlsActive>,
     mut rows: Query<(&PowerUpRow, &mut Visibility)>,
     mut boost_fills: Query<&mut Node, (With<BoostBarFill>, Without<MagnetBarFill>)>,
     mut magnet_fills: Query<&mut Node, (With<MagnetBarFill>, Without<BoostBarFill>)>,
@@ -842,10 +1008,10 @@ fn update_powerup_ui(
 
     // Drive the fill widths directly (one entity each).
     for mut node in &mut boost_fills {
-        node.width = px(UI_BAR_W * boost_frac);
+        node.width = px(powerup_track_width(touch.0) * boost_frac);
     }
     for mut node in &mut magnet_fills {
-        node.width = px(UI_BAR_W * magnet_frac);
+        node.width = px(powerup_track_width(touch.0) * magnet_frac);
     }
 
     // Show/hide each row based on whether its effect is active. Instant kinds
@@ -895,9 +1061,14 @@ fn spawn_pickup_flash(commands: &mut Commands, rgb: (f32, f32, f32)) {
 fn update_pickup_flash(
     mut commands: Commands,
     time: Res<Time>,
+    settings: Res<Settings>,
     mut q: Query<(Entity, &mut PickupFlash, &mut BackgroundColor)>,
 ) {
     for (e, mut flash, mut bg) in &mut q {
+        if !pickup_flash_enabled(settings.reduced_motion) {
+            commands.entity(e).despawn();
+            continue;
+        }
         flash.t -= time.delta_secs();
         if flash.t <= 0.0 {
             commands.entity(e).despawn();
@@ -940,6 +1111,22 @@ fn megacoin_flash_rgb() -> (f32, f32, f32) {
 // ===========================================================================
 // Helpers
 // ===========================================================================
+
+const fn pickup_flash_enabled(reduced_motion: bool) -> bool {
+    !reduced_motion
+}
+
+/// Static reduced-motion pose or the normal animated orb pose.
+fn pickup_visual_pose(reduced_motion: bool, time: f32, x: f32, z: f32) -> (Quat, f32) {
+    if reduced_motion {
+        return (Quat::IDENTITY, ORB_HOVER_Y);
+    }
+    let phase = x * 1.7 + z * 0.9;
+    (
+        Quat::from_rotation_y(time * 1.5),
+        ORB_HOVER_Y + (time * 1.8 + phase).sin() * 0.18,
+    )
+}
 
 /// Integer weights make the selection boundaries exact and easy to audit.
 /// The 15 points removed from CoinMagnet are split between Health, Time, and
@@ -1096,6 +1283,47 @@ fn rand(seed: &mut u32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::touch::touch_driving_band_bounds;
+
+    #[test]
+    fn touch_powerup_panel_clears_driving_band_at_target_viewports() {
+        for viewport in [Vec2::new(844.0, 390.0), Vec2::new(1440.0, 900.0)] {
+            let powerup = powerup_panel_bounds(viewport, true);
+            let driving = touch_driving_band_bounds(viewport);
+            assert!(
+                !powerup.overlaps(driving),
+                "{powerup:?} overlaps {driving:?}"
+            );
+            assert!(powerup.left >= 0.0 && powerup.top >= 0.0);
+            assert!(powerup.right <= viewport.x && powerup.bottom <= viewport.y);
+        }
+    }
+
+    #[test]
+    fn desktop_powerup_panel_keeps_bottom_center_placement() {
+        for viewport in [Vec2::new(844.0, 390.0), Vec2::new(1440.0, 900.0)] {
+            let powerup = powerup_panel_bounds(viewport, false);
+            assert_eq!((powerup.left + powerup.right) * 0.5, viewport.x * 0.5);
+            assert_eq!(viewport.y - powerup.bottom, UI_BOTTOM);
+        }
+    }
+
+    #[test]
+    fn powerup_track_width_is_compact_only_for_touch() {
+        assert_eq!(powerup_track_width(true), TOUCH_UI_BAR_W);
+        assert_eq!(powerup_track_width(true), 64.0);
+        assert_eq!(powerup_track_width(false), UI_BAR_W);
+        assert_eq!(powerup_track_width(false), 110.0);
+    }
+
+    #[test]
+    fn reduced_motion_uses_a_static_orb_and_disables_flash() {
+        let (rotation, y) = pickup_visual_pose(true, 123.0, 4.0, -7.0);
+        assert_eq!(rotation, Quat::IDENTITY);
+        assert_eq!(y, ORB_HOVER_Y);
+        assert!(!pickup_flash_enabled(true));
+        assert!(pickup_flash_enabled(false));
+    }
 
     #[test]
     fn pickup_ahead_tracks_zero_ninety_and_one_eighty_degree_headings() {
