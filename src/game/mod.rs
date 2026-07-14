@@ -4,7 +4,7 @@ pub mod state;
 
 use bevy::prelude::*;
 
-use crate::car::{Car, InputFrozen};
+use crate::car::{Car, DriftLatch, InputFrozen};
 use crate::game::events::{ChickenHit, CoinCollected, ObstacleHit};
 use crate::game::resources::{GameConfig, GameOverReason, RoundActive, Score, TimeLeft};
 use crate::game::state::GameState;
@@ -201,7 +201,7 @@ fn reset_car_and_resources(
     condition_bests: Res<ConditionBests>,
     mut best_at_start: ResMut<BestAtRoundStart>,
     mut condition_bests_at_start: ResMut<ConditionBestsAtRoundStart>,
-    mut car: Query<(&mut Car, &mut Transform)>,
+    mut car: Query<(&mut Car, &mut Transform, &mut DriftLatch)>,
 ) {
     // Resuming from Paused preserves the entire run, including both original
     // best-score snapshots and the car's exact state.
@@ -213,10 +213,11 @@ fn reset_car_and_resources(
     condition_bests_at_start.by_kind = condition_bests.by_kind;
     *score = Score::default();
     *timeleft = TimeLeft::default();
-    if let Ok((mut car, mut tf)) = car.single_mut() {
+    if let Ok((mut car, mut tf, mut drift_latch)) = car.single_mut() {
         car.speed = 0.0;
         car.heading = 0.0;
         car.drift = 0.0;
+        *drift_latch = DriftLatch::default();
         *tf = Transform::default();
     }
 }

@@ -55,6 +55,25 @@ pub struct PlayerInput {
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Handbrake(pub bool);
 
+/// The side a drift is latched to. Derived from the steer sign that first
+/// breaks traction: steering left (steer > 0) latches [`Left`], steering
+/// right (steer < 0) latches [`Right`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DriftSide {
+    Left,
+    Right,
+}
+
+/// Arcade drift side latch. Once the handbrake breaks rear traction with
+/// steering, the drift side locks until the handbrake releases — even if the
+/// player counter-steers or centers the wheel. This prevents mid-drift
+/// direction flips and lets `move_car` apply a wide baseline steer so the car
+/// holds its slide through the corner.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct DriftLatch {
+    side: Option<DriftSide>,
+}
+
 // Exponential speed-response rates (per second). Service braking is
 // deliberately stronger than acceleration/coasting without snapping the car
 // to a halt: from speed 12 it takes about 1.75 s to reach the stop threshold,
@@ -87,6 +106,13 @@ const DRIFT_TURN_BOOST: f32 = 1.8;
 const DRIFT_MIN_SPEED: f32 = 1.0;
 /// Below this magnitude, recovering slip snaps to exactly zero.
 const DRIFT_SNAP: f32 = 1e-4;
+/// Baseline effective steer while latched and drifting with no active steering
+/// input. The car holds a wide arc through the corner even with the wheel
+/// centered; steering same-side tightens further, counter-steering clamps
+/// back to this wide baseline.
+const DRIFT_WIDE_STEER: f32 = 0.22;
+/// Ignore analog noise and non-finite input until steering is deliberate.
+const DRIFT_STEER_DEADZONE: f32 = 0.05;
 
 // Pure player-car geometry shared by spawning and footprint tests. Keeping the
 // wheel/chassis/fascia dimensions together makes it difficult for a cosmetic
@@ -244,6 +270,81 @@ fn next_drift(
         let decay = (-DRIFT_DECAY_RATE * dt.max(0.0)).exp();
         let d = current * decay;
         if d.abs() < DRIFT_SNAP { 0.0 } else { d }
+    }
+}
+
+/// Pure latch state update. While the handbrake is held, the first non-zero
+/// steer locks the drift side; that side persists through zero or opposing
+/// steer until the handbrake releases, which unlocks immediately. A zero steer
+/// with no existing lock stays unlocked.
+fn next_drift_latch(current: DriftLatch, handbrake: bool, steer: f32) -> DriftLatch {
+    if !handbrake {
+        return DriftLatch::default();
+    }
+    if current.side.is_some() {
+        return current;
+    }
+    // No lock yet: latch only on deliberate, finite steering.
+    let steer = if steer.is_finite() { steer } else { 0.0 };
+    let side = if steer > DRIFT_STEER_DEADZONE {
+        Some(DriftSide::Left)
+    } else if steer < -DRIFT_STEER_DEADZONE {
+        Some(DriftSide::Right)
+    } else {
+        None
+    };
+    DriftLatch { side }
+}
+
+/// Effective steer while latched and drifting. The wide baseline keeps the car
+/// turning into the locked corner even with the wheel centered or
+/// counter-steered; steering same-side tightens beyond the wide baseline.
+/// Outside a latched drift (no handbrake, not drifting, or unlocked) the raw
+/// steer passes through unchanged. NaN steer collapses to the wide baseline.
+fn latched_drift_steer(latch: DriftLatch, drifting: bool, handbrake: bool, steer: f32) -> f32 {
+    let steer = if steer.is_finite() {
+        steer.clamp(-1.0, 1.0)
+    } else {
+        0.0
+    };
+    if !drifting || !handbrake {
+        return steer;
+    }
+    let Some(side) = latch.side else {
+        return steer;
+    };
+    let sign = match side {
+        DriftSide::Left => 1.0,
+        DriftSide::Right => -1.0,
+    };
+    let wide = DRIFT_WIDE_STEER * sign;
+    if sign > 0.0 {
+        steer.max(wide)
+    } else {
+        steer.min(wide)
+    }
+}
+
+/// Clear residual slip that opposes a freshly latched drift side. A new Left
+/// latch (negative slip target) zeroes any lingering positive slip, and vice
+/// versa for Right, so the drift builds cleanly from the locked direction
+/// without fighting stale opposite-side slip.
+fn sanitize_slip_for_latch(slip: f32, side: DriftSide) -> f32 {
+    match side {
+        DriftSide::Left => {
+            if slip <= 0.0 {
+                slip
+            } else {
+                0.0
+            }
+        }
+        DriftSide::Right => {
+            if slip >= 0.0 {
+                slip
+            } else {
+                0.0
+            }
+        }
     }
 }
 
@@ -510,6 +611,7 @@ fn spawn_car(
                 heading: 0.0,
                 drift: 0.0,
             },
+            DriftLatch::default(),
         ))
         .with_children(|car| {
             // Painted body shell (car paint). Cabin + glass + lights nest
@@ -693,7 +795,7 @@ fn read_keyboard_input(
 }
 
 fn move_car(
-    mut car: Query<(&mut Car, &mut Transform)>,
+    mut car: Query<(&mut Car, &mut Transform, &mut DriftLatch)>,
     input: Res<PlayerInput>,
     handbrake: Res<Handbrake>,
     cfg: Res<GameConfig>,
@@ -705,20 +807,46 @@ fn move_car(
     if input_frozen.0 {
         return;
     }
-    let Ok((mut car, mut tf)) = car.single_mut() else {
+    let Ok((mut car, mut tf, mut latch)) = car.single_mut() else {
         return;
     };
     let dt = time.delta_secs();
 
     car.speed = next_speed(car.speed, cfg.max_speed, *input, dt);
 
-    // Arcade handbrake drift: build/recover bounded slip and flag active drift
-    // for the tighter turn radius below. The handbrake never affects speed.
-    let drifting = is_drifting(car.speed, *input, handbrake.0);
+    let raw_steer = if input.steer.is_finite() {
+        input.steer.clamp(-1.0, 1.0)
+    } else {
+        0.0
+    };
+
+    // Arcade handbrake drift latch: lock the drift side on the first steer
+    // while the handbrake is held, then hold it until release. A freshly
+    // locked side clears any opposing residual slip so the drift builds
+    // cleanly from the new direction.
+    let prev_side = latch.side;
+    *latch = next_drift_latch(*latch, handbrake.0, raw_steer);
+    if prev_side.is_none() && latch.side.is_some() {
+        if let Some(side) = latch.side {
+            car.drift = sanitize_slip_for_latch(car.drift, side);
+        }
+    }
+
+    // Effective steer: while latched and drifting, a wide baseline keeps the
+    // car turning into the locked corner; same-side steer tightens, counter-
+    // steer clamps back to wide. This also feeds drift integration so the
+    // slip target follows the locked turn direction.
+    let drifting = is_drifting(car.speed, *input, handbrake.0)
+        || (handbrake.0 && latch.side.is_some() && car.speed > DRIFT_MIN_SPEED);
+    let effective_steer = latched_drift_steer(*latch, drifting, handbrake.0, raw_steer);
+    let drift_input = PlayerInput {
+        steer: effective_steer,
+        ..*input
+    };
     car.drift = next_drift(
         car.drift,
         car.speed,
-        *input,
+        drift_input,
         handbrake.0,
         dt,
         cfg.turn_rate,
@@ -729,11 +857,7 @@ fn move_car(
     // drifting the handbrake breaks rear traction and lets the nose rotate
     // faster — a tighter turn radius — without changing speed integration.
     let turn_scale = if drifting { DRIFT_TURN_BOOST } else { 1.0 };
-    car.heading += input.steer.clamp(-1.0, 1.0)
-        * cfg.turn_rate
-        * turn_scale
-        * dt
-        * (car.speed / cfg.max_speed);
+    car.heading += effective_steer * cfg.turn_rate * turn_scale * dt * (car.speed / cfg.max_speed);
 
     // Travel direction is the heading plus the drift slip angle; the body
     // still visually faces `heading` (set below), so the car slides through
@@ -1121,6 +1245,95 @@ mod tests {
         map_keyboard_input(
             keys[0], keys[1], keys[2], keys[3], keys[4], keys[5], keys[6], keys[7], keys[8],
         )
+    }
+
+    #[test]
+    fn drift_latch_locks_first_side_until_handbrake_release() {
+        let unlocked = DriftLatch::default();
+        assert_eq!(next_drift_latch(unlocked, true, 0.0), unlocked);
+        assert_eq!(next_drift_latch(unlocked, true, 0.01), unlocked);
+        assert_eq!(next_drift_latch(unlocked, true, f32::NAN), unlocked);
+        assert_eq!(next_drift_latch(unlocked, true, f32::INFINITY), unlocked);
+        let left = next_drift_latch(unlocked, true, 1.0);
+        assert_eq!(left.side, Some(DriftSide::Left));
+        assert_eq!(next_drift_latch(left, true, 0.0), left);
+        assert_eq!(next_drift_latch(left, true, -1.0), left);
+        assert_eq!(next_drift_latch(left, false, -1.0), unlocked);
+        let right = next_drift_latch(unlocked, true, -1.0);
+        assert_eq!(right.side, Some(DriftSide::Right));
+    }
+
+    #[test]
+    fn latched_drift_steer_tightens_same_side_and_widens_otherwise() {
+        let left = DriftLatch {
+            side: Some(DriftSide::Left),
+        };
+        let wide = latched_drift_steer(left, true, true, 0.0);
+        assert_eq!(wide, DRIFT_WIDE_STEER);
+        assert_eq!(latched_drift_steer(left, true, true, -1.0), wide);
+        assert!(latched_drift_steer(left, true, true, 0.7) > wide);
+        assert_eq!(latched_drift_steer(left, true, false, -0.6), -0.6);
+        assert_eq!(latched_drift_steer(left, true, true, f32::NAN), wide);
+    }
+
+    #[test]
+    fn newly_latched_side_clears_only_opposing_residual_slip() {
+        assert_eq!(sanitize_slip_for_latch(-0.3, DriftSide::Left), -0.3);
+        assert_eq!(sanitize_slip_for_latch(0.3, DriftSide::Left), 0.0);
+        assert_eq!(sanitize_slip_for_latch(0.3, DriftSide::Right), 0.3);
+        assert_eq!(sanitize_slip_for_latch(-0.3, DriftSide::Right), 0.0);
+    }
+
+    fn simulate_latched_sequence(dt: f32) -> (f32, f32) {
+        let speed = 10.0;
+        let max_speed = 12.0;
+        let turn_rate = 2.5;
+        let mut latch = DriftLatch::default();
+        let mut heading = 0.0;
+        let mut drift = 0.0;
+        let phases = [(0.7, true), (0.0, true), (-0.8, true), (0.0, false)];
+        for (raw_steer, handbrake) in phases {
+            let steps = (0.4 / dt).round() as usize;
+            for _ in 0..steps {
+                let previous_side = latch.side;
+                latch = next_drift_latch(latch, handbrake, raw_steer);
+                if previous_side.is_none()
+                    && let Some(side) = latch.side
+                {
+                    drift = sanitize_slip_for_latch(drift, side);
+                }
+                let active = handbrake && latch.side.is_some() && speed > DRIFT_MIN_SPEED;
+                let steer = latched_drift_steer(latch, active, handbrake, raw_steer);
+                let input = PlayerInput { steer, ..default() };
+                let previous_travel = heading + drift;
+                drift = next_drift(drift, speed, input, handbrake, dt, turn_rate, max_speed);
+                let turn_scale = if active { DRIFT_TURN_BOOST } else { 1.0 };
+                heading += steer * turn_rate * turn_scale * dt * (speed / max_speed);
+                if handbrake {
+                    assert!(
+                        heading + drift > previous_travel,
+                        "latched left drift must never straighten or reverse"
+                    );
+                }
+            }
+        }
+        (heading, drift)
+    }
+
+    #[test]
+    fn neutral_and_opposite_steer_never_reverse_latched_travel_curvature() {
+        simulate_latched_sequence(1.0 / 60.0);
+    }
+
+    #[test]
+    fn latched_drift_sequence_is_frame_rate_stable() {
+        let at_30 = simulate_latched_sequence(1.0 / 30.0);
+        let at_60 = simulate_latched_sequence(1.0 / 60.0);
+        let at_120 = simulate_latched_sequence(1.0 / 120.0);
+        assert!((at_30.0 - at_60.0).abs() < 1e-4);
+        assert!((at_60.0 - at_120.0).abs() < 1e-4);
+        assert!((at_30.1 - at_60.1).abs() < 2e-3);
+        assert!((at_60.1 - at_120.1).abs() < 2e-3);
     }
 
     #[test]
