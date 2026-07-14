@@ -19,9 +19,11 @@ import {
 import {
   MAX_ROUND_DURATION_MS,
   NAME_RE,
+  moderationReasons,
   normalizeName,
   parseScoreCaps,
   shouldFlagForModeration,
+  validateRestorationBody,
   validateScoreBody,
   validateSessionBody,
 } from "../src/validation";
@@ -352,25 +354,22 @@ describe("score validation", () => {
     expect(r.ok).toBe(true);
   });
 
-  it("rejects max duration plus one with the stable validation code", () => {
+  it("accepts max duration plus one and flags it for review", () => {
     const r = validateScoreBody(
       sampleScoreBody({ round_duration_ms: MAX_ROUND_DURATION_MS + 1 }),
       SCORE_CAPS,
     );
-    expect(r.ok).toBe(false);
-    if (!r.ok) {
-      expect(r.code).toBe("invalid_duration");
-      expect(r.message).toContain(String(MAX_ROUND_DURATION_MS));
-    }
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(moderationReasons(r.value, SCORE_CAPS)).toContain("long-duration");
   });
 
-  it("rejects the safe-integer maximum even though it is structurally integral", () => {
+  it("accepts the safe-integer maximum and flags it for review", () => {
     const r = validateScoreBody(
       sampleScoreBody({ round_duration_ms: Number.MAX_SAFE_INTEGER }),
       SCORE_CAPS,
     );
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.code).toBe("invalid_duration");
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(moderationReasons(r.value, SCORE_CAPS)).toContain("long-duration");
   });
 
   it.each([
@@ -392,11 +391,20 @@ describe("score validation", () => {
     if (!r.ok) expect(r.code).toBe("invalid_duration");
   });
 
-  it("retains the unrelated 120-second time-left guard", () => {
-    expect(validateScoreBody(sampleScoreBody({ time_left_ms: 120_000 }), SCORE_CAPS).ok).toBe(true);
-    const r = validateScoreBody(sampleScoreBody({ time_left_ms: 120_001 }), SCORE_CAPS);
+  it("uses the shipped 99-second remaining-time cap", () => {
+    expect(validateScoreBody(sampleScoreBody({ time_left_ms: 99_000 }), SCORE_CAPS).ok).toBe(true);
+    const r = validateScoreBody(sampleScoreBody({ time_left_ms: 99_001 }), SCORE_CAPS);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.code).toBe("invalid_time_left");
+  });
+
+  it("hard-rejects score components or aggregate outside u32", () => {
+    expect(validateScoreBody(sampleScoreBody({ terminal_total: 4_294_967_295, chickens: 4_294_967_295, coins: 0 }), SCORE_CAPS).ok).toBe(true);
+    const component = validateScoreBody(sampleScoreBody({ terminal_total: 4_294_967_296, chickens: 4_294_967_296, coins: 0 }), SCORE_CAPS);
+    expect(component.ok).toBe(false);
+    const overflow = validateScoreBody(sampleScoreBody({ terminal_total: 4_294_967_295, chickens: 4_294_967_295, coins: 1 }), SCORE_CAPS);
+    expect(overflow.ok).toBe(false);
+    if (!overflow.ok) expect(overflow.code).toBe("score_overflow");
   });
 
   it("rejects missing sessionId/proof", () => {
@@ -416,11 +424,12 @@ describe("score validation", () => {
     if (!r.ok) expect(r.code).toBe("invalid_body");
   });
 
-  it("keeps the Rust client and Worker duration constants aligned", () => {
+  it("keeps Rust and Worker duration thresholds aligned", () => {
     const rustClient = readFileSync(new URL("../../src/leaderboard.rs", import.meta.url), "utf8");
-    const match = rustClient.match(/const MAX_ROUND_DURATION_MS: u64 = ([\d_]+);/);
-    expect(match).not.toBeNull();
-    expect(Number(match![1]!.replaceAll("_", ""))).toBe(MAX_ROUND_DURATION_MS);
+    const soft = rustClient.match(/const MAX_ROUND_DURATION_MS: u64 = ([\d_]+);/);
+    const hard = rustClient.match(/const MAX_SAFE_INTEGER_MS: u64 = ([\d_]+);/);
+    expect(Number(soft![1]!.replaceAll("_", ""))).toBe(MAX_ROUND_DURATION_MS);
+    expect(Number(hard![1]!.replaceAll("_", ""))).toBe(Number.MAX_SAFE_INTEGER);
   });
 });
 
@@ -441,13 +450,13 @@ describe("plausibility caps", () => {
     expect(() => parseScoreCaps('{"unexpected":100}')).toThrow();
   });
 
-  it("hard-rejects above-cap totals", () => {
+  it("accepts above-cap totals and flags over-cap moderation", () => {
     const r = validateScoreBody(
       sampleScoreBody({ condition: 4, terminal_total: 6001, chickens: 3000, coins: 3001 }),
       SCORE_CAPS,
     );
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.code).toBe("score_over_cap");
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(moderationReasons(r.value, SCORE_CAPS)).toEqual(["near-cap", "over-cap"]);
   });
 
   it("accepts at-cap totals (boundary)", () => {
@@ -465,6 +474,107 @@ describe("plausibility caps", () => {
     // Condition 0 cap 3000; 80% = 2400.
     expect(shouldFlagForModeration(2400, 0, SCORE_CAPS)).toBe(true);
     expect(shouldFlagForModeration(42, 0, SCORE_CAPS)).toBe(false);
+  });
+
+  it("retains all deterministic moderation reasons", () => {
+    const r = validateScoreBody(sampleScoreBody({
+      condition: 0,
+      terminal_total: 2400,
+      chickens: 2399,
+      coins: 1,
+      max_combo: 5,
+      round_duration_ms: MAX_ROUND_DURATION_MS + 1,
+    }), SCORE_CAPS);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(moderationReasons(r.value, SCORE_CAPS)).toEqual(["near-cap", "long-duration"]);
+    }
+    const unusual = validateScoreBody(sampleScoreBody({
+      terminal_total: 1,
+      chickens: 1,
+      coins: 0,
+      max_combo: 5,
+    }), SCORE_CAPS);
+    expect(unusual.ok).toBe(true);
+    if (unusual.ok) expect(moderationReasons(unusual.value, SCORE_CAPS)).toContain("implausible-combo");
+  });
+});
+
+describe("admin restoration validation", () => {
+  function restoration(overrides: Record<string, unknown> = {}) {
+    const score = sampleScoreBody();
+    return {
+      restoration_key: "incident-2026-07-14-001",
+      evidence_hash: "ab".repeat(32),
+      known: {
+        name: score.name,
+        condition: score.condition,
+        terminal_total: score.terminal_total,
+        chickens: score.chickens,
+        coins: score.coins,
+        objective_completed: score.objective_completed,
+        game_over_reason: score.game_over_reason,
+      },
+      synthetic: {
+        max_combo: score.max_combo,
+        round_duration_ms: score.round_duration_ms,
+        time_left_ms: score.time_left_ms,
+        build: score.build,
+        platform: score.platform,
+        submitted_at: 1_750_000_000_000,
+      },
+      reason: "Test restoration.",
+      ...overrides,
+    };
+  }
+
+  it("accepts and normalizes an exact evidence-backed payload", () => {
+    const base = restoration();
+    const known = { ...(base.known as Record<string, unknown>), name: "abc" };
+    const result = validateRestorationBody({ ...base, evidence_hash: "AB".repeat(32), known }, SCORE_CAPS);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value.evidenceHash).toBe("ab".repeat(32));
+      expect(result.value.score.name).toBe("ABC");
+    }
+  });
+
+  it("rejects unknown/missing fields, malformed evidence, and unsafe timestamps", () => {
+    expect(validateRestorationBody(restoration({ extra: true }), SCORE_CAPS).ok).toBe(false);
+    const missing = restoration();
+    delete (missing.synthetic as Record<string, unknown>).build;
+    expect(validateRestorationBody(missing, SCORE_CAPS).ok).toBe(false);
+    for (const evidence_hash of ["a".repeat(63), "g".repeat(64), 42]) {
+      const result = validateRestorationBody(restoration({ evidence_hash }), SCORE_CAPS);
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.code).toBe("invalid_evidence_hash");
+    }
+    const unsafeBase = restoration();
+    const unsafe = validateRestorationBody({
+      ...unsafeBase,
+      synthetic: { ...(unsafeBase.synthetic as Record<string, unknown>), submitted_at: Number.MAX_SAFE_INTEGER + 1 },
+    }, SCORE_CAPS);
+    expect(unsafe.ok).toBe(false);
+    if (!unsafe.ok) expect(unsafe.code).toBe("invalid_submitted_at");
+  });
+
+  it("retains all public hard score invariants and caps", () => {
+    const mismatchBase = restoration();
+    const mismatch = validateRestorationBody({
+      ...mismatchBase,
+      known: { ...(mismatchBase.known as Record<string, unknown>), terminal_total: 99 },
+    }, SCORE_CAPS);
+    expect(mismatch.ok).toBe(false);
+    if (!mismatch.ok) expect(mismatch.code).toBe("total_mismatch");
+    const overBase = restoration();
+    const overCap = validateRestorationBody({
+      ...overBase,
+      known: {
+        ...(overBase.known as Record<string, unknown>),
+        terminal_total: 3001, chickens: 3000, coins: 1,
+      },
+    }, SCORE_CAPS);
+    expect(overCap.ok).toBe(true);
   });
 });
 

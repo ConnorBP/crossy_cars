@@ -73,15 +73,25 @@ const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 const BOARD_LIMIT: u8 = 10;
 
-/// Maximum legitimate elapsed round duration accepted by both the client
-/// contract and Worker: 30 minutes. Time pickups can extend active play well
-/// beyond the remaining-clock cap; this remains a generous anti-abuse bound.
-#[allow(dead_code)] // contract constant is also asserted by native tests
+/// Soft review threshold for elapsed round duration: 30 minutes. Time pickups
+/// can extend active play without a gameplay-derived elapsed-time maximum, so
+/// neither client nor Worker rejects at this threshold. The Worker accepts and
+/// flags longer rounds for moderation.
+#[allow(dead_code)] // soft review constant is asserted by native tests
 const MAX_ROUND_DURATION_MS: u64 = 1_800_000;
+
+/// Hard reject bound for elapsed round duration: the largest integer safely
+/// representable as a JavaScript `Number` (`Number.MAX_SAFE_INTEGER`,
+/// 2^53 - 1). A u64 above this cannot round-trip through JSON for exact
+/// canonical signing, so the client rejects it before any network call. This
+/// mirrors the Worker's `Number.isSafeInteger` check; values up to and
+/// including this bound are sent to the Worker.
+#[allow(dead_code)] // used by the wasm submission guard and native tests
+const MAX_SAFE_INTEGER_MS: u64 = 9_007_199_254_740_991;
 
 #[allow(dead_code)] // used by the wasm submission guard and native tests
 fn valid_round_duration_ms(duration: u64) -> bool {
-    duration <= MAX_ROUND_DURATION_MS
+    duration <= MAX_SAFE_INTEGER_MS
 }
 
 fn leaderboard_enabled() -> bool {
@@ -1027,16 +1037,19 @@ mod web_bridge {
     // ── Full submission chain ────────────────────────────────────────────
 
     pub fn start_submission(epoch: u64, snapshot: ScoreSnapshot, initials: String) {
-        // Enforce the same inclusive duration contract before requesting a
-        // Turnstile token or sending any payload. Rust's u64 type already
-        // guarantees a non-negative integral client value; the Worker still
-        // independently validates untrusted JSON and safe-integer bounds.
+        // Enforce the JS-safe-integer hard max before requesting a Turnstile
+        // token or sending any payload: a u64 above Number.MAX_SAFE_INTEGER
+        // cannot round-trip through JSON for exact canonical signing. Rust's
+        // u64 type already guarantees a non-negative integral client value, so
+        // the client does not pre-reject the 30-minute soft review cap
+        // (MAX_ROUND_DURATION_MS); the Worker accepts longer rounds and adds
+        // a deterministic moderation flag.
         if !valid_round_duration_ms(snapshot.round_duration_ms) {
             SUBMIT_RESULTS.with(|results| {
                 results.borrow_mut().push((
                     epoch,
                     Err(format!(
-                        "VALIDATION [invalid_duration]: round_duration_ms must be <= {MAX_ROUND_DURATION_MS}; retry unchanged will fail."
+                        "VALIDATION [invalid_duration]: round_duration_ms must be a safe integer <= {MAX_SAFE_INTEGER_MS}; retry unchanged will fail."
                     )),
                 ));
             });
@@ -2639,11 +2652,14 @@ mod tests {
     }
 
     #[test]
-    fn client_duration_contract_is_thirty_minutes_and_inclusive() {
+    fn client_duration_contract_uses_soft_review_and_js_safe_hard_bound() {
         assert_eq!(MAX_ROUND_DURATION_MS, 1_800_000);
+        assert_eq!(MAX_SAFE_INTEGER_MS, 9_007_199_254_740_991);
         assert!(valid_round_duration_ms(161_400));
         assert!(valid_round_duration_ms(MAX_ROUND_DURATION_MS));
-        assert!(!valid_round_duration_ms(MAX_ROUND_DURATION_MS + 1));
+        assert!(valid_round_duration_ms(MAX_ROUND_DURATION_MS + 1));
+        assert!(valid_round_duration_ms(MAX_SAFE_INTEGER_MS));
+        assert!(!valid_round_duration_ms(MAX_SAFE_INTEGER_MS + 1));
     }
 
     #[test]

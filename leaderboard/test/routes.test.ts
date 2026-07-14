@@ -608,24 +608,25 @@ describe("fetch-route: score submission", () => {
     expect(rbody.error.code).toBe("condition_mismatch");
   });
 
-  it("returns invalid_duration before signature/session work for max plus one", async () => {
+  it("accepts max duration plus one and records a long-round review note", async () => {
     const db = new FakeD1();
     const seeded = await seedSession(db, { condition: 0 });
     const env = makeEnv({ DB: db }) as unknown as Env;
+    const body = sampleScoreBody({
+      sessionId: seeded.sessionId,
+      proof: seeded.proof,
+      round_duration_ms: 1_800_001,
+    });
+    const sig = await signScore(TEST_CLIENT_KEY, validateOk(body));
     const { response } = await fetchRoute(env, "POST", "/v1/scores", {
-      body: sampleScoreBody({
-        sessionId: seeded.sessionId,
-        proof: seeded.proof,
-        round_duration_ms: 1_800_001,
-      }),
+      body,
+      headers: { "X-Roady-Client-Signature": sig },
     });
 
-    expect(response.status).toBe(422);
-    const rbody = await readJson<{ error: { code: string; message: string } }>(response);
-    expect(rbody.error.code).toBe("invalid_duration");
-    expect(rbody.error.message).toContain("1800000");
-    expect(db.sessions.get(seeded.sessionId)!.used).toBe(0);
-    expect(db.scores).toHaveLength(0);
+    expect(response.status).toBe(201);
+    expect(db.sessions.get(seeded.sessionId)!.used).toBe(1);
+    expect(db.scores).toHaveLength(1);
+    expect(db.scores[0]!.moderation_note).toBe("review:v1:long-duration");
   });
 
   it("successfully submits reported score 1614 with duration beyond 120 seconds", async () => {
@@ -818,20 +819,44 @@ describe("fetch-route: score submission", () => {
     expect(rbody.globalRank).toBe(2);
   });
 
-  it("rejects an implausible combo (max_combo 5 with total 1) with 422", async () => {
+  it("accepts an above-cap score and flags near-cap plus over-cap", async () => {
+    const db = new FakeD1();
+    const seeded = await seedSession(db, { condition: 0 });
+    const env = makeEnv({ DB: db }) as unknown as Env;
+    const body = sampleScoreBody({
+      sessionId: seeded.sessionId,
+      proof: seeded.proof,
+      condition: 0,
+      terminal_total: 3001,
+      chickens: 2000,
+      coins: 1001,
+      max_combo: 5,
+    });
+    const sig = await signScore(TEST_CLIENT_KEY, validateOk(body));
+    const { response } = await fetchRoute(env, "POST", "/v1/scores", {
+      body,
+      headers: { "X-Roady-Client-Signature": sig },
+    });
+    expect(response.status).toBe(201);
+    expect(db.scores[0]!.moderation_note).toBe("review:v1:near-cap,over-cap");
+  });
+
+  it("accepts low terminal total after a high peak combo and flags review", async () => {
     const db = new FakeD1();
     const seeded = await seedSession(db);
     const env = makeEnv({ DB: db }) as unknown as Env;
-    const { response } = await fetchRoute(env, "POST", "/v1/scores", {
-      body: sampleScoreBody({
-        sessionId: seeded.sessionId,
-        proof: seeded.proof,
-        terminal_total: 1, chickens: 1, coins: 0, max_combo: 5,
-      }),
+    const body = sampleScoreBody({
+      sessionId: seeded.sessionId,
+      proof: seeded.proof,
+      terminal_total: 1, chickens: 1, coins: 0, max_combo: 5,
     });
-    expect(response.status).toBe(422);
-    const rbody = await readJson<{ error: { code: string } }>(response);
-    expect(rbody.error.code).toBe("implausible_combo");
+    const sig = await signScore(TEST_CLIENT_KEY, validateOk(body));
+    const { response } = await fetchRoute(env, "POST", "/v1/scores", {
+      body,
+      headers: { "X-Roady-Client-Signature": sig },
+    });
+    expect(response.status).toBe(201);
+    expect(db.scores[0]!.moderation_note).toBe("review:v1:implausible-combo");
   });
 });
 
@@ -871,7 +896,152 @@ describe("fetch-route: personal rank", () => {
   });
 });
 
-// ─── Moderation ──────────────────────────────────────────────────────────────
+// ─── Moderation / restoration ────────────────────────────────────────────────
+
+function restorationBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    restoration_key: "incident-2026-07-14-001",
+    evidence_hash: "ab".repeat(32),
+    known: {
+      name: "OLD1",
+      condition: 0,
+      terminal_total: 75,
+      chickens: 50,
+      coins: 25,
+      objective_completed: true,
+      game_over_reason: "time_up",
+    },
+    synthetic: {
+      max_combo: 5,
+      round_duration_ms: 161_400,
+      time_left_ms: 0,
+      build: "0.1.0",
+      platform: "web",
+      submitted_at: 1_700_000_000_000,
+    },
+    reason: "Historical administrative restoration test.",
+    ...overrides,
+  };
+}
+
+describe("fetch-route: admin restoration", () => {
+  it("requires authentication and never exposes the configured token", async () => {
+    const env = makeEnv() as unknown as Env;
+    const token = (env as unknown as Record<string, string>).LB_ADMIN_TOKEN;
+    for (const headers of [undefined, { Authorization: "Bearer wrong-token" }]) {
+      const requestOptions = headers === undefined
+        ? { body: restorationBody() }
+        : { body: restorationBody(), headers };
+      const { response } = await fetchRoute(env, "POST", "/v1/admin/scores/restore", requestOptions);
+      expect(response.status).toBe(401);
+      expect(await response.text()).not.toContain(token);
+    }
+  });
+
+  it("restores exact historical fields with an unverified used synthetic session and ranks", async () => {
+    const db = new FakeD1();
+    db.scores.push(
+      { id: 1, name: "HIGH", condition: 0, terminal_total: 100, chickens: 70, coins: 30, objective_completed: 1, max_combo: 5, round_duration_ms: 60_000, time_left_ms: 0, game_over_reason: "time_up", build: "0.1.0", platform: "web", session_id: "old-1", submitted_at: 1, ip_hash: "h", status: "live", moderation_note: null },
+      { id: 2, name: "OTHER", condition: 1, terminal_total: 80, chickens: 40, coins: 40, objective_completed: 1, max_combo: 5, round_duration_ms: 60_000, time_left_ms: 0, game_over_reason: "time_up", build: "0.1.0", platform: "web", session_id: "old-2", submitted_at: 2, ip_hash: "h", status: "live", moderation_note: null },
+    );
+    const env = makeEnv({ DB: db }) as unknown as Env;
+    const token = (env as unknown as Record<string, string>).LB_ADMIN_TOKEN;
+    const { response } = await fetchRoute(env, "POST", "/v1/admin/scores/restore", {
+      body: restorationBody(), headers: { Authorization: `Bearer ${token}` },
+    });
+
+    expect(response.status).toBe(201);
+    const body = await readJson<{ restored: boolean; idempotent: boolean; id: number; rank: number; globalRank: number }>(response);
+    expect(body).toMatchObject({ restored: true, idempotent: false, rank: 2, globalRank: 3 });
+    const score = db.scores.find((row) => row.id === body.id)!;
+    expect(score).toMatchObject({
+      name: "OLD1", terminal_total: 75, submitted_at: 1_700_000_000_000,
+      submission_source: "admin_restore", restoration_key: "incident-2026-07-14-001",
+      moderation_note: "review:v1:admin_restore,synthetic_combo,synthetic_duration,synthetic_time_left,synthetic_build,synthetic_platform,synthetic_submitted_at", status: "live",
+    });
+    const session = db.sessions.get("admin_restore:incident-2026-07-14-001")!;
+    expect(session).toMatchObject({ used: 1, turnstile_verified: 0, proof: "admin_restore" });
+    const restoration = db.restorations.get("incident-2026-07-14-001")!;
+    expect(restoration).toMatchObject({
+      evidence_hash: "ab".repeat(32), score_id: body.id, admin: "admin",
+      reason: "Historical administrative restoration test.",
+    });
+    expect(JSON.parse(restoration.known_fields_json)).toEqual({
+      name: "OLD1", condition: 0, terminal_total: 75, chickens: 50, coins: 25,
+      objective_completed: 1, game_over_reason: "time_up",
+    });
+    expect(JSON.parse(restoration.synthetic_fields_json)).toEqual({
+      max_combo: 5, round_duration_ms: 161_400, time_left_ms: 0,
+      build: "0.1.0", platform: "web", submitted_at: 1_700_000_000_000,
+    });
+    expect(db.modLog).toHaveLength(1);
+    expect(db.modLog[0]).toMatchObject({ action: "restore", target_score_id: body.id, admin: "admin" });
+    expect(db.modLog[0]!.note).toContain("synthetic_submitted_at");
+    expect(JSON.stringify(body)).not.toContain(token);
+  });
+
+  it("returns the original score and current ranks for an identical retry without duplicate rows", async () => {
+    const db = new FakeD1();
+    const env = makeEnv({ DB: db }) as unknown as Env;
+    const token = (env as unknown as Record<string, string>).LB_ADMIN_TOKEN;
+    const request = () => fetchRoute(env, "POST", "/v1/admin/scores/restore", {
+      body: restorationBody(), headers: { Authorization: `Bearer ${token}` },
+    });
+    const first = await request();
+    const firstBody = await readJson<{ id: number }>(first.response);
+    db.scores.push({ id: 99, name: "NEW", condition: 0, terminal_total: 90, chickens: 50, coins: 40, objective_completed: 1, max_combo: 5, round_duration_ms: 60_000, time_left_ms: 0, game_over_reason: "time_up", build: "0.1.0", platform: "web", session_id: "new", submitted_at: 1_800_000_000_000, ip_hash: "h", status: "live", moderation_note: null });
+    const retry = await request();
+    expect(retry.response.status).toBe(200);
+    expect(await readJson(retry.response)).toMatchObject({ id: firstBody.id, idempotent: true, rank: 2, globalRank: 2 });
+    expect(db.scores.filter((row) => row.submission_source === "admin_restore")).toHaveLength(1);
+    expect(db.modLog).toHaveLength(1);
+  });
+
+  it("returns 409 when a restoration key or evidence hash is reused with different exact fields", async () => {
+    const db = new FakeD1();
+    const env = makeEnv({ DB: db }) as unknown as Env;
+    const token = (env as unknown as Record<string, string>).LB_ADMIN_TOKEN;
+    const send = (body: Record<string, unknown>) => fetchRoute(env, "POST", "/v1/admin/scores/restore", {
+      body, headers: { Authorization: `Bearer ${token}` },
+    });
+    expect((await send(restorationBody())).response.status).toBe(201);
+    const changed = await send(restorationBody({
+      known: {
+        name: "OLD1", condition: 0, terminal_total: 76, chickens: 51, coins: 25,
+        objective_completed: true, game_over_reason: "time_up",
+      },
+    }));
+    expect(changed.response.status).toBe(409);
+    expect(await readJson(changed.response)).toMatchObject({ error: { code: "restoration_conflict" } });
+    const reusedEvidence = await send(restorationBody({ restoration_key: "different-key" }));
+    expect(reusedEvidence.response.status).toBe(409);
+    expect(db.scores.filter((row) => row.submission_source === "admin_restore")).toHaveLength(1);
+  });
+
+  it("rejects malformed, oversized, and unknown-field payloads without writes", async () => {
+    const db = new FakeD1();
+    const env = makeEnv({ DB: db }) as unknown as Env;
+    const token = (env as unknown as Record<string, string>).LB_ADMIN_TOKEN;
+    const cases = [
+      restorationBody({ evidence_hash: "bad" }),
+      restorationBody({ unexpected: true }),
+      restorationBody({
+        synthetic: {
+          max_combo: 5, round_duration_ms: 161_400, time_left_ms: 0,
+          build: "x".repeat(5000), platform: "web", submitted_at: 1_700_000_000_000,
+        },
+      }),
+    ];
+    for (const body of cases) {
+      const { response } = await fetchRoute(env, "POST", "/v1/admin/scores/restore", {
+        body, headers: { Authorization: `Bearer ${token}` },
+      });
+      expect(response.status).toBe(422);
+    }
+    expect(db.scores).toHaveLength(0);
+    expect(db.sessions.size).toBe(0);
+  });
+});
 
 describe("fetch-route: moderation", () => {
   it("rejects missing admin token with 401", async () => {

@@ -60,6 +60,12 @@ jobs:
           cd leaderboard
           npm ci
 
+      - name: Install Rust and verify shared score rules
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Test shared score rules manifest
+        run: cargo test --locked -p roady-score-rules
+
       - name: Typecheck
         run: |
           cd leaderboard
@@ -69,6 +75,7 @@ jobs:
         run: |
           cd leaderboard
           npm test
+          npm run test:d1-restoration
 
       # ────────────────────────────────────────────────────────────────────
       # Prerequisite verification.

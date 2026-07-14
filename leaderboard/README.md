@@ -240,8 +240,10 @@ Hard invariants: `condition ∈ 0–4`, `terminal_total == chickens + coins`,
 `round_duration_ms` must be a non-negative safe integer and is accepted through
 `1_800_000` ms (30 minutes), inclusive: repeated time pickups can extend
 elapsed play beyond 120 seconds even though the remaining clock is capped.
-`time_left_ms` keeps its independent 120-second guard. Only **above-cap** totals
-are hard-rejected (`score_over_cap`). **Near-cap** (≥80% of cap) scores are
+`time_left_ms` uses the shipped 99-second remaining-clock cap. Provisional
+condition caps are moderation thresholds, not mathematical ceilings: near-cap
+and above-cap scores remain live with deterministic review notes. Hard score
+bounds enforce u32 component/aggregate arithmetic. **Near-cap** (≥80% of cap) scores are
 accepted and flagged for moderation via `moderation_note`.
 
 ### Privacy (`§9`)
@@ -282,6 +284,14 @@ but not existing leaderboard rows.
    switch to named namespaces. Session and submit bindings fail closed when
    missing or errored. Public reads tolerate an absent binding for standalone
    tests/unsupported runtimes, but a configured binding error fails closed.
+
+## Validation v2 and administrative restoration
+
+Elapsed play has no mechanics-derived finite ceiling because coins and Time pickups can repeatedly replenish the remaining clock. The Worker therefore accepts safe-integer durations above 30 minutes and adds `review:v1:long-duration`; it no longer rejects them. Low terminal score after a high peak combo is similarly flagged rather than rejected because critter penalties can reduce score later. Near/over-cap scores remain live with `review:v1:near-cap` / `review:v1:over-cap`. Structural u32 arithmetic, condition/reason IDs, proof/signature/session binding, replay protection, and rate limits remain strict.
+
+The pure Rust crate `crates/roady-score-rules` owns score/time mechanics and generates `rules/roady-rules.v1.json`. CI byte-compares the generated manifest and tests the game workspace. A future WASM adapter will execute the same crate inside the TypeScript Worker.
+
+Authenticated `POST /v1/admin/scores/restore` supports idempotent evidence-backed restoration after migration `0004_admin_restorations.sql`. The exact payload separates screenshot-proven `known` fields from inferred `synthetic` fields and includes a reason plus evidence SHA-256. The Worker creates an already-used/unverified synthetic session and persists provenance/audit rows. This route must never be used as a normal submission bypass.
 
 ## Security notes
 

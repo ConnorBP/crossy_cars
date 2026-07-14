@@ -147,7 +147,7 @@ interface FakeSession {
   ip_hash: string;
 }
 
-interface FakeScore {
+export interface FakeScore {
   id: number;
   name: string;
   condition: number;
@@ -166,6 +166,8 @@ interface FakeScore {
   ip_hash: string;
   status: "live" | "hidden" | "deleted";
   moderation_note: string | null;
+  submission_source?: "verified" | "admin_restore";
+  restoration_key?: string | null;
 }
 
 interface FakeModLog {
@@ -175,6 +177,18 @@ interface FakeModLog {
   admin: string;
   at: number;
   note: string | null;
+}
+
+interface FakeRestoration {
+  restoration_key: string;
+  evidence_hash: string;
+  payload_hash: string;
+  known_fields_json: string;
+  synthetic_fields_json: string;
+  reason: string;
+  score_id: number;
+  restored_at: number;
+  admin: string;
 }
 
 /**
@@ -188,15 +202,40 @@ export class FakeD1 {
   sessions = new Map<string, FakeSession>();
   scores: FakeScore[] = [];
   modLog: FakeModLog[] = [];
+  restorations = new Map<string, FakeRestoration>();
   nextId = 1;
   nextModId = 1;
 
   prepare(sql: string) {
     return new FakeStmt(this, sql.trim());
   }
+
+  async batch(statements: FakeStmt[]): Promise<unknown[]> {
+    // D1 batches are transactional. Snapshot the small in-memory state so a
+    // unique conflict or unsupported operation cannot leave partial rows.
+    const sessions = new Map(Array.from(this.sessions, ([key, value]) => [key, { ...value }]));
+    const scores = this.scores.map((value) => ({ ...value }));
+    const modLog = this.modLog.map((value) => ({ ...value }));
+    const restorations = new Map(Array.from(this.restorations, ([key, value]) => [key, { ...value }]));
+    const nextId = this.nextId;
+    const nextModId = this.nextModId;
+    try {
+      const results = [];
+      for (const statement of statements) results.push(await statement.run());
+      return results;
+    } catch (error) {
+      this.sessions = sessions;
+      this.scores = scores;
+      this.modLog = modLog;
+      this.restorations = restorations;
+      this.nextId = nextId;
+      this.nextModId = nextModId;
+      throw error;
+    }
+  }
 }
 
-class FakeStmt {
+export class FakeStmt {
   constructor(private db: FakeD1, private sql: string) {}
   private params: unknown[] = [];
 
@@ -212,6 +251,18 @@ class FakeStmt {
       const id = this.params[0] as string;
       const s = this.db.sessions.get(id);
       return (s as unknown as T) ?? null;
+    }
+    // Restoration lookup by idempotency key or evidence hash.
+    if (sql.includes("FROM admin_restorations ar JOIN scores")) {
+      const restorationKey = this.params[0] as string;
+      const evidenceHash = this.params[1] as string | undefined;
+      const restoration = this.db.restorations.get(restorationKey) ??
+        Array.from(this.db.restorations.values()).find((row) => row.evidence_hash === evidenceHash);
+      if (!restoration) return null;
+      const score = this.db.scores.find((row) => row.id === restoration.score_id);
+      if (!score) return null;
+      return { ...restoration, name: score.name, condition: score.condition,
+        terminal_total: score.terminal_total, submitted_at: score.submitted_at } as unknown as T;
     }
     // Condition + global rank counts returned after score submission.
     if (sql.includes("AS condition_ahead") && sql.includes("AS global_ahead")) {
@@ -324,10 +375,20 @@ class FakeStmt {
 
   async run(): Promise<{ meta: { changes: number; last_row_id?: number } }> {
     const sql = this.sql;
-    // Session insert (createSession).
+    // Session insert (createSession or synthetic admin restoration session).
     if (sql.startsWith("INSERT INTO sessions")) {
       const p = this.params;
-      const row: FakeSession = {
+      const adminRestore = sql.includes("'admin_restore'");
+      const row: FakeSession = adminRestore ? {
+        session_id: p[0] as string,
+        challenge: "admin_restore",
+        condition: p[1] as number,
+        proof: "admin_restore",
+        expires_at: p[3] as number,
+        used: 1,
+        turnstile_verified: 0,
+        ip_hash: "admin_restore",
+      } : {
         session_id: p[0] as string,
         challenge: p[1] as string,
         condition: p[2] as number,
@@ -337,6 +398,7 @@ class FakeStmt {
         turnstile_verified: 1,
         ip_hash: p[6] as string,
       };
+      if (this.db.sessions.has(row.session_id)) throw new Error("UNIQUE sessions.session_id");
       this.db.sessions.set(row.session_id, row);
       return { meta: { changes: 1 } };
     }
@@ -351,7 +413,7 @@ class FakeStmt {
       }
       return { meta: { changes: 0 } };
     }
-    // Score insert (submitScore).
+    // Score insert (public submission or admin restoration).
     if (sql.startsWith("INSERT INTO scores")) {
       const p = this.params;
       const id = Math.max(
@@ -359,6 +421,11 @@ class FakeStmt {
         ...this.db.scores.map((score) => score.id + 1),
       );
       this.db.nextId = id + 1;
+      const adminRestore = sql.includes("'admin_restore'");
+      const restorationKey = adminRestore ? p[14] as string : null;
+      if (restorationKey && this.db.scores.some((score) => score.restoration_key === restorationKey)) {
+        throw new Error("UNIQUE scores.restoration_key");
+      }
       const row: FakeScore = {
         id,
         name: p[0] as string,
@@ -377,7 +444,11 @@ class FakeStmt {
         submitted_at: p[13] as number,
         ip_hash: p[14] as string,
         status: (p[15] as "live" | "hidden" | "deleted") ?? "live",
-        moderation_note: (p[16] as string | null) ?? null,
+        moderation_note: adminRestore
+          ? "review:v1:admin_restore,synthetic_combo,synthetic_duration,synthetic_time_left,synthetic_build,synthetic_platform,synthetic_submitted_at"
+          : (p[16] as string | null) ?? null,
+        submission_source: adminRestore ? "admin_restore" : "verified",
+        restoration_key: restorationKey,
       };
       this.db.scores.push(row);
       return { meta: { changes: 1, last_row_id: row.id } };
@@ -418,16 +489,43 @@ class FakeStmt {
       }
       return { meta: { changes: 0 } };
     }
-    // Moderation log insert.
+    // Admin restoration audit insert selects the just-created score.
+    if (sql.startsWith("INSERT INTO admin_restorations")) {
+      const p = this.params;
+      const restorationKey = p[0] as string;
+      const evidenceHash = p[1] as string;
+      if (this.db.restorations.has(restorationKey) ||
+          Array.from(this.db.restorations.values()).some((row) => row.evidence_hash === evidenceHash)) {
+        throw new Error("UNIQUE admin_restorations");
+      }
+      const score = this.db.scores.find((row) => row.restoration_key === p[7]);
+      if (!score) throw new Error("missing restored score");
+      this.db.restorations.set(restorationKey, {
+        restoration_key: restorationKey,
+        evidence_hash: evidenceHash,
+        payload_hash: p[2] as string,
+        known_fields_json: p[3] as string,
+        synthetic_fields_json: p[4] as string,
+        reason: p[5] as string,
+        score_id: score.id,
+        restored_at: p[6] as number,
+        admin: "admin",
+      });
+      return { meta: { changes: 1 } };
+    }
+    // Moderation log insert (bound public moderation or SELECT restoration).
     if (sql.startsWith("INSERT INTO moderation_log")) {
       const p = this.params;
+      const restore = sql.includes("SELECT 'restore'");
+      const score = restore ? this.db.scores.find((row) => row.restoration_key === p[2]) : undefined;
+      if (restore && !score) throw new Error("missing restored score for log");
       this.db.modLog.push({
         id: this.db.nextModId++,
-        action: p[0] as string,
-        target_score_id: p[1] as number,
-        admin: p[2] as string,
-        at: p[3] as number,
-        note: (p[4] as string | null) ?? null,
+        action: restore ? "restore" : p[0] as string,
+        target_score_id: restore ? score!.id : p[1] as number,
+        admin: restore ? "admin" : p[2] as string,
+        at: restore ? p[0] as number : p[3] as number,
+        note: (restore ? p[1] : p[4]) as string | null,
       });
       return { meta: { changes: 1 } };
     }

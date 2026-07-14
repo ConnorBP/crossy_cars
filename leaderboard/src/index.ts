@@ -29,12 +29,14 @@ import {
   sha256,
 } from "./security";
 import {
+  moderationReasons,
   normalizeName,
   parseScoreCaps,
-  shouldFlagForModeration,
+  validateRestorationBody,
   validateScoreBody,
   validateSessionBody,
   MAX_REQUEST_BODY_BYTES,
+  type ValidatedRestoration,
   type ValidatedScore,
 } from "./validation";
 import { renderLeaderboardSvg } from "./svg";
@@ -82,6 +84,8 @@ const TURNSTILE_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverify
 const TURNSTILE_ACTION = "roady_score_session";
 /** Documented always-pass test secret — prohibited outside dev builds. */
 const TURNSTILE_TEST_SECRET = "1x0000000000000000000000000000000AA";
+/** Restoration requests are exact, small records rather than bulk imports. */
+const MAX_RESTORATION_BODY_BYTES = 4 * 1024;
 
 /** All five required score plausibility caps (conditions 0–4). */
 const REQUIRED_CAP_CONDITIONS = [0, 1, 2, 3, 4];
@@ -210,7 +214,10 @@ export default {
         return getMyRank(request, env, cors, requestId);
       }
 
-      // ── moderation ────────────────────────────────────────────────────
+      // ── moderation / evidence-backed restoration ─────────────────────
+      if (pathname === "/v1/admin/scores/restore" && method === "POST") {
+        return restoreScore(request, env, cors, requestId);
+      }
       if (pathname.startsWith("/v1/admin/scores/")) {
         return moderateScore(request, env, pathname, cors, requestId);
       }
@@ -746,7 +753,10 @@ async function submitScore(
   // must obtain a new session (acceptable per architecture §7).
   const submittedAt = nowMs();
   const hash = await ipHash(ip, env.LB_IP_HASH_PEPPER);
-  const flagForModeration = shouldFlagForModeration(v.terminalTotal, v.condition, caps);
+  const reviewReasons = moderationReasons(v, caps);
+  const moderationNote = reviewReasons.length > 0
+    ? `review:v1:${reviewReasons.join(",")}`
+    : null;
 
   let insertedId: number;
   try {
@@ -754,8 +764,9 @@ async function submitScore(
       `INSERT INTO scores
          (name, condition, terminal_total, chickens, coins, objective_completed,
           max_combo, round_duration_ms, time_left_ms, game_over_reason, build,
-          platform, session_id, submitted_at, ip_hash, status, moderation_note)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          platform, session_id, submitted_at, ip_hash, status, moderation_note,
+          submission_source, restoration_key)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'verified', NULL)`,
     )
       .bind(
         v.name,
@@ -774,7 +785,7 @@ async function submitScore(
         submittedAt,
         hash,
         "live",
-        flagForModeration ? "near-cap: review" : null,
+        moderationNote,
       )
       .run();
     insertedId = Number(insert.meta?.last_row_id);
@@ -941,6 +952,243 @@ interface MeRankSessionRow {
 
 // ─── Moderation ──────────────────────────────────────────────────────────────
 
+/** Authenticate an administrator without logging or returning the token. */
+function adminAuthorized(request: Request, env: Env): boolean {
+  const token = env.LB_ADMIN_TOKEN;
+  if (typeof token !== "string" || isPlaceholder(token)) return false;
+  const auth = request.headers.get("Authorization") ?? "";
+  const expected = `Bearer ${token}`;
+  return auth.length === expected.length && constantTimeEquals(
+    new TextEncoder().encode(auth),
+    new TextEncoder().encode(expected),
+  );
+}
+
+interface StoredRestoration {
+  restoration_key: string;
+  evidence_hash: string;
+  payload_hash: string;
+  score_id: number;
+  name: string;
+  condition: number;
+  terminal_total: number;
+  submitted_at: number;
+}
+
+function restorationPayloadBytes(value: ValidatedRestoration): Uint8Array {
+  const s = value.score;
+  return new TextEncoder().encode([
+    "roady.v1.admin_restore",
+    value.restorationKey,
+    value.evidenceHash,
+    s.name,
+    s.condition,
+    s.terminalTotal,
+    s.chickens,
+    s.coins,
+    s.objectiveCompleted,
+    s.maxCombo,
+    s.roundDurationMs,
+    s.timeLeftMs,
+    s.gameOverReason,
+    s.build,
+    s.platform,
+    value.submittedAt,
+    value.knownFieldsJson,
+    value.syntheticFieldsJson,
+    value.reason,
+  ].join("\n"));
+}
+
+function hex(bytes: Uint8Array): string {
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function restoredRanks(env: Env, score: StoredRestoration): Promise<{ rank: number; globalRank: number }> {
+  const row = await env.DB.prepare(
+    `SELECT COUNT(CASE WHEN condition = ? THEN 1 END) AS condition_ahead,
+            COUNT(*) AS global_ahead
+       FROM scores
+      WHERE status = 'live'
+        AND (terminal_total > ? OR
+             (terminal_total = ? AND submitted_at < ?) OR
+             (terminal_total = ? AND submitted_at = ? AND id < ?))`,
+  ).bind(
+    score.condition,
+    score.terminal_total,
+    score.terminal_total,
+    score.submitted_at,
+    score.terminal_total,
+    score.submitted_at,
+    score.score_id,
+  ).first<{ condition_ahead: number; global_ahead: number }>();
+  return {
+    rank: (row?.condition_ahead ?? 0) + 1,
+    globalRank: (row?.global_ahead ?? 0) + 1,
+  };
+}
+
+/** POST /v1/admin/scores/restore — one exact score per authenticated request. */
+async function restoreScore(
+  request: Request,
+  env: Env,
+  cors: Record<string, string> | null,
+  requestId: string,
+): Promise<Response> {
+  if (!adminAuthorized(request, env)) {
+    return errorResponse("unauthorized", "Invalid admin token", 401, requestId, cors);
+  }
+
+  let body: unknown;
+  try {
+    body = await readJson(request, MAX_RESTORATION_BODY_BYTES);
+  } catch {
+    return errorResponse("invalid_body", "Malformed JSON body or too large", 422, requestId, cors);
+  }
+  const parsed = validateRestorationBody(body, parseScoreCaps(env.SCORE_CAPS_JSON));
+  if (!parsed.ok) return errorResponse(parsed.code, parsed.message, 422, requestId, cors);
+
+  const v = parsed.value;
+  const payloadHash = hex(await sha256(restorationPayloadBytes(v)));
+  const existing = await env.DB.prepare(
+    `SELECT ar.restoration_key, ar.evidence_hash, ar.payload_hash, ar.score_id,
+            s.name, s.condition, s.terminal_total, s.submitted_at
+       FROM admin_restorations ar JOIN scores s ON s.id = ar.score_id
+      WHERE ar.restoration_key = ? OR ar.evidence_hash = ?`,
+  ).bind(v.restorationKey, v.evidenceHash).first<StoredRestoration>();
+  if (existing) {
+    if (
+      existing.restoration_key !== v.restorationKey ||
+      existing.evidence_hash !== v.evidenceHash ||
+      existing.payload_hash !== payloadHash
+    ) {
+      return errorResponse(
+        "restoration_conflict",
+        "restoration_key already exists with different evidence or fields",
+        409,
+        requestId,
+        cors,
+      );
+    }
+    const ranks = await restoredRanks(env, existing);
+    return json({
+      restored: true,
+      idempotent: true,
+      id: existing.score_id,
+      rank: ranks.rank,
+      globalRank: ranks.globalRank,
+      condition: existing.condition,
+      total: existing.terminal_total,
+      submittedAt: existing.submitted_at,
+    }, 200, cors, { "Cache-Control": "no-store" });
+  }
+
+  const syntheticSessionId = `admin_restore:${v.restorationKey}`;
+  const restoredAt = nowMs();
+  // Synthetic sessions are intentionally unverified and already used. They
+  // preserve the scores.session_id FK/uniqueness contract but can never pass
+  // the public proof, Turnstile, signature, or replay flow.
+  try {
+    const s = v.score;
+    // D1 batch is transactional. The audit rows select the newly inserted
+    // score by its unique restoration key, avoiding a race-prone client-side
+    // id allocation while ensuring partial restoration is rolled back.
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO sessions
+           (session_id, challenge, condition, proof, issued_at, expires_at,
+            used, turnstile_verified, ip_hash)
+         VALUES (?, 'admin_restore', ?, 'admin_restore', ?, ?, 1, 0, 'admin_restore')`,
+      ).bind(syntheticSessionId, s.condition, restoredAt, restoredAt),
+      env.DB.prepare(
+        `INSERT INTO scores
+           (name, condition, terminal_total, chickens, coins, objective_completed,
+            max_combo, round_duration_ms, time_left_ms, game_over_reason, build,
+            platform, session_id, submitted_at, ip_hash, status, moderation_note,
+            submission_source, restoration_key)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'admin_restore',
+                 'live', 'review:v1:admin_restore,synthetic_combo,synthetic_duration,synthetic_time_left,synthetic_build,synthetic_platform,synthetic_submitted_at', 'admin_restore', ?)`,
+      ).bind(
+        s.name, s.condition, s.terminalTotal, s.chickens, s.coins,
+        s.objectiveCompleted, s.maxCombo, s.roundDurationMs, s.timeLeftMs,
+        s.gameOverReason, s.build, s.platform, syntheticSessionId, v.submittedAt,
+        v.restorationKey,
+      ),
+      env.DB.prepare(
+        `INSERT INTO admin_restorations
+           (restoration_key, evidence_hash, payload_hash, known_fields_json,
+            synthetic_fields_json, reason, score_id, restored_at, admin)
+         SELECT ?, ?, ?, ?, ?, ?, id, ?, 'admin'
+           FROM scores WHERE restoration_key = ?`,
+      ).bind(
+        v.restorationKey,
+        v.evidenceHash,
+        payloadHash,
+        v.knownFieldsJson,
+        v.syntheticFieldsJson,
+        v.reason,
+        restoredAt,
+        v.restorationKey,
+      ),
+      env.DB.prepare(
+        `INSERT INTO moderation_log (action, target_score_id, admin, at, note)
+         SELECT 'restore', id, 'admin', ?, ? FROM scores WHERE restoration_key = ?`,
+      ).bind(
+        restoredAt,
+        `review:v1:admin_restore,synthetic_combo,synthetic_duration,synthetic_time_left,synthetic_build,synthetic_platform,synthetic_submitted_at:${v.restorationKey}:${v.evidenceHash}`,
+        v.restorationKey,
+      ),
+    ]);
+
+    const created = await env.DB.prepare(
+      `SELECT ar.restoration_key, ar.evidence_hash, ar.payload_hash, ar.score_id,
+              s.name, s.condition, s.terminal_total, s.submitted_at
+         FROM admin_restorations ar JOIN scores s ON s.id = ar.score_id
+        WHERE ar.restoration_key = ?`,
+    ).bind(v.restorationKey).first<StoredRestoration>();
+    if (!created) throw new Error("restoration transaction did not create audit row");
+    const scoreId = created.score_id;
+    const row = created;
+    const ranks = await restoredRanks(env, row);
+    return json({
+      restored: true,
+      idempotent: false,
+      id: scoreId,
+      rank: ranks.rank,
+      globalRank: ranks.globalRank,
+      condition: s.condition,
+      total: s.terminalTotal,
+      submittedAt: v.submittedAt,
+    }, 201, cors, { "Cache-Control": "no-store" });
+  } catch (err) {
+    // A concurrent request may win the unique restoration key. Re-read and
+    // apply the same retry/conflict semantics rather than creating duplicates.
+    const raced = await env.DB.prepare(
+      `SELECT ar.restoration_key, ar.evidence_hash, ar.payload_hash, ar.score_id,
+              s.name, s.condition, s.terminal_total, s.submitted_at
+         FROM admin_restorations ar JOIN scores s ON s.id = ar.score_id
+        WHERE ar.restoration_key = ? OR ar.evidence_hash = ?`,
+    ).bind(v.restorationKey, v.evidenceHash).first<StoredRestoration>();
+    if (
+      raced && raced.restoration_key === v.restorationKey &&
+      raced.evidence_hash === v.evidenceHash && raced.payload_hash === payloadHash
+    ) {
+      const ranks = await restoredRanks(env, raced);
+      return json({
+        restored: true, idempotent: true, id: raced.score_id,
+        rank: ranks.rank, globalRank: ranks.globalRank,
+        condition: raced.condition, total: raced.terminal_total,
+        submittedAt: raced.submitted_at,
+      }, 200, cors, { "Cache-Control": "no-store" });
+    }
+    if (raced) {
+      return errorResponse("restoration_conflict", "restoration_key already exists with different evidence or fields", 409, requestId, cors);
+    }
+    console.error("admin_restore_failed", { requestId, message: String(err) });
+    return errorResponse("restore_failed", "Restoration failed safely", 500, requestId, cors);
+  }
+}
+
 async function moderateScore(
   request: Request,
   env: Env,
@@ -957,15 +1205,8 @@ async function moderateScore(
     return errorResponse("unauthorized", "Admin token not configured", 503, requestId, cors);
   }
 
-  // Authorization: Bearer <LB_ADMIN_TOKEN>
-  const auth = request.headers.get("Authorization") ?? "";
-  const expected = `Bearer ${adminToken}`;
-  // Constant-time-ish compare to avoid trivial timing oracle on the token.
-  const ok = auth.length === expected.length && constantTimeEquals(
-    new TextEncoder().encode(auth),
-    new TextEncoder().encode(expected),
-  );
-  if (!ok) {
+  // Authorization: Bearer <LB_ADMIN_TOKEN>.
+  if (!adminAuthorized(request, env)) {
     return errorResponse("unauthorized", "Invalid admin token", 401, requestId, cors);
   }
 
@@ -1068,9 +1309,10 @@ export {
   randomBase64Url,
   parseScoreCaps,
   normalizeName,
+  validateRestorationBody,
   validateScoreBody,
   validateSessionBody,
-  shouldFlagForModeration,
+  moderationReasons,
 };
 export { escapeXml, renderLeaderboardSvg } from "./svg";
 export {

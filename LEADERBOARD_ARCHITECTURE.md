@@ -307,9 +307,23 @@ Hard invariants:
 - `round_duration_ms` is a non-negative safe integer at most `1_800_000` ms (30 minutes); `time_left_ms` remains in its broad 0–120,000 ms sane range
 - `terminal_total <= SCORE_CAPS[condition]`
 
-The caps must be generous and derived from the shipped rules. A fresh round starts at 60s, ordinary coins add +1.5s each but clamp the *remaining clock* to 90s (`MAX_ROUND_TIME = 90.0` in `src/world.rs`), and the Time power-up adds +5s each clamped to a hard 99s remaining-time ceiling (`TIME_CAP = 99.0` in `src/pickups.rs`). Crucially, repeated pickups can extend **elapsed active play** well beyond 120 seconds even though `time_left_ms` cannot exceed the remaining-clock cap. Therefore the shared Rust-client/Worker `round_duration_ms` anti-abuse maximum is 30 minutes (`1_800_000` ms), inclusive. It must still be a non-negative safe integer so client and Worker canonical HMAC bytes remain exact. `time_left_ms` retains the independent `120_000` ms ceiling. Score caps remain the primary score bound; near-cap scores are flagged for moderation and only above-cap values are hard rejected.
+The caps must be generous and derived from the shipped rules. A fresh round starts at 60s, ordinary coins add +1.5s each but clamp the *remaining clock* to 90s (`MAX_ROUND_TIME = 90.0` in `src/world.rs`), and the Time power-up adds +5s each clamped to a hard 99s remaining-time ceiling (`TIME_CAP = 99.0` in `src/pickups.rs`). Crucially, repeated pickups can extend **elapsed active play** well beyond 120 seconds even though `time_left_ms` cannot exceed the remaining-clock cap. Therefore 30 minutes (`1_800_000` ms) is a soft review threshold, while the hard duration bound is JavaScript safe-integer exactness. `time_left_ms` uses the shipped `99_000` ms remaining-clock ceiling. Provisional condition score caps are moderation thresholds: near/over-cap values are flagged, while hard score bounds enforce u32 component and checked aggregate arithmetic.
 
 Telemetry such as duration, objective completion, combo, client timestamp, or build is advisory and forgeable. It may generate moderation flags but is not proof.
+
+## 8.1 Validation v2: mechanics, evidence, and moderation
+
+The remaining clock is capped, but elapsed play is not: streamed coins and repeatable Time pickups can replenish the timer indefinitely. Therefore 30 minutes is a **soft review threshold**, not a hard rejection. Durations are hard-bounded only by JavaScript safe-integer/canonical-signing exactness. A high historical peak combo with a low terminal score is also review evidence rather than impossibility because later critter penalties can reduce the chicken score bucket.
+
+Accepted exceptional rows receive deterministic notes such as `review:v1:long-duration`, `review:v1:near-cap`, `review:v1:over-cap`, or `review:v1:implausible-combo`. Authentication, Turnstile, proof/HMAC, condition binding, rate limits, session expiry, one-time claim, replay rejection, and u32 aggregate arithmetic remain strict.
+
+Shipped mechanics live in the pure `roady-score-rules` Rust crate. `rules/roady-rules.v1.json` is generated from that typed source and byte-compared in tests. The game consumes the native crate; a later thin `wasm32-unknown-unknown` adapter can let the TypeScript Worker execute the same rules without rewriting HTTP, D1, or security code.
+
+A bounded event ledger can replay score/time arithmetic and improve moderation/debugging, but client telemetry remains forgeable. It is consistency evidence, not authoritative anti-cheat; authoritative competitive scoring still requires server simulation.
+
+## 8.2 Administrative restoration
+
+`POST /v1/admin/scores/restore` is authenticated with `LB_ADMIN_TOKEN` and reserved for evidence-backed historical recovery. It creates an already-used, unverified `admin_restore:` synthetic session, a visibly sourced score row, an `admin_restorations` provenance row, and a `moderation_log` entry in one idempotent D1 batch. Screenshot-proven and synthetic fields are persisted separately with an evidence SHA-256 and reason. Restored rows must never be represented as Turnstile-verified player submissions.
 
 ## 9. Rate limiting and privacy
 

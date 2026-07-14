@@ -7,6 +7,7 @@
   "type": "module",
   "scripts": {
     "test": "vitest run",
+    "test:d1-restoration": "node scripts/test-d1-restoration.mjs",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "dev": "wrangler dev",
