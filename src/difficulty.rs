@@ -7,15 +7,12 @@
 //!   current round has been running (only ticks while input is NOT frozen,
 //!   mirroring `tick_timeleft`) and the derived difficulty level
 //!   (`level = (elapsed / 10) as u32`, capped at 6).
-//! - `Traffic { speed, axis, dir, speed_roll }` — a moving car the player must
-//!   avoid. Traffic entities are top-level (world `Transform`) and carry an
-//!   axis-correct `world::Collider` matching the 1×2 visual footprint, so
-//!   `car.rs::physics_collisions` treats them as solid obstacles — crashing into one
-//!   emits `ObstacleHit` → damage. The baseline count scales with `level`
-//!   (`1 + level/2`); active modifier and event multipliers are then composed,
-//!   with the final population capped at 8. They drive straight along a world
-//!   axis and are recycled (despawned + respawned safely offscreen ahead) once
-//!   they drift ~90u from the car.
+//! - `Traffic` — a moving car the player must avoid. Traffic follows the pure
+//!   world lane graph across streamed-cell boundaries, retaining deterministic
+//!   route state, distance progress, and curve-tangent velocity. Top-level
+//!   conservative AABB colliders make traffic solid to the player. The baseline
+//!   count scales with `level` (`1 + level/2`); active modifier and event
+//!   multipliers compose under the existing cap of 8.
 //! - A small "Lv {level}" UI node top-right, just below the minimap.
 //!
 //! Contracts honoured:
@@ -47,9 +44,9 @@ use crate::run_events::ActiveEvent;
 use crate::touch::{
     TOUCH_LEVEL_HEIGHT, TOUCH_LEVEL_RIGHT, TOUCH_LEVEL_TOP, TOUCH_LEVEL_WIDTH, TouchControlsActive,
 };
-#[cfg(test)]
-use crate::world::ROAD_HALF_WIDTH;
-use crate::world::{Collider, RoadAxis, RoadSegment, road_plan, world_to_road_cell};
+use crate::world::{
+    Collider, LaneConnector, LaneCurve, LaneEdge, LaneTurn, road_plan, world_to_road_cell,
+};
 
 // ===========================================================================
 // Tuning constants
@@ -65,31 +62,25 @@ const MAX_LEVEL: u32 = 6;
 /// when composed, but cannot create an unbounded number of traffic entities.
 const MAX_TRAFFIC: usize = 8;
 
-/// Distance from the car (XZ) beyond which a traffic car is recycled
-/// (despawned + replaced). Keeps the traffic near the endless driver.
-const TRAFFIC_KEEP_RADIUS: f32 = 90.0;
-
-/// Traffic spawn envelope ahead of the car's camera-facing heading. Candidate
-/// points start 34..58u ahead; road snapping is accepted only when the final
-/// lane-centred position remains at least `SPAWN_AHEAD_MIN` ahead.
-const SPAWN_AHEAD_MIN: f32 = 34.0;
-/// No traffic root may be created inside this XZ circle around the car, even
-/// after snapping the candidate to a real road line and directional lane.
+/// A width-first conservative gameplay ground envelope. The production camera
+/// is fixed-horizontal (10..12u), but its isometric projection, lead, shake,
+/// and portrait aspect enlarge the ground footprint. This deliberately broad
+/// square avoids depending on camera/window queries and is safe for portrait.
+const GAMEPLAY_GROUND_HALF_EXTENT: f32 = 32.0;
+/// Traffic is retained well beyond the conservative visible envelope. This
+/// preserves visible/surplus cars and gives curves time to continue naturally.
+const TRAFFIC_KEEP_HALF_EXTENT: f32 = 90.0;
+/// No traffic root may be created inside this XZ circle around the player.
 const SPAWN_SAFE_RADIUS: f32 = 26.0;
-/// Small tolerance used only at floating-point comparisons/test boundaries.
-const SPAWN_SAFETY_TOLERANCE: f32 = 1e-3;
-/// Bounded candidate count keeps spawning deterministic and constant-time.
-const SPAWN_RETRY_CANDIDATES: usize = 8;
-/// The deterministic fallback aims comfortably inside the normal envelope.
-const SPAWN_FALLBACK_AHEAD: f32 = 46.0;
-/// Lateral jitter around the ahead-biased candidate point. The final
-/// cross-road coordinate is replaced by a deterministic road line + lane.
-/// World spacing and half-width of the roads built in `world.rs`.
-#[cfg(test)]
-const ROAD_HALF: f32 = ROAD_HALF_WIDTH;
-/// Centre of each directional lane. With the traffic half-width included,
-/// every car remains comfortably inside the road's ±4u paved area.
-const LANE_OFFSET: f32 = 1.5;
+/// Fixed bounded search around the player's road cell.
+const SPAWN_CELL_RADIUS: i32 = 3;
+const SPAWN_RETRY_CANDIDATES: usize = 24;
+/// Arc-length lookup resolution. It intentionally matches the committed lane
+/// graph's canonical sampled-length resolution.
+const CURVE_LENGTH_SAMPLES: usize = 32;
+/// Prevent an adversarial delta or malformed route from causing an unbounded
+/// number of cross-cell transitions in one update.
+const MAX_CONNECTOR_TRANSITIONS_PER_FRAME: usize = 8;
 const TRAFFIC_HALF_WIDTH: f32 = 0.5;
 const TRAFFIC_HALF_LENGTH: f32 = 1.0;
 
@@ -284,31 +275,19 @@ impl FromWorld for TrafficAssets {
 // Components
 // ===========================================================================
 
-/// A moving traffic car the player must avoid.
-///
-/// - `speed` — current units per second along the movement axis.
-/// - `axis`  — `true` => drives along world X; `false` => along world Z.
-/// - `dir`   — `+1.0` or `-1.0` (direction along the axis).
-/// - `speed_roll` — immutable deterministic jitter sampled at spawn. The
-///   effective `speed` is rebuilt from this roll every frame, so difficulty,
-///   modifier, and event transitions affect existing traffic immediately.
-///
-/// The entity is **top-level** (world `Transform`) and also carries a
-/// axis-correct `Collider` matching its 1×2 footprint so `physics_collisions`
-/// crashes the car into it. The root `Transform`'s rotation is set at spawn so the
-/// body's front (-Z, where the headlights are) faces the movement direction;
-/// `manage_traffic` rebuilds `speed` and advances `translation` each frame.
+/// A moving traffic car following one directed connector of the world lane
+/// graph. Distance progress is measured in world units along the connector's
+/// canonical sampled arc. `route_rng` is per-car, so route choices do not
+/// depend on query order or unrelated spawns. `velocity` is the current world
+/// XZ curve-tangent velocity consumed directly by collision impact handling.
 #[derive(Component)]
 pub struct Traffic {
     pub(crate) speed: f32,
-    pub(crate) axis: bool,
-    pub(crate) dir: f32,
     pub(crate) speed_roll: f32,
-    /// Finite centre-line arm currently occupied. The car is retired or
-    /// replanned before moving beyond these authoritative bounds.
-    route_min: f32,
-    route_max: f32,
-    route_cross: f32,
+    pub(crate) velocity: Vec2,
+    connector: LaneConnector,
+    distance: f32,
+    route_rng: u32,
 }
 
 /// A wheel directly parented to a [`Traffic`] root. Keeping spin as a scalar
@@ -414,14 +393,11 @@ fn reset_difficulty(mut difficulty: ResMut<Difficulty>, round_active: Res<RoundA
 // Traffic — spawn / move / recycle / cleanup
 // ===========================================================================
 
-/// Per-frame traffic management while `Playing`:
-/// 1. rebuild every car's speed from its fixed jitter and current effects;
-/// 2. advance each traffic car along its axis/direction;
-/// 3. recycle out-of-range cars and deterministically trim target surplus;
-/// 4. top up to the level-, modifier-, and event-derived target count.
-///
-/// Explicit opposing `Car`/`Traffic` and root/wheel filters keep mutable
-/// component accesses disjoint and prevent B0001 as these queries evolve.
+/// Rebuild speed, advance over the pure lane graph, retire only malformed or
+/// safely distant routes, trim offscreen surplus, then make a bounded attempt
+/// to top up the target. No following/headway or intersection reservation is
+/// performed in stage 1; spawn-time overlap prevention is the only traffic to
+/// traffic coordination.
 fn manage_traffic(
     mut commands: Commands,
     assets: Res<TrafficAssets>,
@@ -429,8 +405,8 @@ fn manage_traffic(
     modifier: Res<ActiveModifier>,
     event: Res<ActiveEvent>,
     car: Query<&Transform, (With<Car>, Without<Traffic>)>,
-    mut traffic: Query<
-        (Entity, &mut Traffic, &mut Transform),
+    mut traffic_query: Query<
+        (Entity, &mut Traffic, &mut Transform, &mut Collider),
         (With<Traffic>, Without<TrafficWheel>, Without<Car>),
     >,
     time: Res<Time>,
@@ -440,7 +416,7 @@ fn manage_traffic(
     let Ok(car_t) = car.single() else {
         return;
     };
-    let car_pos = car_t.translation;
+    let car_pos = car_t.translation.xz();
     let dt = time.delta_secs();
     let modifier_speed = modifier.traffic_speed_multiplier();
     let event_speed = event.traffic_speed_multiplier();
@@ -450,110 +426,80 @@ fn manage_traffic(
         event.traffic_count_multiplier(),
     );
 
-    // --- Recompute speed, move, recycle, and trim a decreased target. ---
-    // `speed_roll` is fixed at spawn, so every existing car responds to a
-    // difficulty/modifier/event transition without consuming another random
-    // number. Only in-radius survivors enter the surplus ordering, preventing
-    // deferred despawns from being counted as alive or selected twice.
-    let mut to_despawn: Vec<Entity> = Vec::new();
-    let mut survivors: Vec<(Entity, f32)> = Vec::new();
-    for (entity, mut traffic, mut tf) in &mut traffic {
-        let speed_roll = traffic.speed_roll;
-        traffic.speed =
-            traffic_speed_for_roll(difficulty.level, speed_roll, modifier_speed, event_speed);
-        let axis_vec = if traffic.axis {
-            Vec3::new(traffic.dir, 0.0, 0.0)
-        } else {
-            Vec3::new(0.0, 0.0, traffic.dir)
-        };
-        let next = tf.translation + axis_vec * traffic.speed * dt;
-        let along = if traffic.axis { next.x } else { next.z };
-        if along < traffic.route_min - 1e-4 || along > traffic.route_max + 1e-4 {
-            let endpoint = if traffic.dir > 0.0 {
-                traffic.route_max
-            } else {
-                traffic.route_min
-            };
-            if let Some(segment) = continuation_segment(
-                tf.translation,
-                traffic.axis,
-                traffic.dir,
-                endpoint,
-                traffic.route_min,
-                traffic.route_max,
-            ) {
-                apply_route(&mut traffic, &mut tf, segment);
-                let remaining = (traffic.speed * dt).min(TRAFFIC_HALF_LENGTH);
-                if traffic.axis {
-                    tf.translation.x = endpoint + traffic.dir * remaining;
-                } else {
-                    tf.translation.z = endpoint + traffic.dir * remaining;
-                }
-            } else {
-                to_despawn.push(entity);
-                continue;
-            }
-        } else {
-            tf.translation = next;
+    let mut to_despawn = Vec::new();
+    let mut survivors = Vec::new();
+    let mut occupied = Vec::new();
+    for (entity, mut traffic, mut transform, mut collider) in &mut traffic_query {
+        traffic.speed = traffic_speed_for_roll(
+            difficulty.level,
+            traffic.speed_roll,
+            modifier_speed,
+            event_speed,
+        );
+        if !advance_traffic(&mut traffic, &mut transform, &mut collider, dt) {
+            to_despawn.push(entity);
+            continue;
         }
 
-        let dx = tf.translation.x - car_pos.x;
-        let dz = tf.translation.z - car_pos.z;
-        let distance_squared = dx * dx + dz * dz;
-        if distance_squared > TRAFFIC_KEEP_RADIUS * TRAFFIC_KEEP_RADIUS {
+        let position = transform.translation.xz();
+        let delta = position - car_pos;
+        let distance_squared = delta.length_squared();
+        if !distance_squared.is_finite() || delta.abs().max_element() > TRAFFIC_KEEP_HALF_EXTENT {
             to_despawn.push(entity);
-        } else {
-            survivors.push((entity, distance_squared));
+            continue;
         }
+        let half_extents = Vec2::new(collider.half_x, collider.half_z);
+        survivors.push((
+            entity,
+            distance_squared,
+            aabb_off_gameplay_view(car_pos, position, half_extents),
+        ));
+        occupied.push((position, half_extents));
     }
 
+    // A reduced target never pops a visible car. Only the farthest currently
+    // offscreen survivors are eligible; any remaining surplus naturally
+    // persists until it leaves the conservative gameplay envelope.
     let surplus = traffic_surplus(survivors.len(), target);
     if surplus > 0 {
-        survivors.sort_by(|(entity_a, distance_a), (entity_b, distance_b)| {
+        let mut eligible: Vec<_> = survivors
+            .iter()
+            .filter(|(_, _, offscreen)| *offscreen)
+            .map(|(entity, distance, _)| (*entity, *distance))
+            .collect();
+        eligible.sort_by(|(entity_a, distance_a), (entity_b, distance_b)| {
             traffic_despawn_order(
                 (entity_a.to_bits(), *distance_a),
                 (entity_b.to_bits(), *distance_b),
             )
         });
-        to_despawn.extend(survivors.drain(..surplus).map(|(entity, _)| entity));
+        to_despawn.extend(eligible.into_iter().take(surplus).map(|(entity, _)| entity));
     }
-    let alive = survivors.len();
-    for entity in to_despawn {
-        commands.entity(entity).despawn();
+    to_despawn.sort_by_key(|entity| entity.to_bits());
+    to_despawn.dedup();
+    let alive = survivors
+        .iter()
+        .filter(|(entity, _, _)| !to_despawn.contains(entity))
+        .count();
+    for entity in &to_despawn {
+        commands.entity(*entity).despawn();
     }
 
-    // --- Top up to the level-derived, modifier- and event-adjusted target. ---
-    let mut needed = target.saturating_sub(alive);
-
-    // Car forward (heading 0 => -Z) defines the camera-facing offscreen
-    // envelope. Final snapped positions are validated against this heading.
-    let forward = car_t.rotation * Vec3::NEG_Z;
-    let forward = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
-
-    while needed > 0 {
-        needed -= 1;
-        let axis = rand(&mut seed) < 0.5; // true = X, false = Z
-        let dir = if rand(&mut seed) < 0.5 { 1.0 } else { -1.0 };
-        // Keep this roll in the original speed-roll position in the shared
-        // spawn LCG sequence. Storing it changes no subsequent spawn rolls.
+    let spawn_connectors = traffic_spawn_connectors(car_pos);
+    for _ in 0..target.saturating_sub(alive) {
         let speed_roll = rand(&mut seed);
         let speed =
             traffic_speed_for_roll(difficulty.level, speed_roll, modifier_speed, event_speed);
-        // Choose axis + direction before position: the cross-axis coordinate
-        // is placed on a real deterministic road line, then offset into the
-        // direction's lane so opposing traffic does not overlap.
-        let Some((pos, segment)) =
-            traffic_spawn_pos_on_road(car_pos, forward, axis, dir, &mut seed)
+        let Some(candidate) =
+            traffic_spawn_candidate(car_pos, &spawn_connectors, &occupied, &mut seed)
         else {
             continue;
         };
+        occupied.push((candidate.position, candidate.half_extents));
         spawn_one_traffic(
             &mut commands,
             &assets,
-            pos,
-            segment,
-            axis,
-            dir,
+            candidate,
             speed,
             speed_roll,
             &mut seed,
@@ -655,157 +601,283 @@ fn traffic_despawn_order(a: (u64, f32), b: (u64, f32)) -> Ordering {
     b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0))
 }
 
-/// Enumerate unique finite arms in a bounded square around a point.
-fn nearby_segments(point: Vec3, radius: i32) -> Vec<RoadSegment> {
-    let cx = world_to_road_cell(point.x);
-    let cz = world_to_road_cell(point.z);
-    let mut segments = Vec::new();
-    for gx in cx.saturating_sub(radius)..=cx.saturating_add(radius) {
-        for gz in cz.saturating_sub(radius)..=cz.saturating_add(radius) {
-            segments.extend(road_plan(gx, gz).segments.into_iter().flatten());
-        }
+fn opposite_edge(edge: LaneEdge) -> LaneEdge {
+    match edge {
+        LaneEdge::W => LaneEdge::E,
+        LaneEdge::E => LaneEdge::W,
+        LaneEdge::S => LaneEdge::N,
+        LaneEdge::N => LaneEdge::S,
     }
-    segments
 }
 
-fn segment_matches_axis(segment: RoadSegment, axis: bool) -> bool {
-    matches!(
-        (segment.axis, axis),
-        (RoadAxis::X, true) | (RoadAxis::Z, false)
+fn adjacent_cell(cell: IVec2, exit: LaneEdge) -> Option<IVec2> {
+    match exit {
+        LaneEdge::W => cell.x.checked_sub(1).map(|x| IVec2::new(x, cell.y)),
+        LaneEdge::E => cell.x.checked_add(1).map(|x| IVec2::new(x, cell.y)),
+        LaneEdge::S => cell.y.checked_sub(1).map(|y| IVec2::new(cell.x, y)),
+        LaneEdge::N => cell.y.checked_add(1).map(|y| IVec2::new(cell.x, y)),
+    }
+}
+
+/// Select an outbound movement from the cell across an exit edge. Straight is
+/// weighted strongly over left/right. U-turn connectors are excluded whenever
+/// any non-U-turn route exists, and therefore occur only at a graph stub/dead
+/// end. Stable connector slots plus per-car RNG make this query-order invariant.
+fn next_connector(connector: LaneConnector, route_rng: &mut u32) -> Option<LaneConnector> {
+    let cell = adjacent_cell(connector.cell, connector.to)?;
+    let inbound = opposite_edge(connector.to);
+    let plan = road_plan(cell.x, cell.y);
+    let mut regular = Vec::new();
+    let mut u_turn = None;
+    for candidate in plan.connectors.into_iter().flatten() {
+        if candidate.from != inbound {
+            continue;
+        }
+        if candidate.turn == LaneTurn::UTurn {
+            u_turn = Some(candidate);
+        } else {
+            regular.push(candidate);
+        }
+    }
+    if regular.is_empty() {
+        return u_turn;
+    }
+    regular.sort_by_key(|candidate| candidate.slot);
+    let total_weight: u32 = regular
+        .iter()
+        .map(|candidate| match candidate.turn {
+            LaneTurn::Straight => 8,
+            LaneTurn::Left | LaneTurn::Right => 2,
+            LaneTurn::UTurn => 0,
+        })
+        .sum();
+    let mut roll = next_random_u32(route_rng) % total_weight;
+    for candidate in regular {
+        let weight = if candidate.turn == LaneTurn::Straight {
+            8
+        } else {
+            2
+        };
+        if roll < weight {
+            return Some(candidate);
+        }
+        roll -= weight;
+    }
+    None
+}
+
+/// Arc-length lookup returning a point and tangent at a distance. Fixed linear
+/// samples give deterministic distance motion and make partitioned frame deltas
+/// agree up to the graph's sampling tolerance.
+fn curve_at_distance(curve: LaneCurve, distance: f32) -> Option<(Vec2, Vec2)> {
+    if !distance.is_finite() {
+        return None;
+    }
+    let total = curve.sampled_length_with_steps(CURVE_LENGTH_SAMPLES);
+    if !total.is_finite() || total <= f32::EPSILON {
+        return None;
+    }
+    let target = distance.clamp(0.0, total);
+    let mut previous = curve.eval(0.0);
+    let mut traversed = 0.0;
+    for step in 1..=CURVE_LENGTH_SAMPLES {
+        let t = step as f32 / CURVE_LENGTH_SAMPLES as f32;
+        let point = curve.eval(t);
+        let segment_length = previous.distance(point);
+        if !segment_length.is_finite() {
+            return None;
+        }
+        if traversed + segment_length >= target {
+            let local = if segment_length > f32::EPSILON {
+                (target - traversed) / segment_length
+            } else {
+                0.0
+            };
+            let sample_t = (step - 1) as f32 / CURVE_LENGTH_SAMPLES as f32
+                + local / CURVE_LENGTH_SAMPLES as f32;
+            let tangent = curve.tangent(sample_t);
+            return (tangent.length_squared() > 0.5 && tangent.is_finite())
+                .then_some((previous.lerp(point, local), tangent));
+        }
+        traversed += segment_length;
+        previous = point;
+    }
+    let tangent = curve.tangent(1.0);
+    (tangent.length_squared() > 0.5 && tangent.is_finite())
+        .then_some((curve.control_points[3], tangent))
+}
+
+fn traffic_half_extents(tangent: Vec2) -> Vec2 {
+    let tangent = tangent.normalize_or_zero().abs();
+    Vec2::new(
+        tangent.y * TRAFFIC_HALF_WIDTH + tangent.x * TRAFFIC_HALF_LENGTH,
+        tangent.x * TRAFFIC_HALF_WIDTH + tangent.y * TRAFFIC_HALF_LENGTH,
     )
 }
 
-fn lane_offset(dir: f32) -> f32 {
-    dir.signum() * LANE_OFFSET
-}
-
-fn route_bounds(segment: RoadSegment) -> (f32, f32, f32) {
-    match segment.axis {
-        RoadAxis::X => (
-            segment.start.x.min(segment.end.x),
-            segment.start.x.max(segment.end.x),
-            segment.start.y,
-        ),
-        RoadAxis::Z => (
-            segment.start.y.min(segment.end.y),
-            segment.start.y.max(segment.end.y),
-            segment.start.x,
-        ),
-    }
-}
-
-fn position_on_segment(segment: RoadSegment, along: f32, dir: f32) -> Vec3 {
-    let (_, _, cross) = route_bounds(segment);
-    match segment.axis {
-        RoadAxis::X => Vec3::new(along, 0.0, cross + lane_offset(dir)),
-        RoadAxis::Z => Vec3::new(cross + lane_offset(dir), 0.0, along),
-    }
-}
-
-fn apply_route(traffic: &mut Traffic, transform: &mut Transform, segment: RoadSegment) {
-    let (min, max, cross) = route_bounds(segment);
-    traffic.route_min = min;
-    traffic.route_max = max;
-    traffic.route_cross = cross;
-    if traffic.axis {
-        transform.translation.z = cross + lane_offset(traffic.dir);
-    } else {
-        transform.translation.x = cross + lane_offset(traffic.dir);
-    }
-}
-
-/// Continue only onto a collinear finite arm meeting the endpoint. This is a
-/// bounded deterministic replan; turns are intentionally not attempted by
-/// axis-only traffic, so dead ends and corners safely retire the car.
-fn continuation_segment(
-    position: Vec3,
-    axis: bool,
-    dir: f32,
-    endpoint: f32,
-    old_min: f32,
-    old_max: f32,
-) -> Option<RoadSegment> {
-    nearby_segments(position, 1)
-        .into_iter()
-        .filter(|segment| segment_matches_axis(*segment, axis))
-        .filter(|segment| {
-            let (min, max, cross) = route_bounds(*segment);
-            (cross
-                - if axis {
-                    position.z - lane_offset(dir)
-                } else {
-                    position.x - lane_offset(dir)
-                })
-            .abs()
-                < 1e-3
-                && if dir > 0.0 {
-                    (min - endpoint).abs() < 1e-3 && max > old_max + 1e-3
-                } else {
-                    (max - endpoint).abs() < 1e-3 && min < old_min - 1e-3
-                }
-        })
-        .min_by_key(|segment| (segment.gx, segment.gz, segment.socket))
-}
-
-/// Pure post-snap safety policy. Only XZ distance and heading projection
-/// matter; the selected point has already been constrained to a finite arm.
-fn traffic_spawn_is_safe(car_pos: Vec3, forward: Vec3, pos: Vec3) -> bool {
-    let heading = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
-    if heading == Vec3::ZERO {
+fn apply_traffic_pose(
+    traffic: &mut Traffic,
+    transform: &mut Transform,
+    collider: &mut Collider,
+) -> bool {
+    let Some((position, tangent)) = curve_at_distance(traffic.connector.curve, traffic.distance)
+    else {
+        traffic.velocity = Vec2::ZERO;
+        return false;
+    };
+    if !traffic.speed.is_finite() || traffic.speed < 0.0 {
+        traffic.velocity = Vec2::ZERO;
         return false;
     }
-    let delta = Vec3::new(pos.x - car_pos.x, 0.0, pos.z - car_pos.z);
-    let projection = delta.dot(heading);
-    projection.is_finite()
-        && delta.length_squared().is_finite()
-        && projection >= SPAWN_AHEAD_MIN - SPAWN_SAFETY_TOLERANCE
-        && delta.length_squared() >= SPAWN_SAFE_RADIUS.powi(2)
+    traffic.velocity = tangent * traffic.speed;
+    transform.translation.x = position.x;
+    transform.translation.z = position.y;
+    transform.rotation = Quat::from_rotation_y((-tangent.x).atan2(-tangent.y));
+    let half = traffic_half_extents(tangent);
+    collider.half_x = half.x;
+    collider.half_z = half.y;
+    transform.translation.is_finite() && traffic.velocity.is_finite() && half.is_finite()
 }
 
-/// Select an ahead point that leaves a safe runway to the route endpoint.
-/// Candidate work and fallback work are both explicitly bounded.
-fn traffic_spawn_pos_on_road(
-    car_pos: Vec3,
-    forward: Vec3,
-    axis: bool,
-    dir: f32,
-    seed: &mut u32,
-) -> Option<(Vec3, RoadSegment)> {
-    let heading = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
-    let heading = if heading == Vec3::ZERO {
-        Vec3::NEG_Z
-    } else {
-        heading
-    };
-    let candidates = nearby_segments(car_pos + heading * SPAWN_FALLBACK_AHEAD, 3);
-    let mut valid = Vec::new();
-    for segment in candidates {
-        if !segment_matches_axis(segment, axis) {
-            continue;
+fn advance_traffic(
+    traffic: &mut Traffic,
+    transform: &mut Transform,
+    collider: &mut Collider,
+    delta_seconds: f32,
+) -> bool {
+    if !delta_seconds.is_finite() || delta_seconds < 0.0 || !traffic.distance.is_finite() {
+        traffic.velocity = Vec2::ZERO;
+        return false;
+    }
+    let mut remaining = traffic.speed * delta_seconds;
+    if !remaining.is_finite() {
+        traffic.velocity = Vec2::ZERO;
+        return false;
+    }
+    for transition in 0..=MAX_CONNECTOR_TRANSITIONS_PER_FRAME {
+        let length = traffic.connector.curve.length();
+        if !length.is_finite()
+            || length <= f32::EPSILON
+            || traffic.distance < 0.0
+            || traffic.distance > length + 1e-3
+        {
+            traffic.velocity = Vec2::ZERO;
+            return false;
         }
-        let (min, max, _) = route_bounds(segment);
-        // Sample inside the arm and reserve a full car length before despawn.
-        let low = min + TRAFFIC_HALF_LENGTH;
-        let high = max - TRAFFIC_HALF_LENGTH;
-        if high <= low {
-            continue;
+        traffic.distance = traffic.distance.min(length);
+        let available = length - traffic.distance;
+        if remaining <= available {
+            traffic.distance += remaining;
+            return apply_traffic_pose(traffic, transform, collider);
         }
-        for attempt in 0..SPAWN_RETRY_CANDIDATES {
-            let t = if attempt == 0 { 0.5 } else { rand(seed) };
-            let pos = position_on_segment(segment, low + (high - low) * t, dir);
-            let along = if axis { pos.x } else { pos.z };
-            let runway = if dir > 0.0 { max - along } else { along - min };
-            if runway >= TRAFFIC_HALF_LENGTH && traffic_spawn_is_safe(car_pos, heading, pos) {
-                valid.push((pos, segment));
-                break;
-            }
+        if transition == MAX_CONNECTOR_TRANSITIONS_PER_FRAME {
+            traffic.velocity = Vec2::ZERO;
+            return false;
+        }
+        remaining -= available;
+        let Some(next) = next_connector(traffic.connector, &mut traffic.route_rng) else {
+            traffic.velocity = Vec2::ZERO;
+            return false;
+        };
+        traffic.connector = next;
+        traffic.distance = 0.0;
+    }
+    traffic.velocity = Vec2::ZERO;
+    false
+}
+
+fn aabb_off_gameplay_view(car_pos: Vec2, position: Vec2, half: Vec2) -> bool {
+    let delta = (position - car_pos).abs();
+    delta.x - half.x > GAMEPLAY_GROUND_HALF_EXTENT || delta.y - half.y > GAMEPLAY_GROUND_HALF_EXTENT
+}
+
+fn aabb_overlaps(a_position: Vec2, a_half: Vec2, b_position: Vec2, b_half: Vec2) -> bool {
+    let delta = (a_position - b_position).abs();
+    delta.x < a_half.x + b_half.x && delta.y < a_half.y + b_half.y
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TrafficSpawnCandidate {
+    position: Vec2,
+    half_extents: Vec2,
+    tangent: Vec2,
+    connector: LaneConnector,
+    distance: f32,
+    route_rng: u32,
+}
+
+/// Bounded deterministic connector candidates around the player. A candidate
+/// must be wholly beyond the portrait-safe gameplay bound, outside player
+/// clearance, and separated from every existing traffic conservative AABB.
+/// Failure is expected and simply defers target top-up to a later frame.
+fn traffic_spawn_connectors(car_pos: Vec2) -> Vec<LaneConnector> {
+    let center_x = world_to_road_cell(car_pos.x);
+    let center_z = world_to_road_cell(car_pos.y);
+    let mut connectors = Vec::with_capacity(((SPAWN_CELL_RADIUS * 2 + 1).pow(2) * 12) as usize);
+    for gx in
+        center_x.saturating_sub(SPAWN_CELL_RADIUS)..=center_x.saturating_add(SPAWN_CELL_RADIUS)
+    {
+        for gz in
+            center_z.saturating_sub(SPAWN_CELL_RADIUS)..=center_z.saturating_add(SPAWN_CELL_RADIUS)
+        {
+            let plan = road_plan(gx, gz);
+            let has_non_u_turn = plan
+                .connectors
+                .iter()
+                .flatten()
+                .any(|connector| connector.turn != LaneTurn::UTurn);
+            connectors.extend(
+                plan.connectors
+                    .into_iter()
+                    .flatten()
+                    .filter(|connector| !has_non_u_turn || connector.turn != LaneTurn::UTurn),
+            );
         }
     }
-    if valid.is_empty() {
+    connectors
+}
+
+fn traffic_spawn_candidate(
+    car_pos: Vec2,
+    connectors: &[LaneConnector],
+    occupied: &[(Vec2, Vec2)],
+    seed: &mut u32,
+) -> Option<TrafficSpawnCandidate> {
+    if !car_pos.is_finite() || connectors.is_empty() {
         return None;
     }
-    let index = ((rand(seed) * valid.len() as f32) as usize).min(valid.len() - 1);
-    Some(valid[index])
+
+    for _ in 0..SPAWN_RETRY_CANDIDATES {
+        let index = (next_random_u32(seed) as usize) % connectors.len();
+        let connector = connectors[index];
+        let length = connector.curve.length();
+        if !length.is_finite() || length <= 2.0 * TRAFFIC_HALF_LENGTH {
+            continue;
+        }
+        let distance = TRAFFIC_HALF_LENGTH + rand(seed) * (length - 2.0 * TRAFFIC_HALF_LENGTH);
+        let Some((position, tangent)) = curve_at_distance(connector.curve, distance) else {
+            continue;
+        };
+        let half_extents = traffic_half_extents(tangent);
+        if !aabb_off_gameplay_view(car_pos, position, half_extents)
+            || (position - car_pos).abs().max_element() > TRAFFIC_KEEP_HALF_EXTENT
+            || position.distance_squared(car_pos) < SPAWN_SAFE_RADIUS.powi(2)
+            || occupied.iter().any(|&(other_position, other_half)| {
+                aabb_overlaps(position, half_extents, other_position, other_half)
+            })
+        {
+            continue;
+        }
+        return Some(TrafficSpawnCandidate {
+            position,
+            half_extents,
+            tangent,
+            connector,
+            distance,
+            route_rng: next_random_u32(seed).max(1),
+        });
+    }
+    None
 }
 
 /// Deterministic silhouette selection from the shared traffic LCG state.
@@ -820,65 +892,36 @@ fn traffic_kind(seed: u32) -> TrafficKind {
     }
 }
 
-/// Spawn one traffic car (top-level) with a deterministic sedan/van shell,
-/// lights, wheels, shadow, an axis-correct `Collider`, and the `Traffic` tag.
-/// The root `Transform`'s rotation orients the body's front
-/// (-Z) toward the movement direction so the headlights lead.
+/// Spawn one top-level traffic car. The root front (-Z), stored velocity, and
+/// conservative collider all derive from the same connector tangent.
 fn spawn_one_traffic(
     commands: &mut Commands,
     assets: &TrafficAssets,
-    pos: Vec3,
-    segment: RoadSegment,
-    axis: bool,
-    dir: f32,
+    candidate: TrafficSpawnCandidate,
     speed: f32,
     speed_roll: f32,
     seed: &mut u32,
 ) {
-    // Movement direction vector in the XZ plane.
-    let dir_vec = if axis {
-        Vec3::new(dir, 0.0, 0.0)
-    } else {
-        Vec3::new(0.0, 0.0, dir)
-    };
-    // Heading so the body's -Z (front, where the headlights are) faces dir.
-    // Same convention as `car.rs::move_car` / `chickens.rs::wander_chickens`:
-    // forward = (-sin h, 0, -cos h) => h = atan2(-dx, -dz).
-    let heading = (-dir_vec.x).atan2(-dir_vec.z);
-    let rotation = Quat::from_rotation_y(heading);
-
+    let heading = (-candidate.tangent.x).atan2(-candidate.tangent.y);
     let kind = traffic_kind(*seed);
     let kind_idx = kind.index();
-    let (route_min, route_max, route_cross) = route_bounds(segment);
     let color_idx = (rand(seed) * assets.body_mats.len() as f32) as usize % assets.body_mats.len();
-    // The root collider remains the original 1×2 footprint for both visual
-    // silhouettes, preserving collision behaviour and fairness.
     commands
         .spawn((
-            Transform::from_translation(pos).with_rotation(rotation),
+            Transform::from_xyz(candidate.position.x, 0.0, candidate.position.y)
+                .with_rotation(Quat::from_rotation_y(heading)),
             Visibility::default(),
             Traffic {
                 speed,
-                axis,
-                dir,
                 speed_roll,
-                route_min,
-                route_max,
-                route_cross,
+                velocity: candidate.tangent * speed,
+                connector: candidate.connector,
+                distance: candidate.distance,
+                route_rng: candidate.route_rng,
             },
             Collider {
-                // Collider is an axis-aligned world box, so swap the visual
-                // local extents when the root is rotated onto world X.
-                half_x: if axis {
-                    TRAFFIC_HALF_LENGTH
-                } else {
-                    TRAFFIC_HALF_WIDTH
-                },
-                half_z: if axis {
-                    TRAFFIC_HALF_WIDTH
-                } else {
-                    TRAFFIC_HALF_LENGTH
-                },
+                half_x: candidate.half_extents.x,
+                half_z: candidate.half_extents.y,
             },
         ))
         .with_children(|root| {
@@ -1042,9 +1085,13 @@ fn despawn_marker<M: Component>(mut commands: Commands, q: Query<Entity, With<M>
 /// Tiny LCG (matches `world.rs` / `chickens.rs` / `pickups.rs`) — deterministic
 /// pseudo-random 0..1 without pulling in the `rand` crate (keeps the web build
 /// lean).
-fn rand(seed: &mut u32) -> f32 {
+fn next_random_u32(seed: &mut u32) -> u32 {
     *seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
-    (*seed as f32) / (u32::MAX as f32)
+    *seed
+}
+
+fn rand(seed: &mut u32) -> f32 {
+    next_random_u32(seed) as f32 / u32::MAX as f32
 }
 
 /// Seed a `Local<u32>` RNG on first use so the LCG never starts from 0 (it
@@ -1284,146 +1331,294 @@ mod tests {
         assert_eq!(traffic_wheel_spin_delta(0.0, 1.0), 0.0);
     }
 
-    fn assert_safe_road_spawn(
-        car: Vec3,
-        forward: Vec3,
-        axis: bool,
-        dir: f32,
-        result: Option<(Vec3, RoadSegment)>,
-    ) {
-        let Some((pos, segment)) = result else {
-            return;
-        };
-        let heading = Vec3::new(forward.x, 0.0, forward.z).normalize();
-        let delta = Vec3::new(pos.x - car.x, 0.0, pos.z - car.z);
-        let (min, max, cross) = route_bounds(segment);
-        let along = if axis { pos.x } else { pos.z };
-        let actual_cross = if axis { pos.z } else { pos.x };
-        assert!(segment_matches_axis(segment, axis));
-        assert!((actual_cross - cross - lane_offset(dir)).abs() < 1e-4);
-        assert!(LANE_OFFSET + TRAFFIC_HALF_WIDTH < ROAD_HALF);
-        assert!((min + TRAFFIC_HALF_LENGTH..=max - TRAFFIC_HALF_LENGTH).contains(&along));
-        assert!(delta.length() >= SPAWN_SAFE_RADIUS);
-        assert!(delta.dot(heading) >= SPAWN_AHEAD_MIN - SPAWN_SAFETY_TOLERANCE);
-        assert!(traffic_spawn_is_safe(car, heading, pos));
+    fn first_crossing_with_turn(turn: LaneTurn) -> LaneConnector {
+        for gx in -20..=20 {
+            for gz in -20..=20 {
+                let plan = road_plan(gx, gz);
+                if let Some(connector) = plan
+                    .connectors
+                    .into_iter()
+                    .flatten()
+                    .find(|connector| connector.turn == turn)
+                {
+                    return connector;
+                }
+            }
+        }
+        panic!("no connector with requested turn")
     }
 
-    #[test]
-    fn many_seeds_and_headings_spawn_safely_on_directional_road_lanes() {
-        let cars = [
-            Vec3::ZERO,
-            Vec3::new(137.0, 0.0, -93.0),
-            Vec3::new(-321.25, 0.0, 278.75),
-        ];
-        let headings = [
-            Vec3::NEG_Z,
-            Vec3::X,
-            Vec3::Z,
-            Vec3::NEG_X,
-            Vec3::new(1.0, 0.0, 1.0),
-            Vec3::new(0.8, 0.0, -0.6),
-            Vec3::new(-0.31, 0.0, -0.95),
-        ];
-
-        for (car_index, car) in cars.into_iter().enumerate() {
-            for (heading_index, forward) in headings.into_iter().enumerate() {
-                for axis in [false, true] {
-                    for dir in [-1.0, 1.0] {
-                        for seed_index in 0_u32..96 {
-                            let mut seed = 0x1234_5678_u32
-                                .wrapping_add(seed_index.wrapping_mul(0x9E37_79B9))
-                                .wrapping_add((car_index as u32) << 12)
-                                .wrapping_add((heading_index as u32) << 20);
-                            let result =
-                                traffic_spawn_pos_on_road(car, forward, axis, dir, &mut seed);
-                            assert_safe_road_spawn(car, forward, axis, dir, result);
-                        }
+    fn source_with_next_turns(required: &[LaneTurn]) -> LaneConnector {
+        for gx in -40..=40 {
+            for gz in -40..=40 {
+                for source in road_plan(gx, gz).connectors.into_iter().flatten() {
+                    let cell = adjacent_cell(source.cell, source.to).unwrap();
+                    let inbound = opposite_edge(source.to);
+                    let choices: Vec<_> = road_plan(cell.x, cell.y)
+                        .connectors
+                        .into_iter()
+                        .flatten()
+                        .filter(|candidate| {
+                            candidate.from == inbound && candidate.turn != LaneTurn::UTurn
+                        })
+                        .collect();
+                    if choices.len() == required.len()
+                        && required
+                            .iter()
+                            .all(|turn| choices.iter().any(|choice| choice.turn == *turn))
+                    {
+                        return source;
                     }
                 }
             }
         }
+        panic!("no transition with requested outbound turns")
     }
 
     #[test]
-    fn spawn_search_is_bounded_and_may_safely_decline() {
-        let mut seed = 7;
-        let result = traffic_spawn_pos_on_road(
-            Vec3::new(83.25, 0.0, -117.75),
-            Vec3::NEG_Z,
-            true,
-            1.0,
-            &mut seed,
+    fn route_selection_is_deterministic_prefers_regular_and_uses_stub_uturn() {
+        let source = source_with_next_turns(&[LaneTurn::Straight, LaneTurn::Left, LaneTurn::Right]);
+        let mut seed_a = 0x1234_5678;
+        let mut seed_b = seed_a;
+        assert_eq!(
+            next_connector(source, &mut seed_a),
+            next_connector(source, &mut seed_b)
         );
-        assert_safe_road_spawn(
-            Vec3::new(83.25, 0.0, -117.75),
-            Vec3::NEG_Z,
-            true,
-            1.0,
-            result,
-        );
-    }
+        assert_eq!(seed_a, seed_b);
 
-    #[test]
-    fn spawn_is_deterministic_for_identical_inputs_and_lcg_state() {
-        let car = Vec3::new(17.25, 0.0, -81.5);
-        let forward = Vec3::new(-0.73, 0.0, 0.41);
-        for axis in [false, true] {
-            for dir in [-1.0, 1.0] {
-                for initial_seed in [1, 2, 0x1234_5678, 0xCAFE_BABE, u32::MAX] {
-                    let mut seed_a = initial_seed;
-                    let mut seed_b = initial_seed;
-                    let a = traffic_spawn_pos_on_road(car, forward, axis, dir, &mut seed_a);
-                    let b = traffic_spawn_pos_on_road(car, forward, axis, dir, &mut seed_b);
-                    assert_eq!(a, b);
-                    assert_eq!(seed_a, seed_b);
+        // Across many real crossings, U-turn is never selected when another
+        // movement exists. Straight's 8:2:2 weighting also dominates turns.
+        let mut counts = [0_usize; 4];
+        for seed in 1..=512_u32 {
+            let mut route_seed = seed;
+            if let Some(next) = next_connector(source, &mut route_seed) {
+                counts[match next.turn {
+                    LaneTurn::Straight => 0,
+                    LaneTurn::Left => 1,
+                    LaneTurn::Right => 2,
+                    LaneTurn::UTurn => 3,
+                }] += 1;
+            }
+        }
+        assert_eq!(counts[3], 0);
+        assert!(counts[0] > counts[1] && counts[0] > counts[2]);
+
+        // Find a real transition whose adjacent tile is a stub. Its only legal
+        // continuation is an explicit U-turn.
+        let mut found_stub = false;
+        'cells: for gx in -40..=40 {
+            for gz in -40..=40 {
+                for connector in road_plan(gx, gz).connectors.into_iter().flatten() {
+                    let cell = adjacent_cell(connector.cell, connector.to).unwrap();
+                    let inbound = opposite_edge(connector.to);
+                    let choices: Vec<_> = road_plan(cell.x, cell.y)
+                        .connectors
+                        .into_iter()
+                        .flatten()
+                        .filter(|candidate| candidate.from == inbound)
+                        .collect();
+                    if choices.len() == 1 && choices[0].turn == LaneTurn::UTurn {
+                        assert_eq!(next_connector(connector, &mut 7), Some(choices[0]));
+                        found_stub = true;
+                        break 'cells;
+                    }
                 }
             }
+        }
+        assert!(found_stub);
+    }
+
+    fn traffic_on(connector: LaneConnector, speed: f32) -> (Traffic, Transform, Collider) {
+        let mut traffic = Traffic {
+            speed,
+            speed_roll: 0.5,
+            velocity: Vec2::ZERO,
+            connector,
+            distance: 0.0,
+            route_rng: 0xCAFE_BABE,
+        };
+        let mut transform = Transform::default();
+        let mut collider = Collider {
+            half_x: 0.0,
+            half_z: 0.0,
+        };
+        assert!(apply_traffic_pose(
+            &mut traffic,
+            &mut transform,
+            &mut collider
+        ));
+        (traffic, transform, collider)
+    }
+
+    #[test]
+    fn route_extends_multiple_cells_beyond_streamed_five_by_five() {
+        let connector = source_with_next_turns(&[LaneTurn::Straight]);
+        let mut extended = None;
+        for route_rng in 1..=256 {
+            let (mut traffic, mut transform, mut collider) = traffic_on(connector, 10.0);
+            traffic.route_rng = route_rng;
+            let start_cell = traffic.connector.cell;
+            let mut furthest = 0;
+            for _ in 0..400 {
+                assert!(advance_traffic(
+                    &mut traffic,
+                    &mut transform,
+                    &mut collider,
+                    0.25
+                ));
+                furthest = furthest.max((traffic.connector.cell - start_cell).abs().max_element());
+            }
+            if furthest > 2 {
+                extended = Some((transform, traffic.velocity));
+                break;
+            }
+        }
+        let (transform, velocity) = extended.expect("a deterministic route leaves the 5x5 stream");
+        assert!(transform.translation.is_finite() && velocity.is_finite());
+    }
+
+    #[test]
+    fn connector_transitions_cover_straight_corner_t_and_cross() {
+        for required in [
+            vec![LaneTurn::Straight],
+            vec![LaneTurn::Left],
+            vec![LaneTurn::Straight, LaneTurn::Left],
+            vec![LaneTurn::Straight, LaneTurn::Left, LaneTurn::Right],
+        ] {
+            let source = source_with_next_turns(&required);
+            let mut selected = Vec::new();
+            for seed in 1..=256_u32 {
+                let mut rng = seed.wrapping_mul(0x9E37_79B9);
+                if let Some(connector) = next_connector(source, &mut rng) {
+                    if !selected.contains(&connector.turn) {
+                        selected.push(connector.turn);
+                    }
+                }
+            }
+            assert!(
+                required.iter().all(|turn| selected.contains(turn)),
+                "required {required:?}, selected {selected:?}"
+            );
+            assert!(!selected.contains(&LaneTurn::UTurn));
         }
     }
 
     #[test]
-    fn opposing_directions_select_separate_safe_lanes() {
-        assert_eq!(lane_offset(1.0), LANE_OFFSET);
-        assert_eq!(lane_offset(-1.0), -LANE_OFFSET);
-        assert!(2.0 * LANE_OFFSET > 2.0 * TRAFFIC_HALF_WIDTH);
-        assert!(LANE_OFFSET + TRAFFIC_HALF_WIDTH < ROAD_HALF);
-
-        let segment = road_plan(0, 0)
-            .segments
-            .into_iter()
-            .flatten()
-            .next()
-            .unwrap();
-        let axis = segment.axis == RoadAxis::X;
-        let (min, max, _) = route_bounds(segment);
-        let negative = position_on_segment(segment, (min + max) * 0.5, -1.0);
-        let positive = position_on_segment(segment, (min + max) * 0.5, 1.0);
-        let separation = if axis {
-            positive.z - negative.z
-        } else {
-            positive.x - negative.x
-        };
-        assert!((separation - 2.0 * LANE_OFFSET).abs() < 1e-5);
+    fn distance_partition_yaw_velocity_and_collider_agree() {
+        let connector = first_crossing_with_turn(LaneTurn::Left);
+        let (mut one, mut one_tf, mut one_box) = traffic_on(connector, 7.0);
+        let (mut split, mut split_tf, mut split_box) = traffic_on(connector, 7.0);
+        assert!(advance_traffic(&mut one, &mut one_tf, &mut one_box, 1.0));
+        for _ in 0..10 {
+            assert!(advance_traffic(
+                &mut split,
+                &mut split_tf,
+                &mut split_box,
+                0.1
+            ));
+        }
+        assert!(one_tf.translation.distance(split_tf.translation) < 2e-3);
+        assert!(one.velocity.distance(split.velocity) < 2e-3);
+        let root_forward = (one_tf.rotation * Vec3::NEG_Z).xz();
+        assert!(root_forward.dot(one.velocity.normalize()) > 0.999);
+        let expected = traffic_half_extents(one.velocity.normalize());
+        assert!((one_box.half_x - expected.x).abs() < 1e-5);
+        assert!((one_box.half_z - expected.y).abs() < 1e-5);
     }
 
     #[test]
-    fn safety_predicate_rejects_player_circle_and_not_ahead() {
-        let car = Vec3::new(4.0, 0.0, -7.0);
-        let forward = Vec3::NEG_Z;
-        assert!(!traffic_spawn_is_safe(
-            car,
-            forward,
-            car + forward * (SPAWN_SAFE_RADIUS - 0.1),
+    fn spawn_is_deterministic_offscreen_and_rejects_player_or_traffic_overlap() {
+        let car = Vec2::new(17.25, -81.5);
+        for initial_seed in [1, 2, 0x1234_5678, 0xCAFE_BABE, u32::MAX] {
+            let mut seed_a = initial_seed;
+            let mut seed_b = initial_seed;
+            let connectors = traffic_spawn_connectors(car);
+            let a = traffic_spawn_candidate(car, &connectors, &[], &mut seed_a);
+            let b = traffic_spawn_candidate(car, &connectors, &[], &mut seed_b);
+            assert_eq!(
+                a.map(|candidate| (candidate.connector, candidate.distance)),
+                b.map(|candidate| (candidate.connector, candidate.distance))
+            );
+            assert_eq!(seed_a, seed_b);
+            if let Some(candidate) = a {
+                assert!(aabb_off_gameplay_view(
+                    car,
+                    candidate.position,
+                    candidate.half_extents
+                ));
+                assert!(candidate.position.distance(car) >= SPAWN_SAFE_RADIUS);
+                let occupied = [(candidate.position, candidate.half_extents)];
+                let mut blocked_seed = initial_seed;
+                let blocked =
+                    traffic_spawn_candidate(car, &connectors, &occupied, &mut blocked_seed);
+                if let Some(other) = blocked {
+                    assert!(!aabb_overlaps(
+                        other.position,
+                        other.half_extents,
+                        candidate.position,
+                        candidate.half_extents
+                    ));
+                }
+            }
+        }
+        assert!(!aabb_off_gameplay_view(Vec2::ZERO, Vec2::ZERO, Vec2::ONE));
+    }
+
+    #[test]
+    fn visible_route_and_surplus_remain_inside_retention_bound() {
+        let car = Vec2::new(12.0, -8.0);
+        let half = Vec2::new(TRAFFIC_HALF_LENGTH, TRAFFIC_HALF_WIDTH);
+        let visible = car + Vec2::new(GAMEPLAY_GROUND_HALF_EXTENT + half.x - 0.1, 0.0);
+        assert!(!aabb_off_gameplay_view(car, visible, half));
+        assert!((visible - car).abs().max_element() < TRAFFIC_KEEP_HALF_EXTENT);
+        assert_eq!(traffic_surplus(4, 1), 3);
+        // Runtime surplus eligibility uses this exact predicate, so all three
+        // visible surplus entities remain until they clear the view envelope.
+        let eligible = [visible; 3]
+            .into_iter()
+            .filter(|position| aabb_off_gameplay_view(car, *position, half))
+            .count();
+        assert_eq!(eligible, 0);
+    }
+
+    #[test]
+    fn coordinate_edges_retire_without_integer_overflow() {
+        assert_eq!(adjacent_cell(IVec2::new(i32::MAX, 0), LaneEdge::E), None);
+        assert_eq!(adjacent_cell(IVec2::new(i32::MIN, 0), LaneEdge::W), None);
+        assert_eq!(adjacent_cell(IVec2::new(0, i32::MAX), LaneEdge::N), None);
+        assert_eq!(adjacent_cell(IVec2::new(0, i32::MIN), LaneEdge::S), None);
+    }
+
+    #[test]
+    fn malformed_routes_fail_finitely() {
+        let valid = first_crossing_with_turn(LaneTurn::Straight);
+        let malformed = LaneConnector {
+            curve: LaneCurve::new(Vec2::NAN, Vec2::ZERO, Vec2::ZERO, Vec2::ZERO),
+            ..valid
+        };
+        let (mut traffic, mut transform, mut collider) = traffic_on(valid, 5.0);
+        traffic.connector = malformed;
+        assert!(!advance_traffic(
+            &mut traffic,
+            &mut transform,
+            &mut collider,
+            0.1
         ));
-        assert!(!traffic_spawn_is_safe(
-            car,
-            forward,
-            car - forward * (SPAWN_AHEAD_MIN + 10.0),
+        assert_eq!(traffic.velocity, Vec2::ZERO);
+        traffic.connector = valid;
+        traffic.distance = valid.curve.length() + 1.0;
+        assert!(!advance_traffic(
+            &mut traffic,
+            &mut transform,
+            &mut collider,
+            0.0
         ));
-        assert!(traffic_spawn_is_safe(
-            car,
-            forward,
-            car + forward * SPAWN_AHEAD_MIN,
+        traffic.distance = 0.0;
+        assert!(!advance_traffic(
+            &mut traffic,
+            &mut transform,
+            &mut collider,
+            f32::NAN
         ));
     }
 

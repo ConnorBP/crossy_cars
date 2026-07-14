@@ -1881,15 +1881,6 @@ fn player_velocity(heading: f32, speed: f32) -> Vec2 {
     Vec2::new(-heading.sin(), -heading.cos()) * speed
 }
 
-/// Traffic velocity in the world XZ plane from its axis/direction contract.
-fn traffic_velocity(axis: bool, dir: f32, speed: f32) -> Vec2 {
-    if axis {
-        Vec2::new(dir * speed, 0.0)
-    } else {
-        Vec2::new(0.0, dir * speed)
-    }
-}
-
 /// Impact magnitude against either an immobile obstacle or moving traffic.
 /// Static obstacles retain the player's absolute speed; traffic uses relative
 /// velocity, covering a parked player being rammed as well as closing speeds.
@@ -2081,8 +2072,10 @@ pub fn physics_collisions(
         ) else {
             continue;
         };
-        let traffic_vel =
-            traffic.map(|traffic| traffic_velocity(traffic.axis, traffic.dir, traffic.speed));
+        // Traffic owns its current curve-tangent velocity. Using that stored
+        // vector preserves relative-impact semantics through corners instead
+        // of reconstructing an obsolete axis/direction approximation.
+        let traffic_vel = traffic.map(|traffic| traffic.velocity);
         contacts.push(SolidContact {
             normal,
             penetration,
@@ -3241,28 +3234,28 @@ mod tests {
     #[test]
     fn parked_player_rammed_by_traffic_has_traffic_impact() {
         let player = player_velocity(0.0, 0.0);
-        let traffic = traffic_velocity(true, 1.0, 6.0);
+        let traffic = Vec2::new(6.0, 0.0);
         assert!((obstacle_impact_speed(player, Some(traffic)) - 6.0).abs() < 1e-5);
     }
 
     #[test]
     fn head_on_traffic_impact_sums_speeds() {
         let player = player_velocity(0.0, 8.0);
-        let traffic = traffic_velocity(false, 1.0, 5.0);
+        let traffic = Vec2::new(0.0, 5.0);
         assert!((obstacle_impact_speed(player, Some(traffic)) - 13.0).abs() < 1e-5);
     }
 
     #[test]
     fn same_direction_traffic_impact_is_speed_difference() {
         let player = player_velocity(0.0, 8.0);
-        let traffic = traffic_velocity(false, -1.0, 5.0);
+        let traffic = Vec2::new(0.0, -5.0);
         assert!((obstacle_impact_speed(player, Some(traffic)) - 3.0).abs() < 1e-5);
     }
 
     #[test]
     fn orthogonal_traffic_impact_uses_vector_relative_speed() {
         let player = player_velocity(0.0, 8.0);
-        let traffic = traffic_velocity(true, 1.0, 6.0);
+        let traffic = Vec2::new(6.0, 0.0);
         assert!((obstacle_impact_speed(player, Some(traffic)) - 10.0).abs() < 1e-5);
     }
 
