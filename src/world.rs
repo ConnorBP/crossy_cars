@@ -593,6 +593,16 @@ impl LaneCurve {
     }
 }
 
+/// Conflict bits for the 16 directed movements of the canonical Cross tile.
+/// Entry `a` has bit `b` set exactly when movement slots `a` and `b` contend
+/// in the central junction. These literals are generated from the sampled
+/// geometric reference retained in `difficulty` tests; runtime traffic only
+/// needs a mask lookup.
+const LANE_CONNECTOR_CONFLICT_MASKS: [u16; 16] = [
+    0x111f, 0x6b6f, 0x444f, 0xe99f, 0x79f9, 0x22f2, 0x6df6, 0x88f8, 0x5f5b, 0x2f22, 0x4f44, 0xafda,
+    0xf111, 0xfa7a, 0xf55e, 0xf888,
+];
+
 /// One directed inbound-to-outbound lane movement. Array slot identity is
 /// stable and sparse: `from.lane_index() * 4 + to.lane_index()`.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -604,6 +614,8 @@ pub(crate) struct LaneConnector {
     pub to: LaneEdge,
     pub turn: LaneTurn,
     pub curve: LaneCurve,
+    /// Conflicting movement slots in this cell, independent of tile activity.
+    pub conflict_mask: u16,
 }
 
 #[allow(dead_code)] // Additive graph API; traffic consumers are introduced separately.
@@ -1076,8 +1088,9 @@ fn lane_connector(gx: i32, gz: i32, from: LaneEdge, to: LaneEdge) -> LaneConnect
     } else {
         ROAD_BLOCK_SIZE * 0.5
     };
+    let slot = from.lane_index() * 4 + to.lane_index();
     LaneConnector {
-        slot: from.lane_index() * 4 + to.lane_index(),
+        slot,
         cell: IVec2::new(gx, gz),
         from,
         to,
@@ -1088,6 +1101,7 @@ fn lane_connector(gx: i32, gz: i32, from: LaneEdge, to: LaneEdge) -> LaneConnect
             end.position - end.tangent * handle,
             end.position,
         ),
+        conflict_mask: LANE_CONNECTOR_CONFLICT_MASKS[slot],
     }
 }
 
@@ -4714,6 +4728,10 @@ mod tests {
                 );
                 if let Some(connector) = plan.connectors[slot] {
                     assert_eq!(connector.slot(), slot);
+                    assert_eq!(
+                        connector.conflict_mask, LANE_CONNECTOR_CONFLICT_MASKS[slot],
+                        "{kind:?} slot {slot} must not filter inactive movements"
+                    );
                     assert_eq!(connector.cell, IVec2::new(-3, 5));
                     assert_eq!(connector.from, LANE_EDGES[from]);
                     assert_eq!(connector.to, LANE_EDGES[to]);

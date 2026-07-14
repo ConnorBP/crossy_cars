@@ -93,12 +93,10 @@ const TRAFFIC_DECELERATION: f32 = 6.0;
 /// Half-width of the sampled central junction area. Parallel directional
 /// lanes remain nonconflicting while crossing/merging paths are detected.
 const JUNCTION_HALF_EXTENT: f32 = 7.0;
-const CONFLICT_PATH_CLEARANCE: f32 = 1.35;
 const JUNCTION_APPROACH_DISTANCE: f32 = 18.0;
 /// Keep an ungranted front bumper visibly before the conflict boundary. Exact
 /// contact with the stop line is not treated as already owning the junction.
 const JUNCTION_STOP_MARGIN: f32 = 0.05;
-const JUNCTION_SAMPLES: usize = 32;
 
 /// Base traffic speed at level 0 (u/s). The player's `max_speed` is 12.0, so
 /// traffic is always slower and must be dodged, not outrun-forward forever.
@@ -456,8 +454,10 @@ fn junction_interval(connector: LaneConnector) -> Option<(f32, f32)> {
     let mut traversed = 0.0;
     let mut entry = None;
     let mut exit = 0.0;
-    for step in 1..=JUNCTION_SAMPLES {
-        let point = connector.curve.eval(step as f32 / JUNCTION_SAMPLES as f32);
+    for step in 1..=CURVE_LENGTH_SAMPLES {
+        let point = connector
+            .curve
+            .eval(step as f32 / CURVE_LENGTH_SAMPLES as f32);
         let next_distance = traversed + previous.distance(point);
         if in_junction(connector, previous) || in_junction(connector, point) {
             entry.get_or_insert(traversed);
@@ -469,57 +469,10 @@ fn junction_interval(connector: LaneConnector) -> Option<(f32, f32)> {
     entry.map(|entry| (entry, exit))
 }
 
-fn orientation(a: Vec2, b: Vec2, c: Vec2) -> f32 {
-    (b - a).perp_dot(c - a)
-}
-
-fn segments_cross(a0: Vec2, a1: Vec2, b0: Vec2, b1: Vec2) -> bool {
-    const EPSILON: f32 = 1e-4;
-    let ab0 = orientation(a0, a1, b0);
-    let ab1 = orientation(a0, a1, b1);
-    let ba0 = orientation(b0, b1, a0);
-    let ba1 = orientation(b0, b1, a1);
-    ((ab0 > EPSILON && ab1 < -EPSILON) || (ab0 < -EPSILON && ab1 > EPSILON))
-        && ((ba0 > EPSILON && ba1 < -EPSILON) || (ba0 < -EPSILON && ba1 > EPSILON))
-}
-
-/// Sampled geometric conflict policy. Movements in different cells never
-/// contend. Within a cell, central path crossings and paths that merge within
-/// a car-width contend; separated parallel movements can proceed together.
+/// Constant-time conflict policy. Connector masks encode all movement geometry;
+/// connectors in different cells never contend.
 fn connectors_conflict(a: LaneConnector, b: LaneConnector) -> bool {
-    if a.cell != b.cell {
-        return false;
-    }
-    if same_connector(a, b) {
-        return true;
-    }
-    let center = junction_center(a);
-    let mut a0 = a.curve.eval(0.0);
-    for ai in 1..=JUNCTION_SAMPLES {
-        let a1 = a.curve.eval(ai as f32 / JUNCTION_SAMPLES as f32);
-        let a_central = ((a0 + a1) * 0.5 - center).abs().max_element()
-            <= JUNCTION_HALF_EXTENT + CONFLICT_PATH_CLEARANCE;
-        if a_central {
-            let mut b0 = b.curve.eval(0.0);
-            for bi in 1..=JUNCTION_SAMPLES {
-                let b1 = b.curve.eval(bi as f32 / JUNCTION_SAMPLES as f32);
-                let b_central = ((b0 + b1) * 0.5 - center).abs().max_element()
-                    <= JUNCTION_HALF_EXTENT + CONFLICT_PATH_CLEARANCE;
-                if b_central
-                    && (segments_cross(a0, a1, b0, b1)
-                        || a0.distance(b0) <= CONFLICT_PATH_CLEARANCE
-                        || a0.distance(b1) <= CONFLICT_PATH_CLEARANCE
-                        || a1.distance(b0) <= CONFLICT_PATH_CLEARANCE
-                        || a1.distance(b1) <= CONFLICT_PATH_CLEARANCE)
-                {
-                    return true;
-                }
-                b0 = b1;
-            }
-        }
-        a0 = a1;
-    }
-    false
+    a.cell == b.cell && a.conflict_mask & (1_u16 << b.slot) != 0
 }
 
 fn approach(value: f32, target: f32, max_delta: f32) -> f32 {
@@ -1942,6 +1895,74 @@ mod tests {
         }
     }
 
+    const REFERENCE_CONFLICT_PATH_CLEARANCE: f32 = 1.35;
+    const REFERENCE_CONFLICT_SAMPLES: usize = 32;
+
+    fn reference_orientation(a: Vec2, b: Vec2, c: Vec2) -> f32 {
+        (b - a).perp_dot(c - a)
+    }
+
+    fn reference_segments_cross(a0: Vec2, a1: Vec2, b0: Vec2, b1: Vec2) -> bool {
+        const EPSILON: f32 = 1e-4;
+        let ab0 = reference_orientation(a0, a1, b0);
+        let ab1 = reference_orientation(a0, a1, b1);
+        let ba0 = reference_orientation(b0, b1, a0);
+        let ba1 = reference_orientation(b0, b1, a1);
+        ((ab0 > EPSILON && ab1 < -EPSILON) || (ab0 < -EPSILON && ab1 > EPSILON))
+            && ((ba0 > EPSILON && ba1 < -EPSILON) || (ba0 < -EPSILON && ba1 > EPSILON))
+    }
+
+    /// Test-only copy of the sampled geometric policy from before conflict
+    /// masks. This deliberately remains independent of the runtime lookup.
+    fn sampled_connectors_conflict(a: LaneConnector, b: LaneConnector) -> bool {
+        if a.cell != b.cell {
+            return false;
+        }
+        if same_connector(a, b) {
+            return true;
+        }
+        let center = junction_center(a);
+        let mut a0 = a.curve.eval(0.0);
+        for ai in 1..=REFERENCE_CONFLICT_SAMPLES {
+            let a1 = a.curve.eval(ai as f32 / REFERENCE_CONFLICT_SAMPLES as f32);
+            let a_central = ((a0 + a1) * 0.5 - center).abs().max_element()
+                <= JUNCTION_HALF_EXTENT + REFERENCE_CONFLICT_PATH_CLEARANCE;
+            if a_central {
+                let mut b0 = b.curve.eval(0.0);
+                for bi in 1..=REFERENCE_CONFLICT_SAMPLES {
+                    let b1 = b.curve.eval(bi as f32 / REFERENCE_CONFLICT_SAMPLES as f32);
+                    let b_central = ((b0 + b1) * 0.5 - center).abs().max_element()
+                        <= JUNCTION_HALF_EXTENT + REFERENCE_CONFLICT_PATH_CLEARANCE;
+                    if b_central
+                        && (reference_segments_cross(a0, a1, b0, b1)
+                            || a0.distance(b0) <= REFERENCE_CONFLICT_PATH_CLEARANCE
+                            || a0.distance(b1) <= REFERENCE_CONFLICT_PATH_CLEARANCE
+                            || a1.distance(b0) <= REFERENCE_CONFLICT_PATH_CLEARANCE
+                            || a1.distance(b1) <= REFERENCE_CONFLICT_PATH_CLEARANCE)
+                    {
+                        return true;
+                    }
+                    b0 = b1;
+                }
+            }
+            a0 = a1;
+        }
+        false
+    }
+
+    fn representative_cross_connectors() -> [LaneConnector; 16] {
+        let plan = road_plan(0, 0);
+        assert_eq!(plan.kind, crate::world::TileKind::Cross);
+        plan.connectors.map(Option::unwrap)
+    }
+
+    fn translated_connector(mut connector: LaneConnector, cell: IVec2) -> LaneConnector {
+        let delta = (cell - connector.cell).as_vec2() * ROAD_BLOCK_SIZE;
+        connector.cell = cell;
+        connector.curve.control_points = connector.curve.control_points.map(|point| point + delta);
+        connector
+    }
+
     fn crossing_pair(conflicting: bool) -> (LaneConnector, LaneConnector) {
         for gx in -30..=30 {
             for gz in -30..=30 {
@@ -2009,6 +2030,95 @@ mod tests {
             - 2.0 * TRAFFIC_HALF_LENGTH
             - MIN_BUMPER_GAP;
         assert!(follower_speed / 30.0 <= clearance + 1e-5);
+    }
+
+    #[test]
+    fn conflict_masks_equal_sampled_reference_for_all_256_pairs() {
+        let connectors = representative_cross_connectors();
+        for (a_slot, &a) in connectors.iter().enumerate() {
+            for (b_slot, &b) in connectors.iter().enumerate() {
+                let expected = sampled_connectors_conflict(a, b);
+                assert_eq!(
+                    connectors_conflict(a, b),
+                    expected,
+                    "slots {a_slot} and {b_slot}"
+                );
+                assert_eq!(
+                    a.conflict_mask & (1_u16 << b_slot) != 0,
+                    expected,
+                    "literal mask {a_slot}, bit {b_slot}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn conflict_masks_are_symmetric_and_include_every_self_conflict() {
+        let connectors = representative_cross_connectors();
+        for a in connectors {
+            assert!(connectors_conflict(a, a), "slot {}", a.slot);
+            for b in connectors {
+                assert_eq!(
+                    connectors_conflict(a, b),
+                    connectors_conflict(b, a),
+                    "slots {} and {}",
+                    a.slot,
+                    b.slot
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn conflict_masks_are_translation_invariant() {
+        let origin = representative_cross_connectors();
+        let translated = origin.map(|connector| translated_connector(connector, IVec2::new(3, -2)));
+        for a_slot in 0..16 {
+            for b_slot in 0..16 {
+                assert_eq!(
+                    connectors_conflict(origin[a_slot], origin[b_slot]),
+                    connectors_conflict(translated[a_slot], translated[b_slot])
+                );
+                assert_eq!(
+                    sampled_connectors_conflict(origin[a_slot], origin[b_slot]),
+                    sampled_connectors_conflict(translated[a_slot], translated[b_slot])
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn conflict_masks_cover_known_crossing_and_parallel_nonconflict() {
+        let connectors = representative_cross_connectors();
+        // W->E and S->N cross in the central pad.
+        assert!(connectors_conflict(connectors[1], connectors[11]));
+        // W->E and E->W occupy separated directional lanes.
+        assert!(!connectors_conflict(connectors[1], connectors[4]));
+    }
+
+    #[test]
+    fn conflict_lookup_rejects_different_cells_and_ignores_inactive_slots() {
+        let cross = representative_cross_connectors();
+        let elsewhere = translated_connector(cross[11], IVec2::new(1, 0));
+        assert!(!connectors_conflict(cross[1], elsewhere));
+
+        // A one-road stub only activates slot 0. Its mask is nevertheless the
+        // canonical slot mask; inactive socket filtering is not baked into it.
+        let stub = (-50..=50)
+            .flat_map(|gx| (-50..=50).map(move |gz| road_plan(gx, gz)))
+            .find(|plan| {
+                matches!(
+                    plan.kind,
+                    crate::world::TileKind::StubW
+                        | crate::world::TileKind::StubE
+                        | crate::world::TileKind::StubS
+                        | crate::world::TileKind::StubN
+                )
+            })
+            .expect("generated region contains a stub");
+        let active = stub.connectors.into_iter().flatten().next().unwrap();
+        assert_eq!(active.conflict_mask, cross[active.slot].conflict_mask);
+        assert!(active.conflict_mask.count_ones() > 1);
     }
 
     #[test]
