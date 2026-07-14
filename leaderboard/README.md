@@ -236,11 +236,13 @@ roady.v1.session
 ### Plausibility caps (`§8`)
 
 Hard invariants: `condition ∈ 0–4`, `terminal_total == chickens + coins`,
-`max_combo ∈ 1–5`, sane duration/time ranges, `terminal_total <= cap`. Only
-**above-cap** totals are hard-rejected (`score_over_cap`). **Near-cap**
-(≥80% of cap) scores are accepted and flagged for moderation via
-`moderation_note`. Caps are generous and derived from the shipped rules
-(≤90s rounds, 5× combo, objective +10, Glass Cannon + Combo Frenzy max).
+`max_combo ∈ 1–5`, sane duration/time ranges, `terminal_total <= cap`.
+`round_duration_ms` must be a non-negative safe integer and is accepted through
+`1_800_000` ms (30 minutes), inclusive: repeated time pickups can extend
+elapsed play beyond 120 seconds even though the remaining clock is capped.
+`time_left_ms` keeps its independent 120-second guard. Only **above-cap** totals
+are hard-rejected (`score_over_cap`). **Near-cap** (≥80% of cap) scores are
+accepted and flagged for moderation via `moderation_note`.
 
 ### Privacy (`§9`)
 

@@ -4,6 +4,7 @@
 // flagging, constant-time comparison, and replay-sensitive one-time session
 // claim via an in-memory D1 fake.
 
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   canonicalScoreBytes,
@@ -16,6 +17,7 @@ import {
   toBase64Url,
 } from "../src/security";
 import {
+  MAX_ROUND_DURATION_MS,
   NAME_RE,
   normalizeName,
   parseScoreCaps,
@@ -93,6 +95,15 @@ describe("canonical score bytes", () => {
     expect(text).toContain("\n7\n");
     expect(text).toContain("\n2\n");
     expect(text).not.toContain("+");
+  });
+
+  it("canonical signing preserves the same extended duration exactly", () => {
+    const duration = 161_400;
+    const first = canonicalScoreBytes({ ...baseInput(), roundDurationMs: duration });
+    const second = canonicalScoreBytes({ ...baseInput(), roundDurationMs: duration });
+    expect(first).toEqual(second);
+    expect(new TextDecoder().decode(first)).toContain(`\n${duration}\n`);
+    expect(canonicalScoreBytes({ ...baseInput(), roundDurationMs: duration + 1 })).not.toEqual(first);
   });
 });
 
@@ -177,6 +188,17 @@ describe("HMAC round-trip", () => {
     const key = await importHmacKey(TEST_CLIENT_KEY);
     const expected = await crypto.subtle.sign("HMAC", key, canonicalScoreBytes({ ...v, objectiveCompleted: v.objectiveCompleted === 1 }));
     expect(constantTimeEquals(fromBase64Url(wrongSig), new Uint8Array(expected))).toBe(false);
+  });
+
+  it("produces the same signature for the same extended duration", async () => {
+    const duration = 161_400;
+    const v = validateOk(sampleScoreBody({ round_duration_ms: duration }));
+    const first = await signScore(TEST_CLIENT_KEY, v);
+    const second = await signScore(TEST_CLIENT_KEY, v);
+    expect(second).toBe(first);
+
+    const changed = validateOk(sampleScoreBody({ round_duration_ms: duration + 1 }));
+    expect(await signScore(TEST_CLIENT_KEY, changed)).not.toBe(first);
   });
 
   it("rejects a signature over a tampered total", async () => {
@@ -306,10 +328,75 @@ describe("score validation", () => {
     expect(r.ok).toBe(false);
   });
 
-  it("rejects out-of-range duration/time_left", () => {
-    const r = validateScoreBody(sampleScoreBody({ round_duration_ms: 200_000 }), SCORE_CAPS);
+  it("accepts reported score 1614 with elapsed duration beyond 120 seconds", () => {
+    const r = validateScoreBody(
+      sampleScoreBody({
+        terminal_total: 1614,
+        chickens: 1000,
+        coins: 614,
+        max_combo: 5,
+        round_duration_ms: 161_400,
+      }),
+      SCORE_CAPS,
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.value.roundDurationMs).toBe(161_400);
+  });
+
+  it("accepts zero and the exact 30-minute duration boundary", () => {
+    expect(validateScoreBody(sampleScoreBody({ round_duration_ms: 0 }), SCORE_CAPS).ok).toBe(true);
+    const r = validateScoreBody(
+      sampleScoreBody({ round_duration_ms: MAX_ROUND_DURATION_MS }),
+      SCORE_CAPS,
+    );
+    expect(r.ok).toBe(true);
+  });
+
+  it("rejects max duration plus one with the stable validation code", () => {
+    const r = validateScoreBody(
+      sampleScoreBody({ round_duration_ms: MAX_ROUND_DURATION_MS + 1 }),
+      SCORE_CAPS,
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.code).toBe("invalid_duration");
+      expect(r.message).toContain(String(MAX_ROUND_DURATION_MS));
+    }
+  });
+
+  it("rejects the safe-integer maximum even though it is structurally integral", () => {
+    const r = validateScoreBody(
+      sampleScoreBody({ round_duration_ms: Number.MAX_SAFE_INTEGER }),
+      SCORE_CAPS,
+    );
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.code).toBe("invalid_duration");
+  });
+
+  it.each([
+    ["fractional", 120_000.5],
+    ["negative", -1],
+    ["unsafe integer overflow", Number.MAX_SAFE_INTEGER + 1],
+    ["positive infinity", Number.POSITIVE_INFINITY],
+    ["NaN", Number.NaN],
+    ["boolean", true],
+    ["object", {}],
+    ["numeric string", "161400"],
+    ["null", null],
+    ["missing", undefined],
+  ])("rejects %s round_duration_ms", (_label, roundDurationMs) => {
+    const body = sampleScoreBody({ round_duration_ms: roundDurationMs });
+    if (roundDurationMs === undefined) delete body.round_duration_ms;
+    const r = validateScoreBody(body, SCORE_CAPS);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.code).toBe("invalid_duration");
+  });
+
+  it("retains the unrelated 120-second time-left guard", () => {
+    expect(validateScoreBody(sampleScoreBody({ time_left_ms: 120_000 }), SCORE_CAPS).ok).toBe(true);
+    const r = validateScoreBody(sampleScoreBody({ time_left_ms: 120_001 }), SCORE_CAPS);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.code).toBe("invalid_time_left");
   });
 
   it("rejects missing sessionId/proof", () => {
@@ -327,6 +414,13 @@ describe("score validation", () => {
     const r = validateScoreBody("nope", SCORE_CAPS);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.code).toBe("invalid_body");
+  });
+
+  it("keeps the Rust client and Worker duration constants aligned", () => {
+    const rustClient = readFileSync(new URL("../../src/leaderboard.rs", import.meta.url), "utf8");
+    const match = rustClient.match(/const MAX_ROUND_DURATION_MS: u64 = ([\d_]+);/);
+    expect(match).not.toBeNull();
+    expect(Number(match![1]!.replaceAll("_", ""))).toBe(MAX_ROUND_DURATION_MS);
   });
 });
 

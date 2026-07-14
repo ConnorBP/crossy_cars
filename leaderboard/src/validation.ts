@@ -51,6 +51,15 @@ export const MAX_COMBO_MIN_TOTAL: ReadonlyMap<number, number> = new Map([
   [5, 20],
 ]);
 
+/**
+ * Maximum legitimate elapsed round duration: 30 minutes.
+ *
+ * Pickups can repeatedly extend the clock, so elapsed wall-clock gameplay is
+ * not bounded by the clock's 99-second *remaining-time* cap. This generous
+ * anti-abuse ceiling is shared with the Rust client contract and remains far
+ * below Number.MAX_SAFE_INTEGER so canonical integer signing is exact.
+ */
+export const MAX_ROUND_DURATION_MS = 1_800_000;
 /** Maximum request body size accepted by the Worker (bytes). */
 export const MAX_REQUEST_BODY_BYTES = 16 * 1024; // 16 KiB
 /** Maximum UTF-8 byte length for free-text score fields. */
@@ -81,7 +90,7 @@ export type ValidationResult =
 
 /** Is `x` a non-negative integer that fits safely? */
 function isNonNegInt(x: unknown): x is number {
-  return typeof x === "number" && Number.isInteger(x) && x >= 0 && x <= Number.MAX_SAFE_INTEGER;
+  return typeof x === "number" && Number.isSafeInteger(x) && x >= 0;
 }
 
 /**
@@ -146,10 +155,14 @@ export function validateScoreBody(
     return fail("implausible_combo", `max_combo ${maxCombo} requires terminal_total >= ${minTotalForCombo}`);
   }
 
-  // Broad sane ranges (advisory telemetry). 90s round → 90_000ms; allow generous
-  // headroom for clock skew and pickups that add time (cap 99s → 99_000ms).
-  if (!isNonNegInt(roundDurationMs) || roundDurationMs > 120_000)
-    return fail("invalid_duration", "round_duration_ms out of range");
+  // Elapsed duration can exceed 120 seconds because time pickups extend play.
+  // Keep it a non-negative safe integer for exact canonical signing, with the
+  // shared 30-minute ceiling as a generous anti-abuse bound.
+  if (!isNonNegInt(roundDurationMs) || roundDurationMs > MAX_ROUND_DURATION_MS)
+    return fail(
+      "invalid_duration",
+      `round_duration_ms must be a non-negative safe integer <= ${MAX_ROUND_DURATION_MS}`,
+    );
   if (!isNonNegInt(timeLeftMs) || timeLeftMs > 120_000)
     return fail("invalid_time_left", "time_left_ms out of range");
 

@@ -153,7 +153,7 @@ Request:
   "coins": 12,
   "objective_completed": true,
   "max_combo": 4,
-  "round_duration_ms": 65000,
+  "round_duration_ms": 161400,
   "time_left_ms": 0,
   "game_over_reason": "time_up",
   "build": "0.1.0",
@@ -304,10 +304,10 @@ Hard invariants:
 - `condition` is 0–4
 - `terminal_total == chickens + coins`
 - `max_combo` is 1–5
-- `round_duration_ms` and `time_left_ms` are in broad sane ranges
+- `round_duration_ms` is a non-negative safe integer at most `1_800_000` ms (30 minutes); `time_left_ms` remains in its broad 0–120,000 ms sane range
 - `terminal_total <= SCORE_CAPS[condition]`
 
-The caps must be generous and derived from the shipped rules. The **effective maximum round length is 99 seconds**, not 90: a fresh round starts at 60s, ordinary coins add +1.5s each but clamp the clock to 90s (`MAX_ROUND_TIME = 90.0` in `src/world.rs`), and the Time power-up adds +5s each clamped to a hard 99s ceiling (`TIME_CAP = 99.0` in `src/pickups.rs`). Coins alone cannot reach 99s; the Time power-up can push the clock from 90s up to 99s, so `round_duration_ms` and `time_left_ms` can legitimately approach `99_000 ms`. Caps are derived from that ~99s ceiling, 5× combo, objective +10 bonus, condition/event bonuses, and maximum plausible pickups. Scores near the cap should be flagged for moderation rather than rejected merely for being high. Only above-cap values are hard rejected. `validation.ts` rejects `round_duration_ms`/`time_left_ms` above `120_000 ms` as a broad sane-range guard, while `SCORE_CAPS[condition]` is the primary score bound.
+The caps must be generous and derived from the shipped rules. A fresh round starts at 60s, ordinary coins add +1.5s each but clamp the *remaining clock* to 90s (`MAX_ROUND_TIME = 90.0` in `src/world.rs`), and the Time power-up adds +5s each clamped to a hard 99s remaining-time ceiling (`TIME_CAP = 99.0` in `src/pickups.rs`). Crucially, repeated pickups can extend **elapsed active play** well beyond 120 seconds even though `time_left_ms` cannot exceed the remaining-clock cap. Therefore the shared Rust-client/Worker `round_duration_ms` anti-abuse maximum is 30 minutes (`1_800_000` ms), inclusive. It must still be a non-negative safe integer so client and Worker canonical HMAC bytes remain exact. `time_left_ms` retains the independent `120_000` ms ceiling. Score caps remain the primary score bound; near-cap scores are flagged for moderation and only above-cap values are hard rejected.
 
 Telemetry such as duration, objective completion, combo, client timestamp, or build is advisory and forgeable. It may generate moderation flags but is not proof.
 

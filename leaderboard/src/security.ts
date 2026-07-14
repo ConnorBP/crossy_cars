@@ -91,8 +91,10 @@ export async function ipHash(clientIp: string, pepper: string): Promise<string> 
  *   {build}
  *   {platform}
  *
- * Integers are canonical base-10 (no leading + or zeroes). The name is already
- * normalized to uppercase [A-Z0-9]{3,5} before this function is called.
+ * Integers are canonical base-10 (no leading + or zeroes). Validation first
+ * requires all numeric fields (including duration) to be safe integers, so
+ * JavaScript stringification cannot round the signed value. The name is
+ * already normalized to uppercase [A-Z0-9]{3,5} before this function is called.
  */
 export function canonicalScoreBytes(input: {
   sessionId: string;

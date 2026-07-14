@@ -73,6 +73,17 @@ const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 const BOARD_LIMIT: u8 = 10;
 
+/// Maximum legitimate elapsed round duration accepted by both the client
+/// contract and Worker: 30 minutes. Time pickups can extend active play well
+/// beyond the remaining-clock cap; this remains a generous anti-abuse bound.
+#[allow(dead_code)] // contract constant is also asserted by native tests
+const MAX_ROUND_DURATION_MS: u64 = 1_800_000;
+
+#[allow(dead_code)] // used by the wasm submission guard and native tests
+fn valid_round_duration_ms(duration: u64) -> bool {
+    duration <= MAX_ROUND_DURATION_MS
+}
+
 fn leaderboard_enabled() -> bool {
     !LEADERBOARD_API_URL.is_empty()
 }
@@ -537,24 +548,59 @@ fn game_over_reason_str(reason: GameOverReason) -> &'static str {
     }
 }
 
-/// Map a backend error code to a player-friendly message. Falls back to the
-/// server-provided message or a generic HTTP string.
+#[allow(dead_code)] // used by friendly_error on wasm32 and native tests
+fn is_payload_validation_code(code: &str) -> bool {
+    matches!(
+        code,
+        "invalid_body"
+            | "invalid_name"
+            | "invalid_condition"
+            | "invalid_total"
+            | "invalid_chickens"
+            | "invalid_coins"
+            | "total_mismatch"
+            | "invalid_objective"
+            | "invalid_combo"
+            | "implausible_combo"
+            | "invalid_duration"
+            | "invalid_time_left"
+            | "invalid_reason"
+            | "invalid_build"
+            | "invalid_platform"
+            | "score_over_cap"
+    )
+}
+
+/// Map a backend error code to a player-friendly message. Validation failures
+/// visibly retain their code (useful for support and non-retryable diagnosis),
+/// while retryable session/service failures say so explicitly. Network and
+/// browser Turnstile failures are classified separately at their call sites.
 #[allow(dead_code)] // used on wasm32 (web_bridge) and in tests
 fn friendly_error(code: Option<&str>, message: Option<&str>, fallback: &str) -> String {
     match code {
-        Some("rate_limited") => "Too many requests. Try again later.".to_string(),
-        Some("turnstile_failed") => "Verification failed. Try again.".to_string(),
-        Some("invalid_session")
-        | Some("expired_session")
-        | Some("replay")
-        | Some("condition_mismatch") => "Session expired. Try again.".to_string(),
-        Some("invalid_proof") => "Session verification failed. Try again.".to_string(),
-        Some("invalid_signature") | Some("missing_signature") => {
-            "Signature error. Try again.".to_string()
+        Some("rate_limited") => "SERVER [rate_limited]: retry later.".to_string(),
+        Some("turnstile_failed") => {
+            "TURNSTILE [turnstile_failed]: verification failed; retry.".to_string()
         }
-        Some("score_over_cap") => "Score exceeds plausibility cap.".to_string(),
-        Some("insert_failed") => "Server error. Try again.".to_string(),
-        _ => message.unwrap_or(fallback).to_string(),
+        Some(code @ "invalid_session")
+        | Some(code @ "expired_session")
+        | Some(code @ "replay")
+        | Some(code @ "condition_mismatch") => {
+            format!("SERVER [{code}]: session expired; retry to request a new session.")
+        }
+        Some("invalid_proof") => {
+            "SERVER [invalid_proof]: session verification failed; retry.".to_string()
+        }
+        Some(code @ "invalid_signature") | Some(code @ "missing_signature") => {
+            format!("SERVER [{code}]: signature rejected; retry.")
+        }
+        Some("insert_failed") => "SERVER [insert_failed]: retry with a new session.".to_string(),
+        Some(code) if is_payload_validation_code(code) => format!(
+            "VALIDATION [{code}]: {}; retry unchanged will fail.",
+            message.unwrap_or(fallback)
+        ),
+        Some(code) => format!("SERVER [{code}]: {}; retry.", message.unwrap_or(fallback)),
+        None => format!("NETWORK/SERVER [http]: {fallback}; retry."),
     }
 }
 
@@ -981,6 +1027,22 @@ mod web_bridge {
     // ── Full submission chain ────────────────────────────────────────────
 
     pub fn start_submission(epoch: u64, snapshot: ScoreSnapshot, initials: String) {
+        // Enforce the same inclusive duration contract before requesting a
+        // Turnstile token or sending any payload. Rust's u64 type already
+        // guarantees a non-negative integral client value; the Worker still
+        // independently validates untrusted JSON and safe-integer bounds.
+        if !valid_round_duration_ms(snapshot.round_duration_ms) {
+            SUBMIT_RESULTS.with(|results| {
+                results.borrow_mut().push((
+                    epoch,
+                    Err(format!(
+                        "VALIDATION [invalid_duration]: round_duration_ms must be <= {MAX_ROUND_DURATION_MS}; retry unchanged will fail."
+                    )),
+                ));
+            });
+            return;
+        }
+
         let session_url = session_url();
         let scores_url = scores_url();
         let site_key = TURNSTILE_SITE_KEY.to_string();
@@ -998,7 +1060,7 @@ mod web_bridge {
             let turnstile_token = match js_turnstile(&site_key).await {
                 Ok(t) => t,
                 Err(e) => {
-                    set_submit(Err(format!("Verification: {e}")));
+                    set_submit(Err(format!("TURNSTILE [browser]: {e}; retry.")));
                     return;
                 }
             };
@@ -1014,7 +1076,7 @@ mod web_bridge {
                 match fetch_json(&session_url, "POST", Some(&session_body), None).await {
                     Ok(r) => r,
                     Err(e) => {
-                        set_submit(Err(format!("Network: {e}")));
+                        set_submit(Err(format!("NETWORK [session]: {e}; retry.")));
                         return;
                     }
                 };
@@ -1032,7 +1094,7 @@ mod web_bridge {
             let session: SessionResponse = match serde_json::from_str(&body) {
                 Ok(s) => s,
                 Err(e) => {
-                    set_submit(Err(format!("Parse: {e}")));
+                    set_submit(Err(format!("SERVER [invalid_session_response]: {e}; retry.")));
                     return;
                 }
             };
@@ -1060,13 +1122,13 @@ mod web_bridge {
             let signature = match js_hmac(&client_key, &canonical_str).await {
                 Ok(s) => s,
                 Err(e) => {
-                    set_submit(Err(format!("Signature: {e}")));
+                    set_submit(Err(format!("CLIENT [signature]: {e}; retry.")));
                     return;
                 }
             };
 
             // 4. POST /v1/scores with the signature header.
-            let score_body = serde_json::to_string(&ScoreBody {
+            let score_body = match serde_json::to_string(&ScoreBody {
                 session_id: session.session_id,
                 proof: session.proof,
                 name: initials,
@@ -1081,14 +1143,19 @@ mod web_bridge {
                 game_over_reason: snapshot.game_over_reason,
                 build: snapshot.build,
                 platform: snapshot.platform,
-            })
-            .unwrap_or_default();
+            }) {
+                Ok(body) => body,
+                Err(e) => {
+                    set_submit(Err(format!("CLIENT [score_payload]: {e}; retry.")));
+                    return;
+                }
+            };
 
             let (status, body) =
                 match fetch_json(&scores_url, "POST", Some(&score_body), Some(&signature)).await {
                     Ok(r) => r,
                     Err(e) => {
-                        set_submit(Err(format!("Network: {e}")));
+                        set_submit(Err(format!("NETWORK [score]: {e}; retry.")));
                         return;
                     }
                 };
@@ -1106,7 +1173,7 @@ mod web_bridge {
             let resp: SubmitResponse = match serde_json::from_str(&body) {
                 Ok(s) => s,
                 Err(e) => {
-                    set_submit(Err(format!("Parse: {e}")));
+                    set_submit(Err(format!("SERVER [invalid_score_response]: {e}; retry.")));
                     return;
                 }
             };
@@ -2542,6 +2609,42 @@ mod tests {
     }
 
     #[test]
+    fn canonical_score_bytes_extended_duration_is_stable_and_exact() {
+        let input = CanonicalScoreInput {
+            session_id: "s".to_string(),
+            proof: "p".to_string(),
+            name: "AAA".to_string(),
+            condition: 0,
+            terminal_total: 1614,
+            chickens: 1000,
+            coins: 614,
+            objective_completed: true,
+            max_combo: 5,
+            round_duration_ms: 161_400,
+            time_left_ms: 0,
+            game_over_reason: "time_up".to_string(),
+            build: "1".to_string(),
+            platform: "web".to_string(),
+        };
+        let first = canonical_score_bytes(&input);
+        let second = canonical_score_bytes(&input);
+        assert_eq!(first, second);
+        assert!(std::str::from_utf8(&first).unwrap().contains("\n161400\n"));
+
+        let mut changed = input;
+        changed.round_duration_ms += 1;
+        assert_ne!(first, canonical_score_bytes(&changed));
+    }
+
+    #[test]
+    fn client_duration_contract_is_thirty_minutes_and_inclusive() {
+        assert_eq!(MAX_ROUND_DURATION_MS, 1_800_000);
+        assert!(valid_round_duration_ms(161_400));
+        assert!(valid_round_duration_ms(MAX_ROUND_DURATION_MS));
+        assert!(!valid_round_duration_ms(MAX_ROUND_DURATION_MS + 1));
+    }
+
+    #[test]
     fn canonical_score_bytes_integers_are_canonical_base10() {
         let input = CanonicalScoreInput {
             session_id: "s".to_string(),
@@ -3013,32 +3116,47 @@ mod tests {
     // ── Error formatting ─────────────────────────────────────────────────
 
     #[test]
-    fn friendly_error_maps_known_codes() {
+    fn friendly_error_distinguishes_codes_and_retryability() {
         assert_eq!(
             friendly_error(Some("rate_limited"), None, "fallback"),
-            "Too many requests. Try again later."
+            "SERVER [rate_limited]: retry later."
         );
         assert_eq!(
             friendly_error(Some("turnstile_failed"), None, "fallback"),
-            "Verification failed. Try again."
+            "TURNSTILE [turnstile_failed]: verification failed; retry."
         );
         assert_eq!(
             friendly_error(Some("replay"), None, "fallback"),
-            "Session expired. Try again."
+            "SERVER [replay]: session expired; retry to request a new session."
         );
         assert_eq!(
-            friendly_error(Some("score_over_cap"), None, "fallback"),
-            "Score exceeds plausibility cap."
+            friendly_error(
+                Some("invalid_duration"),
+                Some("round_duration_ms out of range"),
+                "fallback"
+            ),
+            "VALIDATION [invalid_duration]: round_duration_ms out of range; retry unchanged will fail."
+        );
+        assert_eq!(
+            friendly_error(
+                Some("score_over_cap"),
+                Some("terminal_total exceeds plausibility cap"),
+                "fallback"
+            ),
+            "VALIDATION [score_over_cap]: terminal_total exceeds plausibility cap; retry unchanged will fail."
         );
     }
 
     #[test]
-    fn friendly_error_falls_back_to_message_or_generic() {
+    fn friendly_error_falls_back_without_losing_unknown_code() {
         assert_eq!(
             friendly_error(Some("unknown_code"), Some("custom"), "fallback"),
-            "custom"
+            "SERVER [unknown_code]: custom; retry."
         );
-        assert_eq!(friendly_error(None, None, "HTTP 500"), "HTTP 500");
+        assert_eq!(
+            friendly_error(None, Some("ignored because no structured code"), "HTTP 500"),
+            "NETWORK/SERVER [http]: HTTP 500; retry."
+        );
     }
 
     // ── Game over reason ─────────────────────────────────────────────────

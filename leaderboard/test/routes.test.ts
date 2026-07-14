@@ -608,6 +608,53 @@ describe("fetch-route: score submission", () => {
     expect(rbody.error.code).toBe("condition_mismatch");
   });
 
+  it("returns invalid_duration before signature/session work for max plus one", async () => {
+    const db = new FakeD1();
+    const seeded = await seedSession(db, { condition: 0 });
+    const env = makeEnv({ DB: db }) as unknown as Env;
+    const { response } = await fetchRoute(env, "POST", "/v1/scores", {
+      body: sampleScoreBody({
+        sessionId: seeded.sessionId,
+        proof: seeded.proof,
+        round_duration_ms: 1_800_001,
+      }),
+    });
+
+    expect(response.status).toBe(422);
+    const rbody = await readJson<{ error: { code: string; message: string } }>(response);
+    expect(rbody.error.code).toBe("invalid_duration");
+    expect(rbody.error.message).toContain("1800000");
+    expect(db.sessions.get(seeded.sessionId)!.used).toBe(0);
+    expect(db.scores).toHaveLength(0);
+  });
+
+  it("successfully submits reported score 1614 with duration beyond 120 seconds", async () => {
+    const db = new FakeD1();
+    const seeded = await seedSession(db, { condition: 0 });
+    const env = makeEnv({ DB: db }) as unknown as Env;
+    const body = sampleScoreBody({
+      sessionId: seeded.sessionId,
+      proof: seeded.proof,
+      condition: seeded.condition,
+      terminal_total: 1614,
+      chickens: 1000,
+      coins: 614,
+      max_combo: 5,
+      round_duration_ms: 161_400,
+    });
+    const sig = await signScore(TEST_CLIENT_KEY, validateOk(body));
+    const { response } = await fetchRoute(env, "POST", "/v1/scores", {
+      body,
+      headers: { "X-Roady-Client-Signature": sig },
+    });
+
+    expect(response.status).toBe(201);
+    const rbody = await readJson<{ inserted: boolean; total: number }>(response);
+    expect(rbody.inserted).toBe(true);
+    expect(rbody.total).toBe(1614);
+    expect(db.scores[0]!.round_duration_ms).toBe(161_400);
+  });
+
   it("successfully submits a valid score and returns rank 201", async () => {
     const db = new FakeD1();
     const seeded = await seedSession(db, { condition: 0 });
