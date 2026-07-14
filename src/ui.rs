@@ -355,6 +355,8 @@ struct CompactCockpitApplied;
 #[derive(Component)]
 struct CockpitSecondaryInfo;
 #[derive(Component)]
+struct CockpitCurrentScore;
+#[derive(Component)]
 struct TimerRoot;
 #[derive(Component)]
 struct TimerLabel;
@@ -688,52 +690,43 @@ fn spawn_hud(
             TextColor(palette::HUD_ACCENT.into()),
             GearText,
         ));
-        // SCORE label
+        // Current score remains visible in the compact phone cockpit. Only
+        // the detailed chickens/coins/condition rows below are secondary.
         p.spawn((
             Text::new("SCORE"),
             TextFont {
-                font_size: FontSize::Px(13.0),
+                font_size: FontSize::Px(cockpit_font_size(13.0, touch.0)),
                 ..default()
             },
             TextColor(Color::srgba(0.75, 0.75, 0.8, 1.0).into()),
             Node {
                 margin: UiRect {
-                    top: px(8.0),
-                    bottom: px(2.0),
+                    top: px(cockpit_margin(4.0, touch.0)),
+                    bottom: px(cockpit_margin(1.0, touch.0)),
                     ..default()
-                },
-                display: if touch.0 {
-                    Display::None
-                } else {
-                    Display::Flex
                 },
                 ..default()
             },
-            CockpitSecondaryInfo,
+            CockpitCurrentScore,
         ));
         // Big score number (chickens + coins)
         p.spawn((
             Text::new(""),
             TextFont {
-                font_size: FontSize::Px(36.0),
+                font_size: FontSize::Px(cockpit_font_size(36.0, touch.0)),
                 ..default()
             },
             TextColor(palette::HUD_ACCENT.into()),
             Node {
-                margin: UiRect::bottom(px(6.0)),
-                display: if touch.0 {
-                    Display::None
-                } else {
-                    Display::Flex
-                },
+                margin: UiRect::bottom(px(cockpit_margin(3.0, touch.0))),
                 ..default()
             },
-            CockpitSecondaryInfo,
+            CockpitCurrentScore,
         ))
         .with_child((
             TextSpan::default(),
             TextFont {
-                font_size: FontSize::Px(36.0),
+                font_size: FontSize::Px(cockpit_font_size(36.0, touch.0)),
                 ..default()
             },
             TextColor(palette::HUD_ACCENT.into()),
@@ -1471,16 +1464,43 @@ fn update_hint(
 #[cfg(test)]
 mod tests {
     use super::{
-        GAMEOVER_COMPACT_LAYOUT, GAMEOVER_DESKTOP_LAYOUT, GAMEOVER_STATUS_STRIP_HEIGHT,
-        MENU_CONTENT_HEIGHT, TimerUrgency, condition_summary, gameover_core_bounds,
-        gameover_layout, is_medal_upgrade, is_mobile_viewport, is_new_best,
-        maximal_gameover_content_height, maximal_gameover_state_fits, medal_gallery_state,
-        medal_points, menu_content_fits, pause_content_bounds, terminal_condition_result,
-        timer_motion_flags, timer_style,
+        CockpitCurrentScore, GAMEOVER_COMPACT_LAYOUT, GAMEOVER_DESKTOP_LAYOUT,
+        GAMEOVER_STATUS_STRIP_HEIGHT, MENU_CONTENT_HEIGHT, ScoreText, TimerUrgency,
+        condition_summary, gameover_core_bounds, gameover_layout, is_medal_upgrade,
+        is_mobile_viewport, is_new_best, maximal_gameover_content_height,
+        maximal_gameover_state_fits, medal_gallery_state, medal_points, menu_content_fits,
+        pause_content_bounds, spawn_hud, terminal_condition_result, timer_motion_flags,
+        timer_style, update_score_text,
     };
-    use crate::game::resources::GameOverReason;
-    use crate::modifiers::ModifierKind;
+    use crate::game::resources::{GameOverReason, Score};
+    use crate::modifiers::{ActiveModifier, ModifierKind};
     use crate::persist::Medal;
+    use crate::touch::TouchControlsActive;
+    use bevy::prelude::*;
+
+    #[test]
+    fn touch_cockpit_keeps_live_score_visible_and_updates_it() {
+        let mut app = App::new();
+        app.insert_resource(ActiveModifier::default());
+        app.insert_resource(TouchControlsActive(true));
+        app.insert_resource(Score {
+            chickens: 7,
+            coins: 5,
+        });
+        app.add_systems(Update, (spawn_hud, update_score_text).chain());
+        app.update();
+
+        let world = app.world_mut();
+        let mut score_rows = world.query_filtered::<&Node, With<CockpitCurrentScore>>();
+        let rows: Vec<_> = score_rows.iter(world).collect();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|node| node.display != Display::None));
+
+        let mut score_spans = world.query_filtered::<&TextSpan, With<ScoreText>>();
+        let spans: Vec<_> = score_spans.iter(world).collect();
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].as_str(), "12");
+    }
 
     #[test]
     fn timer_urgency_has_inclusive_thresholds_and_faster_final_pulse() {
