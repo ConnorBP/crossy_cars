@@ -16,6 +16,34 @@ use crate::world::world_review_bounds;
 
 /// Exponential smoothing rate for camera follow / zoom (higher = snappier).
 const SMOOTH: f32 = 4.0;
+const DIRECTION_SMOOTH: f32 = 4.0;
+const TRAILING_NDC_LIMIT: f32 = 0.8;
+const REVERSE_CONFIRM_SECS: f32 = 0.18;
+const TRAVEL_EPSILON_SQ: f32 = 0.0001;
+const TELEPORT_DISTANCE_SQ: f32 = 16.0;
+
+/// State local to the production gameplay camera. World-review cameras never
+/// receive this component, so their deterministic atlas framing stays fixed.
+#[derive(Component)]
+struct GameplayCamera {
+    previous_car_xz: Vec2,
+    travel_direction: Vec2,
+    reverse_candidate_secs: f32,
+    smoothed_ground_offset: Vec2,
+    initialized: bool,
+}
+
+impl Default for GameplayCamera {
+    fn default() -> Self {
+        Self {
+            previous_car_xz: Vec2::ZERO,
+            travel_direction: Vec2::Y,
+            reverse_candidate_secs: 0.0,
+            smoothed_ground_offset: Vec2::ZERO,
+            initialized: false,
+        }
+    }
+}
 
 // --- T13: camera shake (juice) tuning constants ---
 /// Converts `impact_speed` into trauma added to the shake accumulator.
@@ -172,12 +200,17 @@ fn spawn_camera(mut commands: Commands) {
         // `looking_at(ZERO, Y)` and NEVER recomputed per frame. `follow_camera`
         // only lerps translation + adjusts the ortho viewport_height (zoom).
         Transform::from_xyz(12.0, 12.0, 12.0).looking_at(Vec3::ZERO, Vec3::Y),
+        GameplayCamera::default(),
     ));
 }
 
 fn follow_camera(
     car: Query<(&Transform, &Car), (With<Car>, Without<Camera3d>)>,
-    mut camera: Query<(&mut Transform, &mut Projection), (With<Camera3d>, Without<Car>)>,
+    mut camera: Query<
+        (&mut Transform, &mut Projection, &mut GameplayCamera),
+        (With<Camera3d>, Without<Car>),
+    >,
+    windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
     cfg: Res<GameConfig>,
     time: Res<Time>,
     settings: Res<Settings>,
@@ -186,23 +219,87 @@ fn follow_camera(
     let Ok((car_t, car)) = car.single() else {
         return;
     };
-    let Ok((mut cam_t, mut proj)) = camera.single_mut() else {
+    let Ok((mut cam_t, mut proj, mut framing)) = camera.single_mut() else {
         return;
     };
 
     let dt = time.delta_secs();
-    let t = 1.0 - (-SMOOTH * dt).exp();
+    let t = exp_smoothing_alpha(SMOOTH, dt);
+    let car_xz = Vec2::new(car_t.translation.x, car_t.translation.z);
+    let displacement = car_xz - framing.previous_car_xz;
+    let model_forward = car_t.rotation * Vec3::NEG_Z;
+    let model_forward_xz = Vec2::new(model_forward.x, model_forward.z).normalize_or_zero();
 
-    // Look-ahead: nudge the follow target in the car's forward direction (model -Z).
-    // Only the POSITION is lerped; rotation stays fixed from spawn so the iso
-    // angle never tilts (a fixed rotation can't wobble as the camera lags).
-    let fwd = car_t.rotation * Vec3::new(0.0, 0.0, -1.0);
-    let desired = car_t.translation + cfg.cam_offset + fwd * 1.5;
+    if !framing.initialized || displacement.length_squared() > TELEPORT_DISTANCE_SQ {
+        framing.previous_car_xz = car_xz;
+        framing.travel_direction = if model_forward_xz == Vec2::ZERO {
+            Vec2::Y
+        } else {
+            model_forward_xz
+        };
+        framing.reverse_candidate_secs = 0.0;
+        framing.smoothed_ground_offset = Vec2::ZERO;
+        framing.initialized = true;
+    } else if displacement.length_squared() > TRAVEL_EPSILON_SQ {
+        let measured = displacement.normalize();
+        if measured.dot(framing.travel_direction) < -0.8 {
+            framing.reverse_candidate_secs += dt;
+            if framing.reverse_candidate_secs >= REVERSE_CONFIRM_SECS {
+                framing.travel_direction = smoothed_direction(
+                    framing.travel_direction,
+                    measured,
+                    exp_smoothing_alpha(DIRECTION_SMOOTH, dt),
+                );
+            }
+        } else {
+            framing.reverse_candidate_secs = 0.0;
+            framing.travel_direction = smoothed_direction(
+                framing.travel_direction,
+                measured,
+                exp_smoothing_alpha(DIRECTION_SMOOTH, dt),
+            );
+        }
+        framing.previous_car_xz = car_xz;
+    } else {
+        framing.reverse_candidate_secs = 0.0;
+        framing.previous_car_xz = car_xz;
+    }
 
-    // Smoothed follow: exponential lerp toward the desired iso position.
-    // Rotation is intentionally left untouched — recomputing it per frame from
-    // a live look target while the position lags is what caused the tilt.
-    cam_t.translation = cam_t.translation.lerp(desired, t);
+    let aspect = windows
+        .single()
+        .ok()
+        .and_then(|window| {
+            let height = window.resolution.height();
+            (height > 0.0).then(|| window.resolution.width() / height)
+        })
+        .filter(|aspect| aspect.is_finite() && *aspect > 0.0)
+        .unwrap_or(16.0 / 9.0);
+    let speed_ratio = if settings.reduced_motion || cfg.max_speed <= 0.0 {
+        0.0
+    } else {
+        (car.speed.abs() / cfg.max_speed).clamp(0.0, 1.0)
+    };
+    let viewport_height = 10.0 + speed_ratio * 2.0;
+    let projected_travel =
+        projected_ground_direction(framing.travel_direction, cam_t.rotation, aspect);
+    let desired_car_ndc = trailing_ndc_offset(projected_travel, TRAILING_NDC_LIMIT) * speed_ratio;
+    let ground_offset =
+        ground_offset_for_ndc(desired_car_ndc, cam_t.rotation, viewport_height, aspect);
+    framing.smoothed_ground_offset = if settings.reduced_motion {
+        Vec2::ZERO
+    } else {
+        framing.smoothed_ground_offset.lerp(ground_offset, t)
+    };
+    let desired = camera_target_translation(
+        car_t.translation,
+        cfg.cam_offset,
+        framing.smoothed_ground_offset,
+    );
+
+    // Track the car directly and smooth only the framing offset. Smoothing the
+    // absolute target creates permanent speed-dependent lag that pulls the car
+    // back toward center and defeats the trailing inset.
+    cam_t.translation = desired;
 
     // T13: translational shake offset. Applied AFTER the follow lerp so the
     // crash jolt rides on top of the smoothed position. Because next frame's
@@ -293,19 +390,91 @@ fn camera_viewport_height(
         return FIXED_VIEWPORT_HEIGHT;
     }
     let ratio = if max_speed > 0.0 {
-        speed.abs() / max_speed
+        (speed.abs() / max_speed).clamp(0.0, 1.0)
     } else {
         0.0
     };
     let target = FIXED_VIEWPORT_HEIGHT + ratio * 2.0;
-    current + (target - current) * smoothing
+    current + (target - current) * smoothing.clamp(0.0, 1.0)
+}
+
+fn camera_target_translation(car: Vec3, base_offset: Vec3, ground_offset: Vec2) -> Vec3 {
+    car + base_offset + Vec3::new(ground_offset.x, 0.0, ground_offset.y)
+}
+
+fn exp_smoothing_alpha(rate: f32, dt: f32) -> f32 {
+    1.0 - (-rate.max(0.0) * dt.max(0.0)).exp()
+}
+
+/// Smooth direction by a bounded angular step. Unlike normalized linear
+/// interpolation, this can cross a 180-degree reversal without getting stuck.
+fn smoothed_direction(previous: Vec2, desired: Vec2, alpha: f32) -> Vec2 {
+    let previous = previous.normalize_or_zero();
+    let desired = desired.normalize_or_zero();
+    if previous == Vec2::ZERO {
+        return desired;
+    }
+    if desired == Vec2::ZERO {
+        return previous;
+    }
+    let cross = previous.perp_dot(desired);
+    let dot = previous.dot(desired).clamp(-1.0, 1.0);
+    let signed_angle = if cross.abs() < 1e-6 && dot < 0.0 {
+        std::f32::consts::PI
+    } else {
+        cross.atan2(dot)
+    };
+    let step = signed_angle.clamp(-1.5 * alpha, 1.5 * alpha);
+    Vec2::from_angle(step).rotate(previous).normalize_or_zero()
+}
+
+/// Project a world XZ travel vector into normalized screen direction.
+fn projected_ground_direction(travel: Vec2, rotation: Quat, aspect: f32) -> Vec2 {
+    let travel = Vec3::new(travel.x, 0.0, travel.y);
+    let right = rotation * Vec3::X;
+    let up = rotation * Vec3::Y;
+    Vec2::new(travel.dot(right) / aspect.max(0.001), travel.dot(up)).normalize_or_zero()
+}
+
+/// Put the car on the opposite edge of an inset NDC rectangle from travel.
+fn trailing_ndc_offset(projected_travel: Vec2, limit: f32) -> Vec2 {
+    let trailing = -projected_travel.normalize_or_zero();
+    let extent = trailing.x.abs().max(trailing.y.abs());
+    if extent <= f32::EPSILON {
+        Vec2::ZERO
+    } else {
+        trailing * (limit.clamp(0.0, 1.0) / extent)
+    }
+}
+
+/// Invert the fixed camera's ground-XZ to NDC projection. The result is the
+/// horizontal world offset added to the camera, relative to a centered follow.
+fn ground_offset_for_ndc(ndc: Vec2, rotation: Quat, height: f32, aspect: f32) -> Vec2 {
+    let right = rotation * Vec3::X;
+    let up = rotation * Vec3::Y;
+    let target_x = -ndc.x * height * aspect * 0.5;
+    let target_y = -ndc.y * height * 0.5;
+    let a = right.x;
+    let b = right.z;
+    let c = up.x;
+    let d = up.z;
+    let determinant = a * d - b * c;
+    if determinant.abs() < 1e-6 {
+        return Vec2::ZERO;
+    }
+    Vec2::new(
+        (target_x * d - b * target_y) / determinant,
+        (a * target_y - target_x * c) / determinant,
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        CameraObstacleFeedbackSet, camera_viewport_height, configure_obstacle_feedback_order,
-        next_trauma, review_projection_for_bounds,
+        CameraObstacleFeedbackSet, camera_target_translation, camera_viewport_height,
+        configure_obstacle_feedback_order, exp_smoothing_alpha, ground_offset_for_ndc, next_trauma,
+        projected_ground_direction, review_projection_for_bounds, smoothed_direction,
+        trailing_ndc_offset,
     };
     use crate::{car::DrivingSet, world::world_review_bounds};
     use bevy::prelude::*;
@@ -379,5 +548,88 @@ mod tests {
         assert_eq!(camera_viewport_height(12.0, 12.0, 12.0, 0.1, true), 10.0);
         assert_eq!(camera_viewport_height(9.0, 0.0, 12.0, 0.9, true), 10.0);
         assert!(camera_viewport_height(10.0, 12.0, 12.0, 0.5, false) > 10.0);
+    }
+
+    fn gameplay_rotation() -> Quat {
+        Transform::from_xyz(12.0, 12.0, 12.0)
+            .looking_at(Vec3::ZERO, Vec3::Y)
+            .rotation
+    }
+
+    #[test]
+    fn full_speed_framing_places_car_at_ten_percent_trailing_margin() {
+        let rotation = gameplay_rotation();
+        for (width, height) in [(844.0, 390.0), (960.0, 480.0), (1280.0, 720.0)] {
+            let aspect = width / height;
+            for travel in [Vec2::X, Vec2::Y, Vec2::new(1.0, 1.0).normalize()] {
+                let projected = projected_ground_direction(travel, rotation, aspect);
+                let desired_ndc = trailing_ndc_offset(projected, 0.8);
+                let ground_offset = ground_offset_for_ndc(desired_ndc, rotation, 12.0, aspect);
+                let actual_ndc = projected_car_ndc(ground_offset, rotation, 12.0, aspect);
+                assert!((actual_ndc - desired_ndc).length() < 1e-4);
+                assert!(actual_ndc.x.abs() <= 0.8001 && actual_ndc.y.abs() <= 0.8001);
+                assert!((actual_ndc.x.abs().max(actual_ndc.y.abs()) - 0.8).abs() < 1e-4);
+                assert!(actual_ndc.dot(projected) < 0.0, "car must trail travel");
+            }
+        }
+    }
+
+    fn projected_car_ndc(offset: Vec2, rotation: Quat, height: f32, aspect: f32) -> Vec2 {
+        let relative = Vec3::new(-offset.x, 0.0, -offset.y);
+        let right = rotation * Vec3::X;
+        let up = rotation * Vec3::Y;
+        Vec2::new(
+            relative.dot(right) / (height * aspect * 0.5),
+            relative.dot(up) / (height * 0.5),
+        )
+    }
+
+    #[test]
+    fn stable_framing_tracks_car_delta_without_absolute_follow_lag() {
+        let base = Vec3::new(12.0, 12.0, 12.0);
+        let lead = Vec2::new(4.0, -3.0);
+        let before = camera_target_translation(Vec3::new(2.0, 0.0, 5.0), base, lead);
+        let car_delta = Vec3::new(-1.5, 0.0, 0.75);
+        let after = camera_target_translation(Vec3::new(2.0, 0.0, 5.0) + car_delta, base, lead);
+        assert!((after - before - car_delta).length() < 1e-6);
+    }
+
+    #[test]
+    fn direction_smoothing_rejects_one_frame_reverse_noise() {
+        let forward = Vec2::Y;
+        let alpha = exp_smoothing_alpha(4.0, 1.0 / 60.0);
+        let after_noise = smoothed_direction(forward, -forward, alpha);
+        assert!(after_noise.dot(forward) > 0.99);
+
+        let sustained = (0..120).fold(forward, |dir, _| smoothed_direction(dir, -forward, alpha));
+        assert!(sustained.dot(forward) < -0.99);
+    }
+
+    #[test]
+    fn exponential_smoothing_is_framerate_independent() {
+        let run = |hz: usize| {
+            (0..hz).fold(0.0_f32, |value, _| {
+                let alpha = exp_smoothing_alpha(4.0, 1.0 / hz as f32);
+                value + (1.0 - value) * alpha
+            })
+        };
+        let at_30 = run(30);
+        assert!((at_30 - run(60)).abs() < 1e-5);
+        assert!((at_30 - run(120)).abs() < 1e-5);
+    }
+
+    #[test]
+    fn speed_zoom_is_symmetric_and_bounded() {
+        let forward = camera_viewport_height(10.0, 12.0, 12.0, 1.0, false);
+        assert_eq!(
+            forward,
+            camera_viewport_height(10.0, -12.0, 12.0, 1.0, false)
+        );
+        assert_eq!(
+            forward,
+            camera_viewport_height(10.0, 120.0, 12.0, 1.0, false)
+        );
+        assert_eq!(camera_viewport_height(10.0, 0.0, 12.0, 1.0, false), 10.0);
+        assert!((10.0..=12.0).contains(&forward));
     }
 }
