@@ -48,7 +48,7 @@ use crate::game::resources::{RoundActive, Score, TimeLeft};
 use crate::game::state::GameState;
 use crate::palette;
 use crate::shaders::WaterMaterial;
-use crate::textures::TextureAssets;
+use crate::textures::{FOLIAGE_VARIANTS, TextureAssets};
 
 /// Gate real-time shadows off on WebGL2 for performance.
 const SHADOWS: bool = cfg!(not(target_arch = "wasm32"));
@@ -147,6 +147,42 @@ struct Pond;
 struct PondShore;
 #[derive(Component)]
 struct PondProp;
+
+/// Shared marker for shadows backed by Bevy's XY-oriented `Circle` mesh.
+/// Every such shadow must use `ground_circle_transform` so it lies in XZ.
+#[derive(Component)]
+struct GroundCircleShadow;
+#[derive(Component)]
+struct TreeShadow;
+#[derive(Component)]
+struct HydrantShadow;
+
+/// Visual-only world dressing markers. Their entities never carry gameplay
+/// collision components; streamed blocks only clone cached mesh/material handles.
+#[derive(Component, Clone, Copy, Debug, PartialEq)]
+struct TreeFoliage {
+    variant: usize,
+}
+#[derive(Component)]
+struct HayFieldStrip;
+#[derive(Component, Clone, Copy, Debug, PartialEq)]
+struct HayBaleVisual {
+    scale: f32,
+}
+#[derive(Component)]
+struct HaySprig;
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
+struct HouseStyle(u8);
+#[derive(Component)]
+struct HouseDoor;
+#[derive(Component)]
+struct HouseRoof;
+#[derive(Component)]
+struct HouseChimney;
+#[derive(Component)]
+struct Mailbox;
+#[derive(Component)]
+struct PicketFencePanel;
 
 // ---------------------------------------------------------------------------
 // Wang-tile road network (T19)
@@ -958,6 +994,47 @@ const HAY_BALE_RADIUS: f32 = 0.7;
 const HAY_BALE_LENGTH: f32 = 1.1;
 const FARM_CRATE_SIDE: f32 = 1.1;
 const FARM_CRATE_HEIGHT: f32 = 0.7;
+const TREE_VISUAL_SCALE_MIN: f32 = 0.88;
+const TREE_VISUAL_SCALE_MAX: f32 = 1.12;
+const HAY_BALE_SCALE_MIN: f32 = 0.86;
+const HAY_BALE_SCALE_MAX: f32 = 1.0;
+const MAX_HAY_SPRIGS: usize = 12;
+const MAX_HOME_DECOR: usize = 9;
+
+/// Bevy's `Circle` primitive is authored in XY. This is the sole transform
+/// constructor for circular ground shadows, rotating their normal onto +Y.
+fn ground_circle_transform(height: f32) -> Transform {
+    Transform::from_xyz(0.0, height, 0.0)
+        .with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct TreeVisualPlan {
+    variant: usize,
+    yaw: f32,
+    scale: f32,
+}
+
+fn tree_visual_plan(seed: u32, ordinal: usize) -> TreeVisualPlan {
+    let hash = district_hash(
+        seed as i32,
+        ordinal as i32,
+        0x7aee_51a1 ^ (ordinal as u32).wrapping_mul(0x9e37_79b1),
+    );
+    let unit = |bits: u32| (bits & 0xffff) as f32 / u16::MAX as f32;
+    TreeVisualPlan {
+        variant: hash as usize % FOLIAGE_VARIANTS,
+        yaw: unit(hash >> 8) * std::f32::consts::TAU,
+        scale: TREE_VISUAL_SCALE_MIN
+            + unit(hash >> 16) * (TREE_VISUAL_SCALE_MAX - TREE_VISUAL_SCALE_MIN),
+    }
+}
+
+fn hay_bale_visual_scale(seed: u32, ordinal: usize) -> f32 {
+    let hash = district_hash(seed as i32, ordinal as i32, 0xba1e_5ca1);
+    let unit = (hash & 0xffff) as f32 / u16::MAX as f32;
+    HAY_BALE_SCALE_MIN + unit * (HAY_BALE_SCALE_MAX - HAY_BALE_SCALE_MIN)
+}
 
 struct WorldMeshAssets {
     ground: Handle<Mesh>,
@@ -965,6 +1042,7 @@ struct WorldMeshAssets {
     field_ground: Handle<Mesh>,
     field_furrow: Handle<Mesh>,
     hay_bale: Handle<Mesh>,
+    hay_sprig: Handle<Mesh>,
     farm_crate: Handle<Mesh>,
     pond_water: Handle<Mesh>,
     pond_shore: Handle<Mesh>,
@@ -1012,10 +1090,8 @@ struct WorldMaterialAssets {
     field: Handle<StandardMaterial>,
     field_furrow: Handle<StandardMaterial>,
     orchard: Handle<StandardMaterial>,
-    hay: Handle<StandardMaterial>,
     farm_wood: Handle<StandardMaterial>,
     trunk: Handle<StandardMaterial>,
-    foliage: Handle<StandardMaterial>,
     building_body: [Handle<StandardMaterial>; 3],
     building_roof: [Handle<StandardMaterial>; 3],
     building_window: Handle<StandardMaterial>,
@@ -1048,6 +1124,7 @@ impl FromWorld for WorldAssets {
             field_ground: a.add(Plane3d::default().mesh().size(40.0, 40.0)),
             field_furrow: a.add(Cuboid::new(36.0, 0.025, 0.16)),
             hay_bale: a.add(Cylinder::new(HAY_BALE_RADIUS, HAY_BALE_LENGTH)),
+            hay_sprig: a.add(Cuboid::new(0.055, 0.42, 0.055)),
             farm_crate: a.add(Cuboid::new(
                 FARM_CRATE_SIDE,
                 FARM_CRATE_HEIGHT,
@@ -1129,11 +1206,6 @@ impl FromWorld for WorldAssets {
                         perceptual_roughness: 1.0,
                         ..default()
                     }),
-                    hay: a.add(StandardMaterial {
-                        base_color: Color::srgb(0.82, 0.64, 0.20),
-                        perceptual_roughness: 0.95,
-                        ..default()
-                    }),
                     farm_wood: a.add(StandardMaterial {
                         base_color: Color::srgb(0.38, 0.22, 0.09),
                         perceptual_roughness: 0.95,
@@ -1142,11 +1214,6 @@ impl FromWorld for WorldAssets {
                     trunk: a.add(StandardMaterial {
                         base_color: Color::srgb(0.34, 0.21, 0.11),
                         perceptual_roughness: 0.9,
-                        ..default()
-                    }),
-                    foliage: a.add(StandardMaterial {
-                        base_color: Color::srgb(0.18, 0.42, 0.16),
-                        perceptual_roughness: 0.85,
                         ..default()
                     }),
                     building_body: [
@@ -2027,6 +2094,58 @@ const MAX_FAMILY_BUILDINGS: usize = 5;
 /// than sampled from topology: `try_place` remains the final authority and may
 /// omit a mass under road pressure. Small seeded height variation gives
 /// neighbouring members of one family variety without changing its silhouette.
+fn home_style(seed: u32, ordinal: usize) -> u8 {
+    ((district_hash(seed as i32, 0, 0x403e_57a1) as usize + ordinal) % 3) as u8
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HomeDecorKind {
+    Mailbox,
+    Fence,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct HomeDecorPlacement {
+    position: Vec2,
+    rotation: f32,
+    kind: HomeDecorKind,
+}
+
+/// Bounded visual-only yard dressing. Fixed candidates are seed-rotated; the
+/// shared placement path remains authoritative when roads/buildings occupy one.
+fn home_decor_layout(seed: u32) -> [HomeDecorPlacement; MAX_HOME_DECOR] {
+    let mut s = seed ^ 0x51de_7a11;
+    let yaw = if rand(&mut s) < 0.5 {
+        0.0
+    } else {
+        std::f32::consts::FRAC_PI_2
+    };
+    let candidates = [
+        (Vec2::new(-15.5, -5.5), HomeDecorKind::Mailbox),
+        (Vec2::new(15.5, -5.5), HomeDecorKind::Mailbox),
+        (Vec2::new(0.0, 15.5), HomeDecorKind::Mailbox),
+        (Vec2::new(-15.0, -16.0), HomeDecorKind::Fence),
+        (Vec2::new(-10.0, -16.0), HomeDecorKind::Fence),
+        (Vec2::new(10.0, -16.0), HomeDecorKind::Fence),
+        (Vec2::new(15.0, -16.0), HomeDecorKind::Fence),
+        (Vec2::new(-7.5, 16.0), HomeDecorKind::Fence),
+        (Vec2::new(7.5, 16.0), HomeDecorKind::Fence),
+    ];
+    std::array::from_fn(|index| {
+        let source = (index + (seed as usize % candidates.len())) % candidates.len();
+        let (position, kind) = candidates[source];
+        HomeDecorPlacement {
+            position,
+            rotation: if kind == HomeDecorKind::Fence {
+                yaw
+            } else {
+                0.0
+            },
+            kind,
+        }
+    })
+}
+
 fn urban_building_layout(
     family: DistrictFamily,
     seed: u32,
@@ -2704,7 +2823,6 @@ pub fn populate_block(
         let trunk_mesh = a.meshes.trunk.clone();
         let trunk_mat = a.materials.trunk.clone();
         let foliage_mesh = a.meshes.foliage.clone();
-        let foliage_mat = a.materials.foliage.clone();
         let tree_shadow_mesh = a.meshes.tree_shadow.clone();
         let body_mats = &a.materials.building_body;
         let roof_mats = &a.materials.building_roof;
@@ -2734,7 +2852,7 @@ pub fn populate_block(
         let hedge_mat = a.materials.hedge.clone();
         let hedge_shadow_mesh = a.meshes.hedge_shadow.clone();
         let hay_bale_mesh = a.meshes.hay_bale.clone();
-        let hay_mat = a.materials.hay.clone();
+        let hay_sprig_mesh = a.meshes.hay_sprig.clone();
         let farm_crate_mesh = a.meshes.farm_crate.clone();
         let farm_wood_mat = a.materials.farm_wood.clone();
 
@@ -2796,7 +2914,7 @@ pub fn populate_block(
             };
             let (trees, count) = family_tree_layout(tree_family);
             let mut tree_seed = layout_seed ^ 0x7ee0_0001;
-            for pos in trees.into_iter().take(count) {
+            for (tree_ordinal, pos) in trees.into_iter().take(count).enumerate() {
                 let Some((tx, tz)) = try_place(
                     &mut placed,
                     &mut tree_seed,
@@ -2818,9 +2936,10 @@ pub fn populate_block(
                     &trunk_mesh,
                     &trunk_mat,
                     &foliage_mesh,
-                    &foliage_mat,
+                    &textures.foliage,
                     &tree_shadow_mesh,
                     &shadow_mat,
+                    tree_visual_plan(layout_seed, tree_ordinal),
                 );
             }
             // Meadow's open axis is marked by low, non-colliding path strips;
@@ -2843,7 +2962,11 @@ pub fn populate_block(
                 &mut placed,
                 layout_seed,
                 &world_assets.meshes.field_furrow,
-                &world_assets.materials.field_furrow,
+                if visual_family == DistrictFamily::FieldFurrowHay {
+                    &textures.hay[0]
+                } else {
+                    &world_assets.materials.field_furrow
+                },
             );
             let (props, count) = field_prop_layout_for_family(visual_family, layout_seed);
             // Keep the existing slot/jitter layout, but admit each fixed
@@ -2852,7 +2975,7 @@ pub fn populate_block(
             // the candidate without changing its visual position. The exact
             // same rotation-independent half-extent is assigned to Collider.
             let mut footprint_seed = layout_seed ^ 0xa511_e9b3;
-            for prop in props.into_iter().take(count) {
+            for (prop_ordinal, prop) in props.into_iter().take(count).enumerate() {
                 let half_extent = field_prop_collider_half_extent(prop.kind);
                 let Some((prop_x, prop_z)) = try_place(
                     &mut placed,
@@ -2884,13 +3007,18 @@ pub fn populate_block(
                 .with_children(|fp| {
                     match prop.kind {
                         FieldPropKind::HayBale => {
+                            let scale = hay_bale_visual_scale(layout_seed, prop_ordinal);
                             fp.spawn((
                                 Mesh3d(hay_bale_mesh.clone()),
-                                MeshMaterial3d(hay_mat.clone()),
-                                // Cylinder axis Y -> rotate onto its side along X.
-                                Transform::from_xyz(0.0, HAY_BALE_RADIUS, 0.0).with_rotation(
-                                    Quat::from_rotation_z(std::f32::consts::FRAC_PI_2),
-                                ),
+                                MeshMaterial3d(textures.hay[1].clone()),
+                                // Visual scale never exceeds one, so the existing
+                                // conservative root collider remains authoritative.
+                                Transform::from_xyz(0.0, HAY_BALE_RADIUS * scale, 0.0)
+                                    .with_rotation(Quat::from_rotation_z(
+                                        std::f32::consts::FRAC_PI_2,
+                                    ))
+                                    .with_scale(Vec3::splat(scale)),
+                                HayBaleVisual { scale },
                             ));
                         }
                         FieldPropKind::FarmCrate => {
@@ -2903,12 +3031,25 @@ pub fn populate_block(
                     }
                 });
             }
+            if visual_family == DistrictFamily::FieldFurrowHay {
+                spawn_hay_sprigs(
+                    p,
+                    &placed,
+                    layout_seed,
+                    sock,
+                    &hay_sprig_mesh,
+                    &textures.hay[0],
+                );
+            }
         } else if is_orchard {
             // --- Orchard: aligned rows admitted through the shared footprint
             // exclusion path so road-bearing orchard cells never place trees
             // on the center pad or an active arm.
             let mut orchard_seed = layout_seed ^ 0x0ac4_a2d1;
-            for pos in orchard_tree_layout_for_family(visual_family, layout_seed) {
+            for (tree_ordinal, pos) in orchard_tree_layout_for_family(visual_family, layout_seed)
+                .into_iter()
+                .enumerate()
+            {
                 if footprint_overlaps_road(sock, pos, Vec2::splat(0.3), 0.75) {
                     continue;
                 }
@@ -2926,41 +3067,28 @@ pub fn populate_block(
                 ) else {
                     continue;
                 };
-                p.spawn((
-                    Transform::from_xyz(tree_x, 0.0, tree_z),
-                    Visibility::default(),
-                    Collider {
-                        half_x: 0.3,
-                        half_z: 0.3,
-                    },
-                    Tree,
-                ))
-                .with_children(|tp| {
-                    tp.spawn((
-                        Mesh3d(trunk_mesh.clone()),
-                        MeshMaterial3d(trunk_mat.clone()),
-                        Transform::from_xyz(0.0, 0.45, 0.0),
-                    ));
-                    tp.spawn((
-                        Mesh3d(foliage_mesh.clone()),
-                        MeshMaterial3d(foliage_mat.clone()),
-                        Transform::from_xyz(0.0, 1.35, 0.0),
-                    ));
-                    tp.spawn((
-                        Mesh3d(tree_shadow_mesh.clone()),
-                        MeshMaterial3d(shadow_mat.clone()),
-                        Transform::from_xyz(0.0, 0.05, 0.0),
-                    ));
-                });
+                spawn_tree_root(
+                    p,
+                    tree_x,
+                    tree_z,
+                    &trunk_mesh,
+                    &trunk_mat,
+                    &foliage_mesh,
+                    &textures.foliage,
+                    &tree_shadow_mesh,
+                    &shadow_mat,
+                    tree_visual_plan(layout_seed, tree_ordinal),
+                );
             }
         } else {
             let policy = urban_family_policy(visual_family)
                 .expect("urban district must have an urban family");
             let mut family_seed = layout_seed;
             let (buildings, building_count) = urban_building_layout(visual_family, layout_seed);
-            for building in buildings
+            for (building_ordinal, building) in buildings
                 .into_iter()
                 .take(building_count.min(policy.buildings))
+                .enumerate()
             {
                 let w = building.size.x;
                 let d = building.size.y;
@@ -2979,7 +3107,12 @@ pub fn populate_block(
                 ) else {
                     continue;
                 };
-                let ci = family as usize % 3;
+                let style = if visual_family == DistrictFamily::LowHomesYards {
+                    home_style(layout_seed, building_ordinal)
+                } else {
+                    family as u8 % 3
+                };
+                let ci = style as usize;
                 let window_rows = window_row_heights(h);
                 p.spawn((
                     Transform::from_xyz(bx, 0.0, bz),
@@ -2989,6 +3122,7 @@ pub fn populate_block(
                         half_z: d / 2.0,
                     },
                     Building,
+                    HouseStyle(style),
                 ))
                 .with_children(|bp| {
                     bp.spawn((
@@ -2996,15 +3130,37 @@ pub fn populate_block(
                         MeshMaterial3d(body_mats[ci].clone()),
                         Transform::from_xyz(0.0, h / 2.0, 0.0).with_scale(Vec3::new(w, h, d)),
                     ));
+                    let roof_scale = match style {
+                        0 => Vec3::new(w * 1.12, 0.4, d * 1.12),
+                        1 => Vec3::new(w * 1.18, 0.55, d * 0.92),
+                        _ => Vec3::new(w * 0.92, 0.7, d * 1.18),
+                    };
                     bp.spawn((
                         Mesh3d(unit_box_mesh.clone()),
                         MeshMaterial3d(roof_mats[ci].clone()),
-                        Transform::from_xyz(0.0, h + 0.2, 0.0).with_scale(Vec3::new(
-                            w * 1.12,
-                            0.4,
-                            d * 1.12,
-                        )),
+                        Transform::from_xyz(0.0, h + roof_scale.y * 0.5, 0.0)
+                            .with_scale(roof_scale),
+                        HouseRoof,
                     ));
+                    if visual_family == DistrictFamily::LowHomesYards {
+                        let door_x = [-w * 0.23, 0.0, w * 0.23][ci];
+                        bp.spawn((
+                            Mesh3d(unit_box_mesh.clone()),
+                            MeshMaterial3d(roof_mats[(ci + 1) % 3].clone()),
+                            Transform::from_xyz(door_x, 1.0, -d / 2.0 - 0.055)
+                                .with_scale(Vec3::new(0.8, 2.0, 0.1)),
+                            HouseDoor,
+                        ));
+                        if style != 0 {
+                            bp.spawn((
+                                Mesh3d(unit_box_mesh.clone()),
+                                MeshMaterial3d(roof_mats[2].clone()),
+                                Transform::from_xyz(w * 0.27, h + 0.75, d * 0.18)
+                                    .with_scale(Vec3::new(0.55, 1.5, 0.55)),
+                                HouseChimney,
+                            ));
+                        }
+                    }
                     bp.spawn((
                         Mesh3d(unit_box_mesh.clone()),
                         MeshMaterial3d(shadow_mat.clone()),
@@ -3051,7 +3207,7 @@ pub fn populate_block(
 
             // Trees use a family-specific count while retaining random open
             // placement, always through the same exclusion path.
-            for _ in 0..policy.trees {
+            for tree_ordinal in 0..policy.trees {
                 let Some((tx, tz)) = try_place(
                     &mut placed,
                     &mut s,
@@ -3066,32 +3222,18 @@ pub fn populate_block(
                 ) else {
                     continue;
                 };
-                p.spawn((
-                    Transform::from_xyz(tx, 0.0, tz),
-                    Visibility::default(),
-                    Collider {
-                        half_x: 0.3,
-                        half_z: 0.3,
-                    },
-                    Tree,
-                ))
-                .with_children(|tp| {
-                    tp.spawn((
-                        Mesh3d(trunk_mesh.clone()),
-                        MeshMaterial3d(trunk_mat.clone()),
-                        Transform::from_xyz(0.0, 0.45, 0.0),
-                    ));
-                    tp.spawn((
-                        Mesh3d(foliage_mesh.clone()),
-                        MeshMaterial3d(foliage_mat.clone()),
-                        Transform::from_xyz(0.0, 1.35, 0.0),
-                    ));
-                    tp.spawn((
-                        Mesh3d(tree_shadow_mesh.clone()),
-                        MeshMaterial3d(shadow_mat.clone()),
-                        Transform::from_xyz(0.0, 0.05, 0.0),
-                    ));
-                });
+                spawn_tree_root(
+                    p,
+                    tx,
+                    tz,
+                    &trunk_mesh,
+                    &trunk_mat,
+                    &foliage_mesh,
+                    &textures.foliage,
+                    &tree_shadow_mesh,
+                    &shadow_mat,
+                    tree_visual_plan(layout_seed, tree_ordinal),
+                );
             }
 
             // --- ~2 lamp posts (overlap-rejected, block interior) ---
@@ -3199,8 +3341,9 @@ pub fn populate_block(
                             cp.spawn((
                                 Mesh3d(cone_shadow_mesh.clone()),
                                 MeshMaterial3d(shadow_mat.clone()),
-                                Transform::from_xyz(0.0, 0.05, 0.0),
+                                ground_circle_transform(0.05),
                                 ConeShadow,
+                                GroundCircleShadow,
                             ));
                         });
                     }
@@ -3246,7 +3389,9 @@ pub fn populate_block(
                             hp.spawn((
                                 Mesh3d(hydrant_shadow_mesh.clone()),
                                 MeshMaterial3d(shadow_mat.clone()),
-                                Transform::from_xyz(0.0, 0.05, 0.0),
+                                ground_circle_transform(0.05),
+                                HydrantShadow,
+                                GroundCircleShadow,
                             ));
                         });
                     }
@@ -3318,6 +3463,19 @@ pub fn populate_block(
                         });
                     }
                 }
+            }
+            // Yard dressing is admitted last against roads and every accepted
+            // collider footprint, but is intentionally not registered back
+            // into gameplay placement because it is visual-only.
+            if visual_family == DistrictFamily::LowHomesYards {
+                spawn_home_decor(
+                    p,
+                    &placed,
+                    layout_seed,
+                    &unit_box_mesh,
+                    &farm_wood_mat,
+                    &metal_mat,
+                );
             }
         }
     });
@@ -3395,9 +3553,10 @@ fn spawn_tree_root(
     trunk_mesh: &Handle<Mesh>,
     trunk_mat: &Handle<StandardMaterial>,
     foliage_mesh: &Handle<Mesh>,
-    foliage_mat: &Handle<StandardMaterial>,
+    foliage_mats: &[Handle<StandardMaterial>; FOLIAGE_VARIANTS],
     shadow_mesh: &Handle<Mesh>,
     shadow_mat: &Handle<StandardMaterial>,
+    visual: TreeVisualPlan,
 ) {
     parent
         .spawn((
@@ -3417,13 +3576,20 @@ fn spawn_tree_root(
             ));
             tree.spawn((
                 Mesh3d(foliage_mesh.clone()),
-                MeshMaterial3d(foliage_mat.clone()),
-                Transform::from_xyz(0.0, 1.35, 0.0),
+                MeshMaterial3d(foliage_mats[visual.variant].clone()),
+                Transform::from_xyz(0.0, 1.35 * visual.scale, 0.0)
+                    .with_rotation(Quat::from_rotation_y(visual.yaw))
+                    .with_scale(Vec3::splat(visual.scale)),
+                TreeFoliage {
+                    variant: visual.variant,
+                },
             ));
             tree.spawn((
                 Mesh3d(shadow_mesh.clone()),
                 MeshMaterial3d(shadow_mat.clone()),
-                Transform::from_xyz(0.0, 0.05, 0.0),
+                ground_circle_transform(0.05),
+                TreeShadow,
+                GroundCircleShadow,
             ));
         });
 }
@@ -3465,7 +3631,7 @@ fn spawn_family_strips(
         } else {
             Vec2::ONE
         };
-        parent.spawn((
+        let mut entity = parent.spawn((
             Mesh3d(mesh.clone()),
             MeshMaterial3d(material.clone()),
             Transform::from_xyz(strip.position.x, 0.035, strip.position.y).with_scale(Vec3::new(
@@ -3474,6 +3640,122 @@ fn spawn_family_strips(
                 strip.size.y / base.y,
             )),
         ));
+        if family == DistrictFamily::FieldFurrowHay {
+            entity.insert(HayFieldStrip);
+        }
+    }
+}
+
+fn spawn_hay_sprigs(
+    parent: &mut ChildSpawnerCommands,
+    placed: &[[f32; 4]],
+    seed: u32,
+    sock: [Edge; 4],
+    mesh: &Handle<Mesh>,
+    material: &Handle<StandardMaterial>,
+) {
+    let mut s = seed ^ 0x5a71_a901;
+    let mut decor_placed = placed.to_vec();
+    for _ in 0..MAX_HAY_SPRIGS {
+        let position = Vec2::new(-16.0 + rand(&mut s) * 32.0, -16.0 + rand(&mut s) * 32.0);
+        if footprint_overlaps_road(sock, position, Vec2::splat(0.12), 0.1)
+            || try_place(
+                &mut decor_placed,
+                &mut s,
+                0.12,
+                0.12,
+                position.x,
+                position.x,
+                position.y,
+                position.y,
+                0.08,
+                1,
+            )
+            .is_none()
+        {
+            continue;
+        }
+        let yaw = rand(&mut s) * std::f32::consts::TAU;
+        let scale = 0.75 + rand(&mut s) * 0.35;
+        parent.spawn((
+            Mesh3d(mesh.clone()),
+            MeshMaterial3d(material.clone()),
+            Transform::from_xyz(position.x, 0.21 * scale, position.y)
+                .with_rotation(Quat::from_rotation_y(yaw))
+                .with_scale(Vec3::new(1.0, scale, 1.0)),
+            HaySprig,
+        ));
+    }
+}
+
+fn spawn_home_decor(
+    parent: &mut ChildSpawnerCommands,
+    placed: &[[f32; 4]],
+    seed: u32,
+    mesh: &Handle<Mesh>,
+    wood: &Handle<StandardMaterial>,
+    metal: &Handle<StandardMaterial>,
+) {
+    let mut decor_seed = seed ^ 0xdeca_7e11;
+    let mut decor_placed = placed.to_vec();
+    for decor in home_decor_layout(seed) {
+        let (half_x, half_z) = match decor.kind {
+            HomeDecorKind::Mailbox => (0.25, 0.25),
+            HomeDecorKind::Fence if decor.rotation == 0.0 => (2.0, 0.12),
+            HomeDecorKind::Fence => (0.12, 2.0),
+        };
+        if try_place(
+            &mut decor_placed,
+            &mut decor_seed,
+            half_x,
+            half_z,
+            decor.position.x,
+            decor.position.x,
+            decor.position.y,
+            decor.position.y,
+            0.15,
+            1,
+        )
+        .is_none()
+        {
+            continue;
+        }
+        match decor.kind {
+            HomeDecorKind::Mailbox => {
+                parent
+                    .spawn((
+                        Transform::from_xyz(decor.position.x, 0.0, decor.position.y),
+                        Visibility::default(),
+                        Collider { half_x, half_z },
+                        Mailbox,
+                    ))
+                    .with_children(|mailbox| {
+                        mailbox.spawn((
+                            Mesh3d(mesh.clone()),
+                            MeshMaterial3d(metal.clone()),
+                            Transform::from_xyz(0.0, 0.55, 0.0)
+                                .with_scale(Vec3::new(0.09, 1.1, 0.09)),
+                        ));
+                        mailbox.spawn((
+                            Mesh3d(mesh.clone()),
+                            MeshMaterial3d(wood.clone()),
+                            Transform::from_xyz(0.0, 1.08, 0.0)
+                                .with_scale(Vec3::new(0.48, 0.36, 0.34)),
+                        ));
+                    });
+            }
+            HomeDecorKind::Fence => {
+                parent.spawn((
+                    Mesh3d(mesh.clone()),
+                    MeshMaterial3d(wood.clone()),
+                    Transform::from_xyz(decor.position.x, 0.45, decor.position.y)
+                        .with_rotation(Quat::from_rotation_y(decor.rotation))
+                        .with_scale(Vec3::new(4.0, 0.9, 0.12)),
+                    Collider { half_x, half_z },
+                    PicketFencePanel,
+                ));
+            }
+        }
     }
 }
 
@@ -4453,6 +4735,77 @@ mod tests {
     }
 
     #[test]
+    fn circular_ground_shadows_use_the_only_flat_xz_transform() {
+        let transform = ground_circle_transform(0.05);
+        assert_eq!(transform.translation, Vec3::new(0.0, 0.05, 0.0));
+        // Circle is authored in XY with +Z normal; a ground circle needs +Y.
+        let normal = transform.rotation * Vec3::Z;
+        assert!(normal.abs_diff_eq(Vec3::Y, 1e-6), "normal was {normal}");
+        assert_eq!(transform.scale, Vec3::ONE);
+    }
+
+    #[test]
+    fn organic_visual_plans_are_deterministic_bounded_and_collider_safe() {
+        let mut variants = BTreeSet::new();
+        for seed in 0..256 {
+            for ordinal in 0..12 {
+                let tree = tree_visual_plan(seed, ordinal);
+                assert_eq!(tree, tree_visual_plan(seed, ordinal));
+                assert!(tree.variant < FOLIAGE_VARIANTS);
+                assert!((0.0..=std::f32::consts::TAU).contains(&tree.yaw));
+                assert!((TREE_VISUAL_SCALE_MIN..=TREE_VISUAL_SCALE_MAX).contains(&tree.scale));
+                variants.insert(tree.variant);
+
+                let bale = hay_bale_visual_scale(seed, ordinal);
+                assert_eq!(bale, hay_bale_visual_scale(seed, ordinal));
+                assert!((HAY_BALE_SCALE_MIN..=HAY_BALE_SCALE_MAX).contains(&bale));
+                // Bale visuals only shrink, so the pre-existing unscaled,
+                // yaw-independent collider remains conservative.
+                let collider = field_prop_collider_half_extent(FieldPropKind::HayBale);
+                for yaw in [0.0, 0.37, 1.2, std::f32::consts::FRAC_PI_2] {
+                    let geometry =
+                        field_prop_geometry_aabb_half_extents(FieldPropKind::HayBale, yaw) * bale;
+                    assert!(geometry.x <= collider && geometry.y <= collider);
+                }
+            }
+        }
+        assert_eq!(variants.len(), FOLIAGE_VARIANTS);
+    }
+
+    #[test]
+    fn home_styles_and_visual_decor_plans_are_deterministic_and_bounded() {
+        for seed in 0..128 {
+            let styles = [
+                home_style(seed, 0),
+                home_style(seed, 1),
+                home_style(seed, 2),
+            ];
+            assert_eq!(
+                styles,
+                [
+                    home_style(seed, 0),
+                    home_style(seed, 1),
+                    home_style(seed, 2)
+                ]
+            );
+            assert_eq!(styles.into_iter().collect::<BTreeSet<_>>().len(), 3);
+
+            let decor = home_decor_layout(seed);
+            assert_eq!(decor, home_decor_layout(seed));
+            assert_eq!(decor.len(), MAX_HOME_DECOR);
+            for item in decor {
+                let half = match item.kind {
+                    HomeDecorKind::Mailbox => Vec2::splat(0.25),
+                    HomeDecorKind::Fence if item.rotation == 0.0 => Vec2::new(2.0, 0.12),
+                    HomeDecorKind::Fence => Vec2::new(0.12, 2.0),
+                };
+                assert!(item.position.x.abs() + half.x <= 20.0);
+                assert!(item.position.y.abs() + half.y <= 20.0);
+            }
+        }
+    }
+
+    #[test]
     fn family_bucket_boundaries_are_exact() {
         let three = [
             (0, DistrictFamily::DenseTowerCourt),
@@ -4705,6 +5058,144 @@ mod tests {
             .add_systems(Startup, spawn_review_world);
         app.update();
         app
+    }
+
+    #[test]
+    fn spawned_visual_integration_reuses_cached_assets_and_preserves_tree_cardinality() {
+        let mut app = review_test_app();
+        let foliage_ids = app
+            .world()
+            .resource::<TextureAssets>()
+            .foliage
+            .each_ref()
+            .map(|handle| handle.id());
+        let hay_ids = app
+            .world()
+            .resource::<TextureAssets>()
+            .hay
+            .each_ref()
+            .map(|handle| handle.id());
+        let world = app.world_mut();
+
+        let tree_count = {
+            let mut query = world.query::<&Tree>();
+            query.iter(world).count()
+        };
+        let foliage_count = {
+            let mut query = world.query::<(&TreeFoliage, &MeshMaterial3d<StandardMaterial>)>();
+            query
+                .iter(world)
+                .map(|(marker, material)| {
+                    assert!(marker.variant < FOLIAGE_VARIANTS);
+                    assert_eq!(material.0.id(), foliage_ids[marker.variant]);
+                })
+                .count()
+        };
+        let tree_shadow_count = {
+            let mut query = world.query::<(&TreeShadow, &GroundCircleShadow, &Transform)>();
+            query
+                .iter(world)
+                .map(|(_, _, transform)| {
+                    assert!((transform.rotation * Vec3::Z).abs_diff_eq(Vec3::Y, 1e-6));
+                })
+                .count()
+        };
+        assert_eq!(foliage_count, tree_count);
+        assert_eq!(tree_shadow_count, tree_count);
+
+        let hay_strip_count = {
+            let mut query = world.query::<(&HayFieldStrip, &MeshMaterial3d<StandardMaterial>)>();
+            query
+                .iter(world)
+                .map(|(_, material)| assert_eq!(material.0.id(), hay_ids[0]))
+                .count()
+        };
+        let bale_count = {
+            let mut query = world.query::<(&HayBaleVisual, &MeshMaterial3d<StandardMaterial>)>();
+            query
+                .iter(world)
+                .map(|(bale, material)| {
+                    assert_eq!(material.0.id(), hay_ids[1]);
+                    assert!((HAY_BALE_SCALE_MIN..=HAY_BALE_SCALE_MAX).contains(&bale.scale));
+                })
+                .count()
+        };
+        let sprig_count = {
+            let mut query = world.query::<(&HaySprig, &MeshMaterial3d<StandardMaterial>)>();
+            query
+                .iter(world)
+                .map(|(_, material)| assert_eq!(material.0.id(), hay_ids[0]))
+                .count()
+        };
+        assert!(hay_strip_count > 0);
+        assert!(bale_count > 0);
+        assert!(sprig_count > 0);
+    }
+
+    #[test]
+    fn decor_collision_matches_visual_readability() {
+        let mut app = review_test_app();
+        let world = app.world_mut();
+        let mut sprigs = world.query_filtered::<Entity, (With<HaySprig>, Without<Collider>)>();
+        assert!(sprigs.iter(world).count() > 0);
+
+        let mut mailboxes = world.query_filtered::<&Collider, With<Mailbox>>();
+        let mut mailbox_count = 0;
+        for collider in mailboxes.iter(world) {
+            mailbox_count += 1;
+            assert!((collider.half_x - 0.25).abs() < 1e-6);
+            assert!((collider.half_z - 0.25).abs() < 1e-6);
+        }
+        assert!(mailbox_count > 0);
+
+        let mut fences = world.query_filtered::<&Collider, With<PicketFencePanel>>();
+        let mut fence_count = 0;
+        for collider in fences.iter(world) {
+            fence_count += 1;
+            let horizontal =
+                (collider.half_x - 2.0).abs() < 1e-6 && (collider.half_z - 0.12).abs() < 1e-6;
+            let vertical =
+                (collider.half_x - 0.12).abs() < 1e-6 && (collider.half_z - 2.0).abs() < 1e-6;
+            assert!(horizontal || vertical);
+        }
+        assert!(fence_count > 0);
+
+        macro_rules! assert_visual_child {
+            ($marker:ty) => {{
+                let mut all = world.query_filtered::<Entity, With<$marker>>();
+                assert!(
+                    all.iter(world).count() > 0,
+                    "missing {}",
+                    stringify!($marker)
+                );
+                let mut colliding =
+                    world.query_filtered::<Entity, (With<$marker>, With<Collider>)>();
+                assert_eq!(colliding.iter(world).count(), 0);
+            }};
+        }
+        assert_visual_child!(HouseDoor);
+        assert_visual_child!(HouseRoof);
+        assert_visual_child!(HouseChimney);
+    }
+
+    #[test]
+    fn all_spawned_circle_shadows_are_flat_and_marker_complete() {
+        let mut app = review_test_app();
+        let world = app.world_mut();
+        let all_count = {
+            let mut query = world.query::<(&GroundCircleShadow, &Transform)>();
+            query
+                .iter(world)
+                .map(|(_, transform)| {
+                    assert!((transform.rotation * Vec3::Z).abs_diff_eq(Vec3::Y, 1e-6));
+                })
+                .count()
+        };
+        let tree_count = world.query::<&TreeShadow>().iter(world).count();
+        let cone_count = world.query::<&ConeShadow>().iter(world).count();
+        let hydrant_count = world.query::<&HydrantShadow>().iter(world).count();
+        assert_eq!(all_count, tree_count + cone_count + hydrant_count);
+        assert!(all_count > 0);
     }
 
     #[test]
