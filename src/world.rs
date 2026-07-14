@@ -47,6 +47,7 @@ use crate::game::events::CoinCollected;
 use crate::game::resources::{RoundActive, Score, TimeLeft};
 use crate::game::state::GameState;
 use crate::palette;
+use crate::shaders::WaterMaterial;
 use crate::textures::TextureAssets;
 
 /// Gate real-time shadows off on WebGL2 for performance.
@@ -137,6 +138,15 @@ pub struct Bench;
 /// Tag for a hedge obstacle (collidable, T12 variety).
 #[derive(Component)]
 pub struct Hedge;
+
+/// Visual-only pond surface, shoreline and dressing markers. None of these
+/// entities carries `Collider`, `Curb`, or gameplay event/message components.
+#[derive(Component)]
+struct Pond;
+#[derive(Component)]
+struct PondShore;
+#[derive(Component)]
+struct PondProp;
 
 // ---------------------------------------------------------------------------
 // Wang-tile road network (T19)
@@ -664,14 +674,18 @@ fn district_family_for(gx: i32, gz: i32, district: District) -> DistrictFamily {
     family_from_bucket(district, district_hash(gx, gz, FAMILY_SUB_DOMAIN) % 10_000)
 }
 
-/// Water families retain their stored identity but deliberately borrow one of
-/// the two Park policies until water geometry ships. This mapping is visual
-/// only and cannot affect district/family selection or review metadata.
+/// Families now retain their own visual identity. This function remains the
+/// single presentation indirection used by the established non-water layouts.
 fn visual_family(family: DistrictFamily) -> DistrictFamily {
-    use DistrictFamily::*;
+    family
+}
+
+fn pond_fallback_family(family: DistrictFamily) -> DistrictFamily {
     match family {
-        WaterGardenOval | WaterFarmReservoir => ParkMeadow,
-        WaterReedMarsh => ParkGrove,
+        DistrictFamily::WaterReedMarsh => DistrictFamily::ParkGrove,
+        DistrictFamily::WaterGardenOval | DistrictFamily::WaterFarmReservoir => {
+            DistrictFamily::ParkMeadow
+        }
         family => family,
     }
 }
@@ -924,6 +938,10 @@ struct WorldMeshAssets {
     field_furrow: Handle<Mesh>,
     hay_bale: Handle<Mesh>,
     farm_crate: Handle<Mesh>,
+    pond_water: Handle<Mesh>,
+    pond_shore: Handle<Mesh>,
+    pond_reed: Handle<Mesh>,
+    pond_rock: Handle<Mesh>,
     road_pad: Handle<Mesh>,
     road_z: Handle<Mesh>,
     road_x: Handle<Mesh>,
@@ -981,6 +999,10 @@ struct WorldMaterialAssets {
     hydrant: Handle<StandardMaterial>,
     bench: Handle<StandardMaterial>,
     hedge: Handle<StandardMaterial>,
+    pond_shore: Handle<StandardMaterial>,
+    pond_reed: Handle<StandardMaterial>,
+    pond_rock: Handle<StandardMaterial>,
+    pond_water: [Handle<WaterMaterial>; 3],
 }
 
 impl FromWorld for WorldAssets {
@@ -1003,6 +1025,12 @@ impl FromWorld for WorldAssets {
                 FARM_CRATE_HEIGHT,
                 FARM_CRATE_SIDE,
             )),
+            // Unit pond primitives are scaled/rotated per deterministic
+            // footprint; streaming never creates another pond mesh.
+            pond_water: a.add(Circle::new(1.0)),
+            pond_shore: a.add(Circle::new(1.0)),
+            pond_reed: a.add(Cuboid::new(0.10, 0.75, 0.10)),
+            pond_rock: a.add(Sphere::new(0.45).mesh().uv(8, 6)),
             road_pad: a.add(Plane3d::default().mesh().size(8.0, 8.0)),
             road_z: a.add(Plane3d::default().mesh().size(8.0, 16.0)),
             road_x: a.add(Plane3d::default().mesh().size(16.0, 8.0)),
@@ -1178,8 +1206,42 @@ impl FromWorld for WorldAssets {
                         perceptual_roughness: 0.9,
                         ..default()
                     }),
+                    pond_shore: a.add(StandardMaterial {
+                        base_color: Color::srgb(0.48, 0.39, 0.22),
+                        perceptual_roughness: 1.0,
+                        ..default()
+                    }),
+                    pond_reed: a.add(StandardMaterial {
+                        base_color: Color::srgb(0.34, 0.48, 0.12),
+                        perceptual_roughness: 0.95,
+                        ..default()
+                    }),
+                    pond_rock: a.add(StandardMaterial {
+                        base_color: Color::srgb(0.39, 0.42, 0.40),
+                        perceptual_roughness: 0.98,
+                        ..default()
+                    }),
+                    // Filled below after the StandardMaterial borrow closes.
+                    pond_water: std::array::from_fn(|_| Handle::default()),
                 },
             );
+        let mut materials = materials;
+        materials.pond_water = world.resource_scope(|_, mut a: Mut<Assets<WaterMaterial>>| {
+            [
+                a.add(WaterMaterial {
+                    base: LinearRgba::new(0.08, 0.36, 0.49, 1.0),
+                    time: Vec4::ZERO,
+                }),
+                a.add(WaterMaterial {
+                    base: LinearRgba::new(0.10, 0.30, 0.38, 1.0),
+                    time: Vec4::ZERO,
+                }),
+                a.add(WaterMaterial {
+                    base: LinearRgba::new(0.07, 0.40, 0.54, 1.0),
+                    time: Vec4::ZERO,
+                }),
+            ]
+        });
         Self { meshes, materials }
     }
 }
@@ -1393,6 +1455,9 @@ struct ReviewCounts {
     buildings: usize,
     trees: usize,
     farm_props: usize,
+    ponds: usize,
+    pond_shores: usize,
+    pond_props: usize,
     coins: usize,
     lamps: usize,
     obstacles: usize,
@@ -1740,6 +1805,9 @@ fn count_review_descendants(
     counts.buildings += usize::from(world.get::<Building>(entity).is_some());
     counts.trees += usize::from(world.get::<Tree>(entity).is_some());
     counts.farm_props += usize::from(world.get::<FarmProp>(entity).is_some());
+    counts.ponds += usize::from(world.get::<Pond>(entity).is_some());
+    counts.pond_shores += usize::from(world.get::<PondShore>(entity).is_some());
+    counts.pond_props += usize::from(world.get::<PondProp>(entity).is_some());
     counts.coins += usize::from(world.get::<Coin>(entity).is_some());
     counts.lamps += usize::from(world.get::<LampPost>(entity).is_some());
     counts.obstacles += usize::from(
@@ -1983,6 +2051,137 @@ fn urban_building_layout(
     (out, specs.len())
 }
 
+const POND_SHORE_WIDTH: f32 = 0.75;
+const POND_ROAD_CLEARANCE: f32 = 0.65;
+const POND_BLOCK_CLEARANCE: f32 = 0.5;
+const POND_DECOR_CLEARANCE: f32 = 1.0;
+const MAX_POND_PROPS: usize = 10;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PondFootprint {
+    center: Vec2,
+    radii: Vec2,
+    rotation: f32,
+}
+
+impl PondFootprint {
+    /// Conservative block-local AABB including the visible shoreline. The
+    /// absolute rotation matrix contains the entire rotated ellipse/shore.
+    fn shore_aabb_half_extents(self) -> Vec2 {
+        let (sin, cos) = self.rotation.sin_cos();
+        let radii = self.radii + Vec2::splat(POND_SHORE_WIDTH);
+        Vec2::new(
+            cos.abs() * radii.x + sin.abs() * radii.y,
+            sin.abs() * radii.x + cos.abs() * radii.y,
+        )
+    }
+
+    fn expanded_exclusion(self) -> [f32; 4] {
+        let half = self.shore_aabb_half_extents() + Vec2::splat(POND_DECOR_CLEARANCE);
+        [
+            self.center.x - half.x,
+            self.center.x + half.x,
+            self.center.y - half.y,
+            self.center.y + half.y,
+        ]
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PondPropKind {
+    Reed,
+    Rock,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PondPropPlacement {
+    position: Vec2,
+    rotation: f32,
+    kind: PondPropKind,
+}
+
+fn pond_family_shape(family: DistrictFamily, seed: u32) -> Option<(Vec2, f32)> {
+    let jitter =
+        (district_hash(seed as i32, (seed >> 16) as i32, 0x90dd_5a9e) & 0xff) as f32 / 255.0 - 0.5;
+    Some(match family {
+        DistrictFamily::WaterGardenOval => (Vec2::new(5.2, 3.35), 0.22 + jitter * 0.12),
+        DistrictFamily::WaterReedMarsh => (Vec2::new(4.25, 3.75), 0.72 + jitter * 0.16),
+        DistrictFamily::WaterFarmReservoir => (Vec2::new(5.55, 2.85), -0.12 + jitter * 0.08),
+        _ => return None,
+    })
+}
+
+/// Pure fixed-candidate pond placement. Candidate order is seed-rotated, but
+/// neither retries nor topology-dependent random draws occur. A candidate must
+/// fit the block and clear the complete center-pad/arm/curb exclusion plan.
+fn pond_layout(
+    family: DistrictFamily,
+    seed: u32,
+    sock: [Edge; 4],
+    block_half: f32,
+) -> Option<PondFootprint> {
+    let (radii, rotation) = pond_family_shape(family, seed)?;
+    const CANDIDATES: [Vec2; 4] = [
+        Vec2::new(-12.5, -12.5),
+        Vec2::new(12.5, 12.5),
+        Vec2::new(-12.5, 12.5),
+        Vec2::new(12.5, -12.5),
+    ];
+    let start =
+        (district_hash(seed as i32, family as i32, 0x701d_c0de) as usize) % CANDIDATES.len();
+    for offset in 0..CANDIDATES.len() {
+        let footprint = PondFootprint {
+            center: CANDIDATES[(start + offset) % CANDIDATES.len()],
+            radii,
+            rotation,
+        };
+        let half = footprint.shore_aabb_half_extents();
+        let limit = block_half - POND_BLOCK_CLEARANCE;
+        if footprint.center.x.abs() + half.x > limit
+            || footprint.center.y.abs() + half.y > limit
+            || footprint_overlaps_road(sock, footprint.center, half, POND_ROAD_CLEARANCE)
+        {
+            continue;
+        }
+        return Some(footprint);
+    }
+    None
+}
+
+fn pond_prop_layout(
+    family: DistrictFamily,
+    footprint: PondFootprint,
+    seed: u32,
+) -> ([PondPropPlacement; MAX_POND_PROPS], usize) {
+    let (count, reed_count) = match family {
+        DistrictFamily::WaterGardenOval => (5, 0),
+        DistrictFamily::WaterReedMarsh => (10, 8),
+        DistrictFamily::WaterFarmReservoir => (6, 2),
+        _ => (0, 0),
+    };
+    let mut s = seed ^ 0x5a0e_9eed;
+    let props = std::array::from_fn(|index| {
+        let phase = index as f32 / count.max(1) as f32 * std::f32::consts::TAU
+            + (rand(&mut s) - 0.5) * 0.16;
+        let local = Vec2::new(
+            phase.cos() * (footprint.radii.x + 0.35),
+            phase.sin() * (footprint.radii.y + 0.35),
+        );
+        let (sin, cos) = footprint.rotation.sin_cos();
+        let rotated = Vec2::new(cos * local.x - sin * local.y, sin * local.x + cos * local.y);
+        PondPropPlacement {
+            position: footprint.center + rotated,
+            rotation: phase + footprint.rotation,
+            kind: if index < reed_count {
+                PondPropKind::Reed
+            } else {
+                PondPropKind::Rock
+            },
+        }
+    });
+    (props, count)
+}
+
 const MAX_FAMILY_TREES: usize = 12;
 
 fn family_tree_layout(family: DistrictFamily) -> ([Vec2; MAX_FAMILY_TREES], usize) {
@@ -2006,6 +2205,18 @@ fn family_tree_layout(family: DistrictFamily) -> ([Vec2; MAX_FAMILY_TREES], usiz
             Vec2::new(14.0, -12.0),
             Vec2::new(-14.0, 13.0),
             Vec2::new(14.0, 13.0),
+        ],
+        WaterGardenOval => &[
+            Vec2::new(-14.0, 13.5),
+            Vec2::new(14.0, -13.5),
+            Vec2::new(13.5, 13.5),
+        ],
+        WaterReedMarsh => &[Vec2::new(-14.0, -14.0), Vec2::new(14.0, 14.0)],
+        WaterFarmReservoir => &[
+            Vec2::new(-14.0, 13.5),
+            Vec2::new(14.0, -13.5),
+            Vec2::new(-13.5, -13.5),
+            Vec2::new(13.5, 13.5),
         ],
         LowHomesYards => &[
             Vec2::new(-15.0, -14.0),
@@ -2535,12 +2746,24 @@ pub fn populate_block(
         // --- Interior decorations ---
         // Park, Field and Orchard presentations are dedicated non-urban
         // branches: none can reach the buildings/lamps/T12 branch below.
-        // DenseUrban and LowRise retain the existing urban behavior. Interior
-        // bounds are shrunk away from Road edges; None edges use the block.
+        // The WaterPark branch first registers its whole expanded shoreline,
+        // then emits exactly one shore and opaque water surface plus bounded
+        // visual props. If no fixed candidate clears topology it uses an
+        // ordinary Park policy rather than squeezing a pond onto the road.
         if is_park {
-            // Grove clusters and Meadow perimeter trees are authored, stable
-            // signatures. Water families reach exactly one of these policies.
-            let (trees, count) = family_tree_layout(visual_family);
+            let pond = (district == District::WaterPark)
+                .then(|| pond_layout(family, layout_seed, sock, half))
+                .flatten();
+            if let Some(pond) = pond {
+                placed.push(pond.expanded_exclusion());
+                spawn_pond(p, family, pond, layout_seed, world_assets);
+            }
+            let tree_family = if district == District::WaterPark && pond.is_none() {
+                pond_fallback_family(family)
+            } else {
+                visual_family
+            };
+            let (trees, count) = family_tree_layout(tree_family);
             let mut tree_seed = layout_seed ^ 0x7ee0_0001;
             for pos in trees.into_iter().take(count) {
                 let Some((tx, tz)) = try_place(
@@ -2570,10 +2793,10 @@ pub fn populate_block(
                 );
             }
             // Meadow's open axis is marked by low, non-colliding path strips;
-            // every strip is still admitted through road exclusion.
+            // every strip is still admitted through road/pond exclusion.
             spawn_family_strips(
                 p,
-                visual_family,
+                tree_family,
                 &mut placed,
                 layout_seed,
                 &unit_box_mesh,
@@ -3067,6 +3290,70 @@ pub fn populate_block(
             }
         }
     });
+}
+
+fn spawn_pond(
+    parent: &mut ChildSpawnerCommands,
+    family: DistrictFamily,
+    footprint: PondFootprint,
+    seed: u32,
+    assets: &WorldAssets,
+) {
+    let water_index = match family {
+        DistrictFamily::WaterGardenOval => 0,
+        DistrictFamily::WaterReedMarsh => 1,
+        DistrictFamily::WaterFarmReservoir => 2,
+        _ => return,
+    };
+    let rotation = Quat::from_rotation_y(footprint.rotation);
+    // Circle meshes lie in XY, so rotate them flat first; root yaw then gives
+    // the authored ellipse orientation in XZ.
+    let flat = Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2);
+    parent.spawn((
+        Mesh3d(assets.meshes.pond_shore.clone()),
+        MeshMaterial3d(assets.materials.pond_shore.clone()),
+        Transform::from_xyz(footprint.center.x, 0.025, footprint.center.y)
+            .with_rotation(rotation * flat)
+            .with_scale(Vec3::new(
+                footprint.radii.x + POND_SHORE_WIDTH,
+                footprint.radii.y + POND_SHORE_WIDTH,
+                1.0,
+            )),
+        PondShore,
+    ));
+    parent.spawn((
+        Mesh3d(assets.meshes.pond_water.clone()),
+        MeshMaterial3d(assets.materials.pond_water[water_index].clone()),
+        Transform::from_xyz(footprint.center.x, 0.045, footprint.center.y)
+            .with_rotation(rotation * flat)
+            .with_scale(Vec3::new(footprint.radii.x, footprint.radii.y, 1.0)),
+        Pond,
+    ));
+
+    let (props, count) = pond_prop_layout(family, footprint, seed);
+    for prop in props.into_iter().take(count.min(MAX_POND_PROPS)) {
+        match prop.kind {
+            PondPropKind::Reed => {
+                parent.spawn((
+                    Mesh3d(assets.meshes.pond_reed.clone()),
+                    MeshMaterial3d(assets.materials.pond_reed.clone()),
+                    Transform::from_xyz(prop.position.x, 0.375, prop.position.y)
+                        .with_rotation(Quat::from_rotation_y(prop.rotation)),
+                    PondProp,
+                ));
+            }
+            PondPropKind::Rock => {
+                parent.spawn((
+                    Mesh3d(assets.meshes.pond_rock.clone()),
+                    MeshMaterial3d(assets.materials.pond_rock.clone()),
+                    Transform::from_xyz(prop.position.x, 0.22, prop.position.y)
+                        .with_scale(Vec3::new(1.0, 0.55, 0.8))
+                        .with_rotation(Quat::from_rotation_y(prop.rotation)),
+                    PondProp,
+                ));
+            }
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3910,16 +4197,74 @@ mod tests {
         ];
         let signatures: BTreeSet<_> = families.into_iter().map(family_layout_signature).collect();
         assert_eq!(signatures.len(), families.len());
+        let pond_signatures: BTreeSet<_> = [
+            DistrictFamily::WaterGardenOval,
+            DistrictFamily::WaterReedMarsh,
+            DistrictFamily::WaterFarmReservoir,
+        ]
+        .into_iter()
+        .map(|family| {
+            let (shape, rotation) = pond_family_shape(family, 123).unwrap();
+            let (_, prop_count) = pond_prop_layout(
+                family,
+                PondFootprint {
+                    center: Vec2::ZERO,
+                    radii: shape,
+                    rotation,
+                },
+                123,
+            );
+            (shape.x.to_bits(), shape.y.to_bits(), prop_count)
+        })
+        .collect();
+        assert_eq!(pond_signatures.len(), 3);
+    }
+
+    #[test]
+    fn pond_layout_is_deterministic_rotated_contained_and_clears_all_topologies() {
         for family in [
             DistrictFamily::WaterGardenOval,
             DistrictFamily::WaterReedMarsh,
             DistrictFamily::WaterFarmReservoir,
         ] {
-            assert!(matches!(
-                visual_family(family),
-                DistrictFamily::ParkGrove | DistrictFamily::ParkMeadow
-            ));
+            for kind in TILE_CATALOG {
+                let sock = sockets(kind);
+                let first = pond_layout(family, 0x1234_5678, sock, 20.0);
+                assert_eq!(first, pond_layout(family, 0x1234_5678, sock, 20.0));
+                if let Some(pond) = first {
+                    let half = pond.shore_aabb_half_extents();
+                    assert!(pond.center.x.abs() + half.x <= 20.0 - POND_BLOCK_CLEARANCE);
+                    assert!(pond.center.y.abs() + half.y <= 20.0 - POND_BLOCK_CLEARANCE);
+                    assert!(!footprint_overlaps_road(
+                        sock,
+                        pond.center,
+                        half,
+                        POND_ROAD_CLEARANCE
+                    ));
+                    // The conservative AABB contains sampled points on the
+                    // rotated outer ellipse, including non-axis-aligned yaws.
+                    let outer = pond.radii + Vec2::splat(POND_SHORE_WIDTH);
+                    let (sin, cos) = pond.rotation.sin_cos();
+                    for sample in 0..64 {
+                        let angle = sample as f32 / 64.0 * std::f32::consts::TAU;
+                        let local = Vec2::new(angle.cos() * outer.x, angle.sin() * outer.y);
+                        let point =
+                            Vec2::new(cos * local.x - sin * local.y, sin * local.x + cos * local.y);
+                        assert!(point.x.abs() <= half.x + 1e-5);
+                        assert!(point.y.abs() <= half.y + 1e-5);
+                    }
+                }
+            }
         }
+        assert!(
+            pond_layout(
+                DistrictFamily::WaterGardenOval,
+                7,
+                sockets(TileKind::Cross),
+                6.0
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -4241,6 +4586,7 @@ mod tests {
         app.init_resource::<Assets<Mesh>>()
             .init_resource::<Assets<Image>>()
             .init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<Assets<WaterMaterial>>()
             .init_resource::<TextureAssets>()
             .insert_resource(WorldReviewMode)
             .init_resource::<WorldAssets>()
@@ -4255,6 +4601,7 @@ mod tests {
         app.init_resource::<Assets<Mesh>>()
             .init_resource::<Assets<Image>>()
             .init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<Assets<WaterMaterial>>()
             .init_resource::<TextureAssets>();
         app.add_plugins(WorldPlugin);
         assert!(!app.world().contains_resource::<WorldReviewMode>());
@@ -4339,6 +4686,23 @@ mod tests {
         assert!(first.blocks.iter().any(|block| block.counts.buildings > 0));
         assert!(first.blocks.iter().any(|block| block.counts.trees > 0));
         assert!(first.blocks.iter().any(|block| block.counts.farm_props > 0));
+        let water_atlas: Vec<_> = family_atlas
+            .iter()
+            .filter(|block| block.district == District::WaterPark)
+            .collect();
+        assert!(water_atlas.iter().all(|block| {
+            block.counts.ponds == 1
+                && block.counts.pond_shores == 1
+                && block.counts.pond_props <= MAX_POND_PROPS
+        }));
+        assert!(first.blocks.iter().any(|block| block.counts.ponds > 0));
+        assert!(
+            first
+                .blocks
+                .iter()
+                .any(|block| block.counts.pond_shores > 0)
+        );
+        assert!(first.blocks.iter().any(|block| block.counts.pond_props > 0));
         assert!(first.blocks.iter().any(|block| block.counts.coins > 0));
         assert!(first.blocks.iter().any(|block| block.counts.lamps > 0));
         assert!(first.blocks.iter().any(|block| block.counts.obstacles > 0));
@@ -4356,6 +4720,9 @@ mod tests {
                 "markings",
                 "mesh3d",
                 "obstacles",
+                "pond_props",
+                "pond_shores",
+                "ponds",
                 "roads",
                 "trees",
             ])

@@ -25,12 +25,9 @@ pub struct ShaderPlugin;
 impl Plugin for ShaderPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(MaterialPlugin::<SkyMaterial>::default())
-            .add_plugins(MaterialPlugin::<WaterMaterial>::default())
-            .add_systems(Startup, (spawn_sky, spawn_water))
-            .add_systems(
-                Update,
-                (update_water, update_skydome, setup_environment_light),
-            )
+            .add_systems(Startup, spawn_sky)
+            .add_systems(Update, update_water)
+            .add_systems(Update, (update_skydome, setup_environment_light))
             .add_systems(
                 Update,
                 update_modifier_atmosphere.run_if(in_state(GameState::Playing)),
@@ -188,15 +185,26 @@ fn update_skydome(
 // Animated water pond
 // ---------------------------------------------------------------------------
 
+/// Registers the water asset type independently of the skydome. World asset
+/// construction depends on this plugin, including in the gameplay-free review
+/// harness, so callers install it before either world plugin.
+pub struct WaterMaterialPlugin;
+
+impl Plugin for WaterMaterialPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_plugins(MaterialPlugin::<WaterMaterial>::default());
+    }
+}
+
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
 pub struct WaterMaterial {
     #[uniform(0)]
-    base: LinearRgba,
+    pub(crate) base: LinearRgba,
     // WebGL2 requires uniform buffer bindings to be 16-byte aligned, so the
     // animated phase is carried in a vec4 (we only use .x). A bare f32 (4B)
     // fails pipeline creation on ANGLE/WebGL2.
     #[uniform(1)]
-    time: Vec4,
+    pub(crate) time: Vec4,
 }
 
 impl Material for WaterMaterial {
@@ -205,31 +213,19 @@ impl Material for WaterMaterial {
     }
 }
 
-/// A small flat pond sitting on the grass, just outside the building row.
-fn spawn_water(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<WaterMaterial>>,
-) {
-    commands.spawn((
-        Mesh3d(meshes.add(Plane3d::default().mesh().size(12.0, 12.0))),
-        MeshMaterial3d(materials.add(WaterMaterial {
-            base: LinearRgba::new(0.10, 0.40, 0.60, 1.0),
-            time: Vec4::ZERO,
-        })),
-        // Slightly above the grass plane (y=0) to avoid z-fighting with it.
-        Transform::from_xyz(30.0, 0.03, -10.0),
-    ));
-}
-
 /// Advance the ripple phase every frame. `Assets::iter_mut` yields
 /// `(AssetId, &mut Asset)` pairs, so we discard the id and bump `time`.
 fn update_water(
     time: Res<Time>,
-    settings: Res<Settings>,
+    settings: Option<Res<Settings>>,
     mut water_materials: ResMut<Assets<WaterMaterial>>,
 ) {
-    let t = water_ripple_time(time.elapsed_secs(), settings.reduced_motion);
+    // The review harness deliberately has no SettingsPlugin. Treat that mode
+    // as reduced motion so captures remain pixel-stable at phase exactly zero.
+    let reduced_motion = settings
+        .as_ref()
+        .is_none_or(|settings| settings.reduced_motion);
+    let t = water_ripple_time(time.elapsed_secs(), reduced_motion);
     for (_, mat) in water_materials.iter_mut() {
         mat.time = Vec4::splat(t);
     }
@@ -276,6 +272,20 @@ mod tests {
         ModifierKind::Stampede,
         ModifierKind::GlassCannon,
     ];
+
+    #[test]
+    fn water_material_plugin_initializes_assets_without_shader_plugin() {
+        let mut app = App::new();
+        // MaterialPlugin requires Bevy's asset infrastructure; the review app
+        // receives this from DefaultPlugins, so mirror that minimum here.
+        app.add_plugins(bevy::asset::AssetPlugin::default())
+            .init_asset::<Shader>()
+            .init_asset::<Mesh>()
+            .init_asset::<Image>()
+            .add_plugins(WaterMaterialPlugin);
+        assert!(app.world().contains_resource::<Assets<WaterMaterial>>());
+        assert!(!app.world().contains_resource::<Assets<SkyMaterial>>());
+    }
 
     #[test]
     fn reduced_motion_freezes_water_ripple_time() {

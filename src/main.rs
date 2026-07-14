@@ -49,7 +49,7 @@ use pickups::PickupsPlugin;
 use round_intro::RoundIntroPlugin;
 use run_events::RunEventsPlugin;
 use settings::SettingsPlugin;
-use shaders::ShaderPlugin;
+use shaders::{ShaderPlugin, WaterMaterialPlugin};
 use textures::TexturesPlugin;
 use touch::TouchPlugin;
 use transparency::TransparencyPlugin;
@@ -117,7 +117,11 @@ fn main() {
     if review {
         // Smallest robust harness: production world/textures/rendering only.
         // No game state, car, HUD, audio, movement, timers, or recycling.
-        app.add_plugins((TexturesPlugin, WorldReviewCameraPlugin, WorldReviewPlugin));
+        app.add_plugins(WaterMaterialPlugin).add_plugins((
+            TexturesPlugin,
+            WorldReviewCameraPlugin,
+            WorldReviewPlugin,
+        ));
         app.run();
         return;
     }
@@ -130,6 +134,7 @@ fn main() {
             GamePlugin,
             CameraPlugin,
             CarPlugin,
+            WaterMaterialPlugin,
             WorldPlugin,
             UiPlugin,
             AudioPlugin,

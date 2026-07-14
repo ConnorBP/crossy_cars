@@ -164,7 +164,11 @@ def main() -> int:
             or metadata.get("family_version") != 1
             or metadata.get("atlas", {}).get("road_spill") != 0
             or any(
-                "district" not in block or "family" not in block
+                "district" not in block
+                or "family" not in block
+                or not {"ponds", "pond_shores", "pond_props"}.issubset(
+                    block.get("counts", {})
+                )
                 for block in metadata.get("blocks", [])
             )
         ):

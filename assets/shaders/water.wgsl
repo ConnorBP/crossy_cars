@@ -9,18 +9,15 @@
 
 @fragment
 fn fragment(mesh: VertexOutput) -> @location(0) vec4<f32> {
-    // Remap UV from [0,1] to [-1,1] and measure radial distance from the center.
+    // Fragment-only, low-amplitude UV waves keep the cached pond mesh flat.
+    // Combining two directions avoids a high-contrast radial "target" pattern.
     let uv = mesh.uv * 2.0 - 1.0;
-    let r = length(uv);
+    let wave_a = sin((uv.x * 8.0 + uv.y * 5.0) + time.x * 0.55);
+    let wave_b = sin((uv.x * -4.0 + uv.y * 9.0) - time.x * 0.38);
+    let wave = (wave_a + wave_b) * 0.025;
+    let tint = vec3<f32>(wave * 0.45, wave * 0.8, wave);
 
-    // Outward-traveling sine wave (phase scrolls with time).
-    let wave = sin(r * 12.0 - time.x * 3.0) * 0.5 + 0.5;
-
-    // Two blues: deep center, lighter troughs.
-    let deep = vec4<f32>(0.05, 0.25, 0.45, 1.0);
-    let shallow = vec4<f32>(0.20, 0.55, 0.75, 1.0);
-    let col = mix(deep, shallow, wave);
-
-    // Blend slightly toward the configurable base tint.
-    return mix(col, base, 0.3);
+    // The material is intentionally opaque: ponds are harmless visual ground
+    // dressing, not transparent surfaces with sorting/refraction overhead.
+    return vec4<f32>(clamp(base.rgb + tint, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
 }
