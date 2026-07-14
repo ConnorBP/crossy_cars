@@ -33,7 +33,7 @@ use crate::game::state::GameState;
 use crate::modifiers::ActiveModifier;
 use crate::run_events::{ActiveEvent, EventKind, RoundEventStarted};
 use crate::settings::Settings;
-use crate::world::is_road_line;
+use crate::world::{RoadAxis, RoadSegment, nearest_road_segment};
 
 // ---------------------------------------------------------------------------
 // Tuning constants
@@ -78,7 +78,6 @@ const VISIBLE_VIEW_RADIUS: f32 = 12.0;
 
 /// Chicken road-crossing behaviour uses the same fixed line spacing as the
 /// city grid. A chosen crossing ends this far beyond the road's centre line.
-const ROAD_GRID: f32 = 40.0;
 const CROSS_ROAD_PROBABILITY: f32 = 0.65;
 const CROSS_TARGET_MIN: f32 = 6.0;
 const CROSS_TARGET_RANGE: f32 = 4.0;
@@ -943,95 +942,39 @@ fn is_safely_offscreen(pos: Vec3, car_pos: Vec3, car_forward: Vec3) -> bool {
         && delta.length() > HIT_RADIUS
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RoadAxis {
-    Vertical,
-    Horizontal,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct RoadLine {
-    axis: RoadAxis,
-    coordinate: f32,
+struct ChickenRoad {
+    segment: RoadSegment,
+    nearest: Vec2,
 }
 
-/// Find the road line nearest the chicken. Equal chicken distances are
-/// resolved by proximity to the car, then vertical before horizontal. The
-/// injected predicate keeps geometry tests independent from world generation.
-fn nearest_road_line_by(
-    chicken_pos: Vec3,
-    car_pos: Vec3,
-    mut line_is_road: impl FnMut(bool, i32) -> bool,
-) -> Option<RoadLine> {
-    const SEARCH_LINES: i32 = 32;
-    const TIE_EPSILON: f32 = 0.0001;
-    let center_x = (chicken_pos.x / ROAD_GRID).round() as i32;
-    let center_z = (chicken_pos.z / ROAD_GRID).round() as i32;
-    let mut best: Option<(RoadLine, f32, f32)> = None;
-
-    for (axis, center) in [
-        (RoadAxis::Vertical, center_x),
-        (RoadAxis::Horizontal, center_z),
-    ] {
-        for index in (center - SEARCH_LINES)..=(center + SEARCH_LINES) {
-            let vertical = axis == RoadAxis::Vertical;
-            if !line_is_road(vertical, index) {
-                continue;
-            }
-            let coordinate = index as f32 * ROAD_GRID;
-            let chicken_distance = match axis {
-                RoadAxis::Vertical => (chicken_pos.x - coordinate).abs(),
-                RoadAxis::Horizontal => (chicken_pos.z - coordinate).abs(),
-            };
-            let car_distance = match axis {
-                RoadAxis::Vertical => (car_pos.x - coordinate).abs(),
-                RoadAxis::Horizontal => (car_pos.z - coordinate).abs(),
-            };
-            let candidate = RoadLine { axis, coordinate };
-            let replace = match best {
-                None => true,
-                Some((current, current_chicken, current_car)) => {
-                    chicken_distance < current_chicken - TIE_EPSILON
-                        || ((chicken_distance - current_chicken).abs() <= TIE_EPSILON
-                            && (car_distance < current_car - TIE_EPSILON
-                                || ((car_distance - current_car).abs() <= TIE_EPSILON
-                                    && axis == RoadAxis::Vertical
-                                    && current.axis == RoadAxis::Horizontal)))
-                }
-            };
-            if replace {
-                best = Some((candidate, chicken_distance, car_distance));
-            }
-        }
-    }
-    best.map(|(line, _, _)| line)
+/// Point-to-bounded-segment selection. The fixed search radius keeps wander
+/// work constant and prevents a distant continuation from behaving like an
+/// infinite road line.
+fn nearest_chicken_road(chicken_pos: Vec3) -> Option<ChickenRoad> {
+    nearest_road_segment(Vec2::new(chicken_pos.x, chicken_pos.z), 2)
+        .map(|(segment, nearest)| ChickenRoad { segment, nearest })
 }
 
-fn nearest_road_line(chicken_pos: Vec3, car_pos: Vec3) -> Option<RoadLine> {
-    nearest_road_line_by(chicken_pos, car_pos, is_road_line)
-}
-
-/// Put a target `offset` units beyond the selected road, on the side opposite
-/// the chicken. A chicken exactly on the line crosses away from the car; the
-/// positive side is the deterministic fallback if both share the line.
-fn cross_road_target(chicken_pos: Vec3, car_pos: Vec3, line: RoadLine, offset: f32) -> Vec3 {
+/// Put a target beyond the closest point on a finite road arm. The crossing
+/// is perpendicular to that arm and remains local to its actual bounds.
+fn cross_road_target(chicken_pos: Vec3, car_pos: Vec3, road: ChickenRoad, offset: f32) -> Vec3 {
     let offset = offset.clamp(CROSS_TARGET_MIN, CROSS_TARGET_MIN + CROSS_TARGET_RANGE);
-    let (chicken_axis, car_axis) = match line.axis {
-        RoadAxis::Vertical => (chicken_pos.x, car_pos.x),
-        RoadAxis::Horizontal => (chicken_pos.z, car_pos.z),
+    let chicken = Vec2::new(chicken_pos.x, chicken_pos.z);
+    let car = Vec2::new(car_pos.x, car_pos.z);
+    let perpendicular = match road.segment.axis {
+        RoadAxis::X => Vec2::Y,
+        RoadAxis::Z => Vec2::X,
     };
-    let chicken_side = chicken_axis - line.coordinate;
+    let chicken_side = (chicken - road.nearest).dot(perpendicular);
     let reference_side = if chicken_side.abs() > f32::EPSILON {
         chicken_side
     } else {
-        car_axis - line.coordinate
+        (car - road.nearest).dot(perpendicular)
     };
     let side = if reference_side < 0.0 { -1.0 } else { 1.0 };
-    let opposite = line.coordinate - side * offset;
-    match line.axis {
-        RoadAxis::Vertical => Vec3::new(opposite, 0.0, chicken_pos.z),
-        RoadAxis::Horizontal => Vec3::new(chicken_pos.x, 0.0, opposite),
-    }
+    let target = road.nearest - perpendicular * side * offset;
+    Vec3::new(target.x, 0.0, target.y)
 }
 
 fn direction_toward(from: Vec3, target: Vec3) -> Vec3 {
@@ -1042,11 +985,11 @@ fn direction_toward(from: Vec3, target: Vec3) -> Vec3 {
 /// ordinary random wander retained for the remaining picks.
 fn choose_wander_direction(chicken_pos: Vec3, car_pos: Vec3, seed: &mut u32) -> Vec3 {
     if rand(seed) < CROSS_ROAD_PROBABILITY {
-        if let Some(line) = nearest_road_line(chicken_pos, car_pos) {
+        if let Some(road) = nearest_chicken_road(chicken_pos) {
             let offset = CROSS_TARGET_MIN + rand(seed) * CROSS_TARGET_RANGE;
             return direction_toward(
                 chicken_pos,
-                cross_road_target(chicken_pos, car_pos, line, offset),
+                cross_road_target(chicken_pos, car_pos, road, offset),
             );
         }
     }
@@ -1189,80 +1132,41 @@ mod tests {
     }
 
     #[test]
-    fn nearest_road_selects_vertical_and_horizontal_lines() {
-        let vertical =
-            nearest_road_line_by(Vec3::new(37.0, 0.0, 90.0), Vec3::ZERO, |axis, index| {
-                axis && index == 1
-            });
+    fn nearest_road_uses_bounded_segment_not_infinite_extension() {
+        let segment = RoadSegment {
+            axis: RoadAxis::X,
+            start: Vec2::ZERO,
+            end: Vec2::new(20.0, 0.0),
+            gx: 0,
+            gz: 0,
+            socket: 1,
+        };
+        let point = Vec2::new(100.0, 5.0);
         assert_eq!(
-            vertical,
-            Some(RoadLine {
-                axis: RoadAxis::Vertical,
-                coordinate: ROAD_GRID,
-            })
-        );
-
-        let horizontal =
-            nearest_road_line_by(Vec3::new(90.0, 0.0, -43.0), Vec3::ZERO, |axis, index| {
-                !axis && index == -1
-            });
-        assert_eq!(
-            horizontal,
-            Some(RoadLine {
-                axis: RoadAxis::Horizontal,
-                coordinate: -ROAD_GRID,
-            })
+            crate::world::closest_point_on_road_segment(point, segment),
+            Vec2::new(20.0, 0.0)
         );
     }
 
     #[test]
-    fn nearest_road_tie_uses_car_then_stable_axis_order() {
-        let chicken = Vec3::new(5.0, 0.0, 5.0);
-        let nearer_car_horizontal =
-            nearest_road_line_by(chicken, Vec3::new(20.0, 0.0, 1.0), |_, index| index == 0)
-                .unwrap();
-        assert_eq!(nearer_car_horizontal.axis, RoadAxis::Horizontal);
-
-        let exact_tie =
-            nearest_road_line_by(chicken, Vec3::splat(5.0), |_, index| index == 0).unwrap();
-        assert_eq!(exact_tie.axis, RoadAxis::Vertical);
-    }
-
-    #[test]
-    fn crossing_target_and_direction_reach_opposite_side_of_shared_line() {
-        for (line, chicken) in [
-            (
-                RoadLine {
-                    axis: RoadAxis::Vertical,
-                    coordinate: 40.0,
-                },
-                Vec3::new(35.0, 0.0, 12.0),
-            ),
-            (
-                RoadLine {
-                    axis: RoadAxis::Horizontal,
-                    coordinate: -40.0,
-                },
-                Vec3::new(12.0, 0.0, -34.0),
-            ),
-        ] {
-            let target = cross_road_target(chicken, Vec3::ZERO, line, 8.0);
-            let dir = direction_toward(chicken, target);
-            let (start_side, target_side, axis_dir) = match line.axis {
-                RoadAxis::Vertical => (
-                    chicken.x - line.coordinate,
-                    target.x - line.coordinate,
-                    dir.x,
-                ),
-                RoadAxis::Horizontal => (
-                    chicken.z - line.coordinate,
-                    target.z - line.coordinate,
-                    dir.z,
-                ),
-            };
-            assert!(start_side * target_side < 0.0);
-            assert!(start_side * axis_dir < 0.0);
-            assert!((dir.length() - 1.0).abs() < 0.0001);
-        }
+    fn crossing_target_reaches_opposite_side_of_bounded_arm() {
+        let segment = RoadSegment {
+            axis: RoadAxis::X,
+            start: Vec2::ZERO,
+            end: Vec2::new(20.0, 0.0),
+            gx: 0,
+            gz: 0,
+            socket: 1,
+        };
+        let chicken = Vec3::new(12.0, 0.0, 5.0);
+        let road = ChickenRoad {
+            segment,
+            nearest: Vec2::new(12.0, 0.0),
+        };
+        let target = cross_road_target(chicken, Vec3::ZERO, road, 8.0);
+        let dir = direction_toward(chicken, target);
+        assert!(target.z < 0.0);
+        assert!(dir.z < 0.0);
+        assert!((dir.length() - 1.0).abs() < 0.0001);
     }
 }

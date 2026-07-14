@@ -156,7 +156,12 @@ def main() -> int:
 
         raw = page.evaluate("window.__ROADY_WORLD_REVIEW__")
         metadata = json.loads(raw)
-        if metadata.get("schema") != "roady-world-review-v1" or not metadata.get("ready"):
+        if (
+            metadata.get("schema") != "roady-world-review-v1"
+            or not metadata.get("ready")
+            or metadata.get("topology_version") != 1
+            or metadata.get("atlas", {}).get("road_spill") != 0
+        ):
             raise RuntimeError("unexpected or incomplete Roady world-review metadata")
 
         # The Rust marker means ECS/metadata ready only. Own render readiness

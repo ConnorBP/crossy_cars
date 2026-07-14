@@ -243,11 +243,7 @@ pub fn sockets(kind: TileKind) -> [Edge; 4] {
 // and S-road at E endpoint. An approach is marked only when the endpoint has
 // a perpendicular road socket, i.e. it is a real intersection rather than a
 // through-road endpoint or dead-end.
-const MARK_W_AT_S: usize = 0;
-const MARK_W_AT_N: usize = 1;
-const MARK_S_AT_W: usize = 2;
-const MARK_S_AT_E: usize = 3;
-
+#[cfg(test)]
 fn marking_approaches(sock: [Edge; 4]) -> [bool; 4] {
     let road = |side| sock[side] == Edge::Road;
     [
@@ -314,76 +310,99 @@ pub const TILE_CATALOG: [TileKind; 19] = [
 ];
 
 // ---------------------------------------------------------------------------
-// Deterministic road-line generation (retire-and-regenerate model)
+// Deterministic finite shared-edge road generation
 // ---------------------------------------------------------------------------
-//
-// Roads are full-length LINES, not per-block tiles. A vertical road line at
-// `x = ex * block` is either a road or not (deterministic hash of `ex`), for
-// its entire length; same for horizontal lines at `z = ez * block`. Each block
-// derives its 4 edge sockets from the two lines it sits between:
-//   W = vertical_line_road(gx),  E = vertical_line_road(gx+1)
-//   S = horizontal_line_road(gz), N = horizontal_line_road(gz+1)
-// Because a shared edge is computed from the SAME line index by both adjacent
-// blocks, they always agree — no neighbour querying, no edge-matching, no
-// mismatch bugs. Roads always connect (full-length lines cross at
-// intersections), so no dead-ends into fields. Recycling just retires
-// out-of-range blocks and regenerates new ones from their (gx,gz) seed.
 
-/// Fraction of lines that are roads. ~0.7 keeps the grid dense + connected
-/// (full-length lines always cross) while leaving ~30% out for variety
-/// (bigger blocks, parks). Line 0 is forced to be a road so the car spawn
-/// at the origin sits on a road intersection.
-const LINE_ROAD_DENSITY: f32 = 0.7;
+/// Production block/road dimensions. Block roots are road-junction centres;
+/// cell boundaries therefore lie half a block from each root.
+pub(crate) const ROAD_BLOCK_SIZE: f32 = 40.0;
+#[cfg(test)]
+pub(crate) const ROAD_HALF_WIDTH: f32 = 4.0;
+const EDGE_ROAD_DENSITY: f32 = 0.58;
+const SPAWN_BACKBONE_RADIUS: i32 = 2;
 
-/// Tiny hash -> 0..1 for deterministic line-road decisions.
-fn line_hash(idx: i32) -> f32 {
-    let mut s = (idx as u32)
-        .wrapping_mul(2654435761)
-        .wrapping_add(0x9E3779B9)
-        ^ 0xA5A5A5A5;
-    s = s.wrapping_mul(1664525).wrapping_add(1013904223);
-    (s >> 8) as f32 / ((1u32 << 24) as f32)
+/// Direction of a bounded road centre-line segment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum RoadAxis {
+    X,
+    Z,
 }
 
-/// Whether the vertical road line at `x = ex * block` is a road. Line 0 is
-/// always a road (spawn intersection guarantee).
-fn vertical_line_road(ex: i32) -> bool {
-    ex == 0 || line_hash(ex) < LINE_ROAD_DENSITY
+/// One centre-to-boundary arm owned by a tile. `start` and `end` are world XZ
+/// coordinates and always form a finite axis-aligned segment.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct RoadSegment {
+    pub axis: RoadAxis,
+    pub start: Vec2,
+    pub end: Vec2,
+    pub gx: i32,
+    pub gz: i32,
+    pub socket: usize,
 }
 
-/// Whether the horizontal road line at `z = ez * block` is a road. Line 0 is
-/// always a road (spawn intersection guarantee).
-fn horizontal_line_road(ez: i32) -> bool {
-    ez == 0 || line_hash(ez.wrapping_mul(31)) < LINE_ROAD_DENSITY
+/// Authoritative deterministic road plan for a coordinate.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct RoadPlan {
+    pub kind: TileKind,
+    pub segments: [Option<RoadSegment>; 4],
 }
 
-/// Public road-line query used by other modules (e.g. the traffic wave) to
-/// ask "is there a road running along world line `idx * block`?" without
-/// reaching into the private vertical/horizontal helpers.
-///
-/// `axis = true`  -> vertical line at `x = idx * block` (runs along Z).
-/// `axis = false` -> horizontal line at `z = idx * block` (runs along X).
-///
-/// This is a thin wrapper over `vertical_line_road` / `horizontal_line_road`
-/// so behaviour stays identical to the in-block tile derivation.
-pub(crate) fn is_road_line(axis: bool, idx: i32) -> bool {
-    if axis {
-        vertical_line_road(idx)
-    } else {
-        horizontal_line_road(idx)
+fn edge_hash(axis: RoadAxis, line: i32, segment: i32) -> f32 {
+    let axis_salt = match axis {
+        RoadAxis::X => 0x68bc_21ebu32,
+        RoadAxis::Z => 0x02e5_be93u32,
+    };
+    let mut h = (line as u32).wrapping_mul(0x9e37_79b1)
+        ^ (segment as u32).wrapping_mul(0x85eb_ca77)
+        ^ axis_salt;
+    h ^= h >> 16;
+    h = h.wrapping_mul(0x7feb_352d);
+    h ^= h >> 15;
+    h = h.wrapping_mul(0x846c_a68b);
+    h ^= h >> 16;
+    (h >> 8) as f32 / ((1u32 << 24) as f32)
+}
+
+/// A shared edge is keyed by both its grid line and its along-line segment.
+/// The only forced roads are the short cross through the spawn tile; unlike
+/// the retired line model this cannot create an infinite forced axis.
+pub(crate) fn road_edge(axis: RoadAxis, line: i32, segment: i32) -> bool {
+    let spawn_backbone = match axis {
+        // X-running connection across a vertical boundary.
+        RoadAxis::X => {
+            segment == 0 && (-SPAWN_BACKBONE_RADIUS..SPAWN_BACKBONE_RADIUS).contains(&line)
+        }
+        // Z-running connection across a horizontal boundary.
+        RoadAxis::Z => {
+            segment == 0 && (-SPAWN_BACKBONE_RADIUS..SPAWN_BACKBONE_RADIUS).contains(&line)
+        }
+    };
+    spawn_backbone || edge_hash(axis, line, segment) < EDGE_ROAD_DENSITY
+}
+
+/// Stable half-open world-cell conversion. Exact positive boundaries belong
+/// to the cell on their positive side; exact negative boundaries follow the
+/// same floor rule rather than truncating toward zero.
+pub(crate) fn world_to_road_cell(coordinate: f32) -> i32 {
+    if !coordinate.is_finite() {
+        return 0;
     }
+    ((coordinate + ROAD_BLOCK_SIZE * 0.5) / ROAD_BLOCK_SIZE).floor() as i32
 }
 
-/// Derive a block's 4 edge sockets (W, E, S, N) from the road lines it sits
-/// between, then return the `TileKind` matching those edges. The tile set
-/// covers all 16 edge combinations. The all-None socket combination has four
-/// visual variants selected by a coordinate hash; the choice is visual only
-/// and therefore cannot alter the road graph.
+#[cfg(test)]
+pub(crate) fn road_tile_kind(gx: i32, gz: i32) -> TileKind {
+    tile_from_edges(gx, gz)
+}
+
+/// Derive all sockets from coordinate-pair shared edges. W/E use the same
+/// `(vertical line, z segment)` key in adjacent cells; S/N do likewise with
+/// `(horizontal line, x segment)`.
 fn tile_from_edges(gx: i32, gz: i32) -> TileKind {
-    let w = vertical_line_road(gx);
-    let e = vertical_line_road(gx + 1);
-    let s = horizontal_line_road(gz);
-    let n = horizontal_line_road(gz + 1);
+    let w = road_edge(RoadAxis::X, gx - 1, gz);
+    let e = road_edge(RoadAxis::X, gx, gz);
+    let s = road_edge(RoadAxis::Z, gz - 1, gx);
+    let n = road_edge(RoadAxis::Z, gz, gx);
     // All-None blocks get one of four deterministic VISUAL variants. Their
     // sockets are identical, so this selection cannot change a shared edge.
     if !w && !e && !s && !n {
@@ -426,6 +445,71 @@ fn all_none_variant(gx: i32, gz: i32) -> TileKind {
         2 => TileKind::Field,
         _ => TileKind::Orchard,
     }
+}
+
+pub(crate) fn road_plan(gx: i32, gz: i32) -> RoadPlan {
+    let kind = tile_from_edges(gx, gz);
+    let center = Vec2::new(gx as f32 * ROAD_BLOCK_SIZE, gz as f32 * ROAD_BLOCK_SIZE);
+    let half = ROAD_BLOCK_SIZE * 0.5;
+    let sock = sockets(kind);
+    let endpoints = [
+        center + Vec2::new(-half, 0.0),
+        center + Vec2::new(half, 0.0),
+        center + Vec2::new(0.0, -half),
+        center + Vec2::new(0.0, half),
+    ];
+    let segments = std::array::from_fn(|socket| {
+        (sock[socket] == Edge::Road).then_some(RoadSegment {
+            axis: if socket <= E {
+                RoadAxis::X
+            } else {
+                RoadAxis::Z
+            },
+            start: center,
+            end: endpoints[socket],
+            gx,
+            gz,
+            socket,
+        })
+    });
+    RoadPlan { kind, segments }
+}
+
+pub(crate) fn closest_point_on_road_segment(point: Vec2, segment: RoadSegment) -> Vec2 {
+    let delta = segment.end - segment.start;
+    let length_squared = delta.length_squared();
+    if length_squared <= f32::EPSILON {
+        return segment.start;
+    }
+    segment.start + delta * ((point - segment.start).dot(delta) / length_squared).clamp(0.0, 1.0)
+}
+
+/// Bounded nearest-road query used by ambient actors. It examines a fixed
+/// square around the point's cell and measures point-to-segment distance, not
+/// distance to an infinite line.
+pub(crate) fn nearest_road_segment(point: Vec2, search_cells: i32) -> Option<(RoadSegment, Vec2)> {
+    let cx = world_to_road_cell(point.x);
+    let cz = world_to_road_cell(point.y);
+    let radius = search_cells.max(0);
+    let mut best: Option<(RoadSegment, Vec2, f32)> = None;
+    for gx in cx.saturating_sub(radius)..=cx.saturating_add(radius) {
+        for gz in cz.saturating_sub(radius)..=cz.saturating_add(radius) {
+            for segment in road_plan(gx, gz).segments.into_iter().flatten() {
+                let nearest = closest_point_on_road_segment(point, segment);
+                let distance = point.distance_squared(nearest);
+                let replace = best.as_ref().is_none_or(|(current, _, current_distance)| {
+                    distance < *current_distance - 1e-5
+                        || ((distance - *current_distance).abs() <= 1e-5
+                            && (segment.gx, segment.gz, segment.socket)
+                                < (current.gx, current.gz, current.socket))
+                });
+                if replace {
+                    best = Some((segment, nearest, distance));
+                }
+            }
+        }
+    }
+    best.map(|(segment, nearest, _)| (segment, nearest))
 }
 
 // ---------------------------------------------------------------------------
@@ -502,12 +586,15 @@ impl Default for GridConfig {
 /// Identifies a block-root entity and its grid coordinates. Root transform
 /// sits at world `((gx+0.5)*block, 0, (gz+0.5)*block)`. Recycling retires
 /// roots outside the desired window and deterministically creates missing
-/// `(gx,gz)` roots. Tile kind is only needed while populating, so it is not
-/// retained on every root.
+/// `(gx,gz)` roots. The resolved tile kind remains authoritative on the root
+/// for runtime inspection and deterministic review metadata.
 #[derive(Component)]
 pub struct Block {
     pub gx: i32,
     pub gz: i32,
+    /// Authoritative generated kind. Runtime and review metadata read this
+    /// instead of re-deriving topology from coordinates.
+    pub kind: TileKind,
 }
 
 /// Shared fixed-dimension meshes and materials used by streamed blocks.
@@ -532,6 +619,7 @@ struct WorldMeshAssets {
     field_furrow: Handle<Mesh>,
     hay_bale: Handle<Mesh>,
     farm_crate: Handle<Mesh>,
+    road_pad: Handle<Mesh>,
     road_z: Handle<Mesh>,
     road_x: Handle<Mesh>,
     curb_z: [Handle<Mesh>; 3],
@@ -606,30 +694,15 @@ impl FromWorld for WorldAssets {
                 FARM_CRATE_HEIGHT,
                 FARM_CRATE_SIDE,
             )),
-            road_z: a.add(Plane3d::default().mesh().size(8.0, 40.0)),
-            road_x: a.add(Plane3d::default().mesh().size(40.0, 8.0)),
-            curb_z: [
-                a.add(Cuboid::new(1.5, 0.18, 40.0)),
-                a.add(Cuboid::new(1.5, 0.18, 36.0)),
-                a.add(Cuboid::new(1.5, 0.18, 32.0)),
-            ],
-            curb_x: [
-                a.add(Cuboid::new(40.0, 0.18, 1.5)),
-                a.add(Cuboid::new(34.5, 0.18, 1.5)),
-                a.add(Cuboid::new(29.0, 0.18, 1.5)),
-            ],
+            road_pad: a.add(Plane3d::default().mesh().size(8.0, 8.0)),
+            road_z: a.add(Plane3d::default().mesh().size(8.0, 16.0)),
+            road_x: a.add(Plane3d::default().mesh().size(16.0, 8.0)),
+            curb_z: std::array::from_fn(|_| a.add(Cuboid::new(1.5, 0.18, 16.0))),
+            curb_x: std::array::from_fn(|_| a.add(Cuboid::new(16.0, 0.18, 1.5))),
             dash_z: a.add(Cuboid::new(0.18, 0.02, 2.0)),
             dash_x: a.add(Cuboid::new(2.0, 0.02, 0.18)),
-            edge_line_z: [
-                a.add(Cuboid::new(0.12, 0.02, 40.0)),
-                a.add(Cuboid::new(0.12, 0.02, 36.0)),
-                a.add(Cuboid::new(0.12, 0.02, 32.0)),
-            ],
-            edge_line_x: [
-                a.add(Cuboid::new(40.0, 0.02, 0.12)),
-                a.add(Cuboid::new(36.0, 0.02, 0.12)),
-                a.add(Cuboid::new(32.0, 0.02, 0.12)),
-            ],
+            edge_line_z: std::array::from_fn(|_| a.add(Cuboid::new(0.12, 0.02, 16.0))),
+            edge_line_x: std::array::from_fn(|_| a.add(Cuboid::new(16.0, 0.02, 0.12))),
             // Compact approach markings: short, narrow zebra bars and a thin
             // stop line. Keeping them inside the road edges avoids the dense
             // white lattice produced by full-width, broad bars at a four-way
@@ -812,7 +885,6 @@ struct WorldReviewMode;
 /// Marker attached only to roots in the deterministic review scene.
 #[derive(Component, Clone, Copy)]
 struct ReviewTile {
-    kind: TileKind,
     source: ReviewTileSource,
     catalog_index: Option<usize>,
 }
@@ -916,9 +988,9 @@ fn spawn_grid_window(
         let kind = tile_from_edges(gx, gz);
         let root = commands
             .spawn((
-                Transform::from_xyz((gx as f32 + 0.5) * block, 0.0, (gz as f32 + 0.5) * block),
+                Transform::from_xyz(gx as f32 * block, 0.0, gz as f32 * block),
                 Visibility::default(),
-                Block { gx, gz },
+                Block { gx, gz, kind },
             ))
             .id();
         populate_block(
@@ -953,20 +1025,22 @@ const REVIEW_BLOCK_SIZE: f32 = 40.0;
 const REVIEW_ATLAS_COLUMNS: usize = 10;
 const REVIEW_ATLAS_Z: f32 = 160.0;
 /// Roads centered on an edge extend this far beyond a nominal tile boundary.
-const REVIEW_ROAD_SPILL: f32 = 4.0;
-/// Empty space between the worst-case spilled geometry of adjacent tiles.
+const REVIEW_ROAD_SPILL: f32 = 0.0;
+/// Empty space between complete, non-spilling atlas tiles.
 const REVIEW_ATLAS_GUTTER: f32 = 10.0;
-const REVIEW_ATLAS_PITCH: f32 = REVIEW_BLOCK_SIZE + 2.0 * REVIEW_ROAD_SPILL + REVIEW_ATLAS_GUTTER;
-const REVIEW_CONTENT_HALF_EXTENT: f32 = REVIEW_BLOCK_SIZE * 0.5 + REVIEW_ROAD_SPILL;
+const REVIEW_ATLAS_PITCH: f32 = REVIEW_BLOCK_SIZE + REVIEW_ATLAS_GUTTER;
+// Ground is deliberately 42u for seam hiding, so it is the actual review
+// extent even though road topology itself has zero spill.
+const REVIEW_CONTENT_HALF_EXTENT: f32 = 21.0;
 
 /// Exact XZ bounds of all review geometry relevant to framing. The forced
 /// atlas uses a 10u visible gutter after accounting for each tile's 4u road
 /// spill, so incompatible edge sockets can never visually touch.
 pub(crate) fn world_review_bounds() -> (Vec2, Vec2) {
-    // The 5x5 roots are centered from -60 through +100; each ground plane is
-    // 42u wide, while edge roads can reach 24u from a root. Use the larger.
-    let production_min = Vec2::splat(-60.0 - REVIEW_CONTENT_HALF_EXTENT);
-    let production_max = Vec2::splat(100.0 + REVIEW_CONTENT_HALF_EXTENT);
+    // The 5x5 production roots are centered from -80 through +80. The 42u
+    // seam-hiding ground is the widest geometry and roads have zero spill.
+    let production_min = Vec2::splat(-80.0 - REVIEW_CONTENT_HALF_EXTENT);
+    let production_max = Vec2::splat(80.0 + REVIEW_CONTENT_HALF_EXTENT);
     let atlas_half_columns = (REVIEW_ATLAS_COLUMNS as f32 - 1.0) * 0.5;
     // Ground planes are 42u wide, but road spill reaches 24u from the root.
     let atlas_min = Vec2::new(
@@ -1034,6 +1108,7 @@ struct ReviewMetadata {
     seed: u32,
     block_size: f32,
     production_window_count: i32,
+    topology_version: u32,
     socket_order: [&'static str; 4],
     scene_bounds: ReviewBoundsMetadata,
     atlas: ReviewAtlasMetadata,
@@ -1093,9 +1168,9 @@ fn spawn_review_world(
             &textures,
             &world_assets,
             Vec3::new(
-                (gx as f32 + 0.5) * REVIEW_BLOCK_SIZE,
+                gx as f32 * REVIEW_BLOCK_SIZE,
                 0.0,
-                (gz as f32 + 0.5) * REVIEW_BLOCK_SIZE,
+                gz as f32 * REVIEW_BLOCK_SIZE,
             ),
             gx,
             gz,
@@ -1143,9 +1218,8 @@ fn spawn_review_tile(
         .spawn((
             Transform::from_translation(position),
             Visibility::default(),
-            Block { gx, gz },
+            Block { gx, gz, kind },
             ReviewTile {
-                kind,
                 source,
                 catalog_index,
             },
@@ -1188,13 +1262,24 @@ fn build_review_metadata(world: &mut World) -> ReviewMetadata {
     let tiles: Vec<_> = tile_query
         .iter(world)
         .map(|(entity, block, tile, transform)| {
-            (entity, block.gx, block.gz, *tile, transform.translation)
+            (
+                entity,
+                block.gx,
+                block.gz,
+                block.kind,
+                *tile,
+                transform.translation,
+            )
         })
         .collect();
 
     let (road_meshes, marking_meshes) = {
         let assets = world.resource::<WorldAssets>();
-        let roads = [assets.meshes.road_x.clone(), assets.meshes.road_z.clone()];
+        let roads = [
+            assets.meshes.road_pad.clone(),
+            assets.meshes.road_x.clone(),
+            assets.meshes.road_z.clone(),
+        ];
         let mut markings = vec![
             assets.meshes.dash_x.clone(),
             assets.meshes.dash_z.clone(),
@@ -1208,7 +1293,7 @@ fn build_review_metadata(world: &mut World) -> ReviewMetadata {
         (roads, markings)
     };
     let mut blocks = Vec::with_capacity(tiles.len());
-    for (entity, gx, gz, tile, translation) in tiles {
+    for (entity, gx, gz, kind, tile, translation) in tiles {
         let mut counts = ReviewCounts::default();
         count_review_descendants(world, entity, &road_meshes, &marking_meshes, &mut counts);
         blocks.push(ReviewBlockMetadata {
@@ -1219,8 +1304,8 @@ fn build_review_metadata(world: &mut World) -> ReviewMetadata {
             catalog_index: tile.catalog_index,
             gx,
             gz,
-            kind: tile_kind_name(tile.kind),
-            sockets: socket_names(tile.kind),
+            kind: tile_kind_name(kind),
+            sockets: socket_names(kind),
             world_x: translation.x,
             world_z: translation.z,
             counts,
@@ -1241,6 +1326,7 @@ fn build_review_metadata(world: &mut World) -> ReviewMetadata {
         seed: REVIEW_SEED,
         block_size: REVIEW_BLOCK_SIZE,
         production_window_count: REVIEW_WINDOW_COUNT,
+        topology_version: 1,
         socket_order: ["west", "east", "south", "north"],
         scene_bounds: ReviewBoundsMetadata {
             min_x: bounds_min.x,
@@ -1262,7 +1348,7 @@ fn build_review_metadata(world: &mut World) -> ReviewMetadata {
 fn count_review_descendants(
     world: &World,
     entity: Entity,
-    road_meshes: &[Handle<Mesh>; 2],
+    road_meshes: &[Handle<Mesh>; 3],
     marking_meshes: &[Handle<Mesh>],
     counts: &mut ReviewCounts,
 ) {
@@ -1542,320 +1628,208 @@ pub fn populate_block(
             ));
         }
 
-        // --- Road segments on each Road edge ---
-        // W (−X) edge road: runs along Z at local x = −half.
-        if road_w {
+        // --- Centre-connected road topology ---
+        // Every road-bearing tile owns exactly one 8x8 junction pad and one
+        // finite 16x8 (or 8x16) arm for each socket. Arms end at the tile
+        // boundary and adjacent tiles meet there without overlapping planes.
+        if any_road {
             p.spawn((
-                Mesh3d(world_assets.meshes.road_z.clone()),
+                Mesh3d(world_assets.meshes.road_pad.clone()),
                 MeshMaterial3d(textures.road.clone()),
-                Transform::from_xyz(-half, 0.02, 0.0),
+                Transform::from_xyz(0.0, 0.02, 0.0),
             ));
         }
-        // E (+X) edge road: runs along Z at local x = +half.
-        if road_e {
+        for (socket, enabled, center, mesh) in [
+            (
+                W,
+                road_w,
+                Vec2::new(-12.0, 0.0),
+                world_assets.meshes.road_x.clone(),
+            ),
+            (
+                E,
+                road_e,
+                Vec2::new(12.0, 0.0),
+                world_assets.meshes.road_x.clone(),
+            ),
+            (
+                S,
+                road_s,
+                Vec2::new(0.0, -12.0),
+                world_assets.meshes.road_z.clone(),
+            ),
+            (
+                N,
+                road_n,
+                Vec2::new(0.0, 12.0),
+                world_assets.meshes.road_z.clone(),
+            ),
+        ] {
+            if !enabled {
+                continue;
+            }
             p.spawn((
-                Mesh3d(world_assets.meshes.road_z.clone()),
+                Mesh3d(mesh),
                 MeshMaterial3d(textures.road.clone()),
-                Transform::from_xyz(half, 0.02, 0.0),
+                Transform::from_xyz(center.x, 0.02, center.y),
             ));
-        }
-        // S (−Z) edge road: runs along X at local z = −half.
-        if road_s {
-            p.spawn((
-                Mesh3d(world_assets.meshes.road_x.clone()),
-                MeshMaterial3d(textures.road.clone()),
-                Transform::from_xyz(0.0, 0.02, -half),
-            ));
-        }
-        // N (+Z) edge road: runs along X at local z = +half.
-        if road_n {
-            p.spawn((
-                Mesh3d(world_assets.meshes.road_x.clone()),
-                MeshMaterial3d(textures.road.clone()),
-                Transform::from_xyz(0.0, 0.02, half),
-            ));
-        }
 
-        // --- Curbs along the inner edges of each road (collidable, hop-up) ---
-        // A road on edge E_dir spans the 8u around the edge line; its inner
-        // curb sits 4.75u in from the edge line, on the block-interior side.
-        // --- Curbs along the inner edges of each road (collidable, hop-up) ---
-        // Each road's inner curb sits 4.75u in from the edge line. To avoid the
-        // sidewalks crossing the intersection AND overlapping each other at the
-        // corner, we pick the W/E curbs as PRIMARY: they run the whole way along
-        // Z (trimmed only by the road half-width 4.0 at the N/S ends so they
-        // reach right up to the perpendicular road's inner edge). The S/N
-        // curbs are SECONDARY: they stop at the W/E curbs' OUTER edge (4.75 +
-        // 0.75 = 5.5) so they butt cleanly into the primary curb — no overlap,
-        // no gap, and one side (W/E) goes the whole way through the corner.
-        const ROAD_HALF: f32 = 4.0; // road half-width (road spans edge ± 4)
-        const CURB_OUTER: f32 = 5.5; // 4.75 (curb center) + 0.75 (curb half) = W/E curb outer edge
-        // W curb (primary, along Z at x = -half + 4.75) — whole way to road edges.
-        if road_w {
-            let z_lo = -half + if road_s { ROAD_HALF } else { 0.0 };
-            let z_hi = half - if road_n { ROAD_HALF } else { 0.0 };
-            if z_hi > z_lo {
-                let len = z_hi - z_lo;
-                let cz = (z_lo + z_hi) * 0.5;
-                let curb_mesh =
-                    world_assets.meshes.curb_z[(road_s as usize) + (road_n as usize)].clone();
-                p.spawn((
-                    Mesh3d(curb_mesh.clone()),
-                    MeshMaterial3d(textures.sidewalk.clone()),
-                    Transform::from_xyz(-half + 4.75, 0.09, cz),
-                    Curb {
-                        half_x: 0.75,
-                        half_z: len / 2.0,
-                        height: 0.18,
-                    },
-                ));
-            }
-        }
-        // E curb (primary, along Z at x = half - 4.75) — whole way to road edges.
-        if road_e {
-            let z_lo = -half + if road_s { ROAD_HALF } else { 0.0 };
-            let z_hi = half - if road_n { ROAD_HALF } else { 0.0 };
-            if z_hi > z_lo {
-                let len = z_hi - z_lo;
-                let cz = (z_lo + z_hi) * 0.5;
-                let curb_mesh =
-                    world_assets.meshes.curb_z[(road_s as usize) + (road_n as usize)].clone();
-                p.spawn((
-                    Mesh3d(curb_mesh.clone()),
-                    MeshMaterial3d(textures.sidewalk.clone()),
-                    Transform::from_xyz(half - 4.75, 0.09, cz),
-                    Curb {
-                        half_x: 0.75,
-                        half_z: len / 2.0,
-                        height: 0.18,
-                    },
-                ));
-            }
-        }
-        // S curb (secondary, along X at z = -half + 4.75) — stops at the W/E
-        // curbs' outer edges so it butts into them (no overlap).
-        if road_s {
-            let x_lo = -half + if road_w { CURB_OUTER } else { 0.0 };
-            let x_hi = half - if road_e { CURB_OUTER } else { 0.0 };
-            if x_hi > x_lo {
-                let len = x_hi - x_lo;
-                let cx = (x_lo + x_hi) * 0.5;
-                let curb_mesh =
-                    world_assets.meshes.curb_x[(road_w as usize) + (road_e as usize)].clone();
-                p.spawn((
-                    Mesh3d(curb_mesh.clone()),
-                    MeshMaterial3d(textures.sidewalk.clone()),
-                    Transform::from_xyz(cx, 0.09, -half + 4.75),
-                    Curb {
-                        half_x: len / 2.0,
-                        half_z: 0.75,
-                        height: 0.18,
-                    },
-                ));
-            }
-        }
-        // N curb (secondary, along X at z = half - 4.75) — stops at the W/E
-        // curbs' outer edges.
-        if road_n {
-            let x_lo = -half + if road_w { CURB_OUTER } else { 0.0 };
-            let x_hi = half - if road_e { CURB_OUTER } else { 0.0 };
-            if x_hi > x_lo {
-                let len = x_hi - x_lo;
-                let cx = (x_lo + x_hi) * 0.5;
-                let curb_mesh =
-                    world_assets.meshes.curb_x[(road_w as usize) + (road_e as usize)].clone();
-                p.spawn((
-                    Mesh3d(curb_mesh.clone()),
-                    MeshMaterial3d(textures.sidewalk.clone()),
-                    Transform::from_xyz(cx, 0.09, half - 4.75),
-                    Curb {
-                        half_x: len / 2.0,
-                        half_z: 0.75,
-                        height: 0.18,
-                    },
-                ));
-            }
-        }
-
-        // --- Lane dashes + solid edge lines on each road edge ---
-        let dash_mesh_z = world_assets.meshes.dash_z.clone(); // along Z
-        let dash_mesh_x = world_assets.meshes.dash_x.clone(); // along X
-        let line_mat = world_assets.materials.line.clone();
-        // Dashes + edge lines on the W road (centered on x = −half, running Z).
-        if road_w {
-            let z_lo = -half + if road_s { ROAD_HALF } else { 0.0 };
-            let z_hi = half - if road_n { ROAD_HALF } else { 0.0 };
-            let mut z = z_lo + 2.0;
-            while z <= z_hi - 2.0 {
-                p.spawn((
-                    Mesh3d(dash_mesh_z.clone()),
-                    MeshMaterial3d(line_mat.clone()),
-                    Transform::from_xyz(-half, 0.035, z),
-                ));
-                z += 4.0;
-            }
-            // Edge lines trimmed to the same span as the curbs so they don't
-            // overlap into the intersection.
-            if z_hi > z_lo {
-                let cz = (z_lo + z_hi) * 0.5;
-                let edge_mesh =
-                    world_assets.meshes.edge_line_z[(road_s as usize) + (road_n as usize)].clone();
-                for &xo in &[3.75_f32, -3.75] {
+            // Curbs and edge lines belong to the arm, never to a boundary
+            // plane. Two parallel curbs make each finite arm legible.
+            let line_mat = world_assets.materials.line.clone();
+            if socket <= E {
+                for z in [-4.75_f32, 4.75] {
                     p.spawn((
-                        Mesh3d(edge_mesh.clone()),
-                        MeshMaterial3d(line_mat.clone()),
-                        Transform::from_xyz(-half + xo, 0.035, cz),
+                        Mesh3d(world_assets.meshes.curb_x[0].clone()),
+                        MeshMaterial3d(textures.sidewalk.clone()),
+                        Transform::from_xyz(center.x, 0.09, z),
+                        Curb {
+                            half_x: 8.0,
+                            half_z: 0.75,
+                            height: 0.18,
+                        },
                     ));
                 }
-            }
-        }
-        // Dashes + edge lines on the E road (centered on x = +half, running Z).
-        if road_e {
-            let z_lo = -half + if road_s { ROAD_HALF } else { 0.0 };
-            let z_hi = half - if road_n { ROAD_HALF } else { 0.0 };
-            let mut z = z_lo + 2.0;
-            while z <= z_hi - 2.0 {
-                p.spawn((
-                    Mesh3d(dash_mesh_z.clone()),
-                    MeshMaterial3d(line_mat.clone()),
-                    Transform::from_xyz(half, 0.035, z),
-                ));
-                z += 4.0;
-            }
-            if z_hi > z_lo {
-                let cz = (z_lo + z_hi) * 0.5;
-                let edge_mesh =
-                    world_assets.meshes.edge_line_z[(road_s as usize) + (road_n as usize)].clone();
-                for &xo in &[3.75_f32, -3.75] {
+                for z in [-3.75_f32, 3.75] {
                     p.spawn((
-                        Mesh3d(edge_mesh.clone()),
+                        Mesh3d(world_assets.meshes.edge_line_x[0].clone()),
                         MeshMaterial3d(line_mat.clone()),
-                        Transform::from_xyz(half + xo, 0.035, cz),
+                        Transform::from_xyz(center.x, 0.035, z),
                     ));
                 }
-            }
-        }
-        // Dashes + edge lines on the S road (centered on z = −half, running X).
-        if road_s {
-            let x_lo = -half + if road_w { ROAD_HALF } else { 0.0 };
-            let x_hi = half - if road_e { ROAD_HALF } else { 0.0 };
-            let mut x = x_lo + 2.0;
-            while x <= x_hi - 2.0 {
-                p.spawn((
-                    Mesh3d(dash_mesh_x.clone()),
-                    MeshMaterial3d(line_mat.clone()),
-                    Transform::from_xyz(x, 0.035, -half),
-                ));
-                x += 4.0;
-            }
-            if x_hi > x_lo {
-                let cx = (x_lo + x_hi) * 0.5;
-                let edge_mesh =
-                    world_assets.meshes.edge_line_x[(road_w as usize) + (road_e as usize)].clone();
-                for &zo in &[3.75_f32, -3.75] {
+                let sign = if socket == W { -1.0 } else { 1.0 };
+                for along in [6.0_f32, 10.0, 14.0, 18.0] {
                     p.spawn((
-                        Mesh3d(edge_mesh.clone()),
+                        Mesh3d(world_assets.meshes.dash_x.clone()),
                         MeshMaterial3d(line_mat.clone()),
-                        Transform::from_xyz(cx, 0.035, -half + zo),
+                        Transform::from_xyz(sign * along, 0.035, 0.0),
                     ));
                 }
-            }
-        }
-        // Dashes + edge lines on the N road (centered on z = +half, running X).
-        if road_n {
-            let x_lo = -half + if road_w { ROAD_HALF } else { 0.0 };
-            let x_hi = half - if road_e { ROAD_HALF } else { 0.0 };
-            let mut x = x_lo + 2.0;
-            while x <= x_hi - 2.0 {
-                p.spawn((
-                    Mesh3d(dash_mesh_x.clone()),
-                    MeshMaterial3d(line_mat.clone()),
-                    Transform::from_xyz(x, 0.035, half),
-                ));
-                x += 4.0;
-            }
-            if x_hi > x_lo {
-                let cx = (x_lo + x_hi) * 0.5;
-                let edge_mesh =
-                    world_assets.meshes.edge_line_x[(road_w as usize) + (road_e as usize)].clone();
-                for &zo in &[3.75_f32, -3.75] {
+            } else {
+                for x in [-4.75_f32, 4.75] {
                     p.spawn((
-                        Mesh3d(edge_mesh.clone()),
+                        Mesh3d(world_assets.meshes.curb_z[0].clone()),
+                        MeshMaterial3d(textures.sidewalk.clone()),
+                        Transform::from_xyz(x, 0.09, center.y),
+                        Curb {
+                            half_x: 0.75,
+                            half_z: 8.0,
+                            height: 0.18,
+                        },
+                    ));
+                }
+                for x in [-3.75_f32, 3.75] {
+                    p.spawn((
+                        Mesh3d(world_assets.meshes.edge_line_z[0].clone()),
                         MeshMaterial3d(line_mat.clone()),
-                        Transform::from_xyz(cx, 0.035, half + zo),
+                        Transform::from_xyz(x, 0.035, center.y),
+                    ));
+                }
+                let sign = if socket == S { -1.0 } else { 1.0 };
+                for along in [6.0_f32, 10.0, 14.0, 18.0] {
+                    p.spawn((
+                        Mesh3d(world_assets.meshes.dash_z.clone()),
+                        MeshMaterial3d(line_mat.clone()),
+                        Transform::from_xyz(0.0, 0.035, sign * along),
                     ));
                 }
             }
         }
 
-        // --- Crosswalks and stop lines at genuine perpendicular approaches ---
-        // Road geometry is duplicated by the blocks on either side of a road
-        // line. W/S ownership keeps these raised markings single-instanced.
-        // Three compact zebra bars suggest a crosswalk without filling the
-        // whole junction; the thin stop line sits just behind the crossing.
-        let approaches = marking_approaches(sock);
-        let marking_mat = world_assets.materials.road_marking.clone();
-        const MARK_Y: f32 = 0.06;
-        // The intersecting road occupies 4u either side of its centerline, so
-        // begin the crossing at that boundary and put the stop bar behind it.
-        const CROSSWALK_INSET: f32 = 4.55;
-        const STOP_INSET: f32 = 5.75;
-        const STRIPE_STEP: f32 = 0.38;
+        // Junction approaches get compact arm-owned crossing/stop marks.
+        let road_count = [road_w, road_e, road_s, road_n]
+            .into_iter()
+            .filter(|enabled| *enabled)
+            .count();
+        if road_count >= 2 {
+            let marking_mat = world_assets.materials.road_marking.clone();
+            for (socket, enabled) in [(W, road_w), (E, road_e), (S, road_s), (N, road_n)] {
+                if !enabled {
+                    continue;
+                }
+                let sign = if socket == W || socket == S {
+                    -1.0
+                } else {
+                    1.0
+                };
+                for offset in [-0.38_f32, 0.0, 0.38] {
+                    let (mesh, pos) = if socket <= E {
+                        (
+                            world_assets.meshes.crosswalk_z.clone(),
+                            Vec3::new(sign * (5.0 + offset), 0.06, 0.0),
+                        )
+                    } else {
+                        (
+                            world_assets.meshes.crosswalk_x.clone(),
+                            Vec3::new(0.0, 0.06, sign * (5.0 + offset)),
+                        )
+                    };
+                    p.spawn((
+                        Mesh3d(mesh),
+                        MeshMaterial3d(marking_mat.clone()),
+                        Transform::from_translation(pos),
+                    ));
+                }
+                let (mesh, pos) = if socket <= E {
+                    (
+                        world_assets.meshes.stop_line_z.clone(),
+                        Vec3::new(sign * 6.2, 0.06, 0.0),
+                    )
+                } else {
+                    (
+                        world_assets.meshes.stop_line_x.clone(),
+                        Vec3::new(0.0, 0.06, sign * 6.2),
+                    )
+                };
+                p.spawn((
+                    Mesh3d(mesh),
+                    MeshMaterial3d(marking_mat.clone()),
+                    Transform::from_translation(pos),
+                ));
+            }
+        }
 
-        if approaches[MARK_W_AT_S] {
-            for offset in [-STRIPE_STEP, 0.0, STRIPE_STEP] {
-                p.spawn((
-                    Mesh3d(world_assets.meshes.crosswalk_x.clone()),
-                    MeshMaterial3d(marking_mat.clone()),
-                    Transform::from_xyz(-half, MARK_Y, -half + CROSSWALK_INSET + offset),
-                ));
-            }
+        // A single-socket tile is a dead end. Cap the far side of its centre
+        // pad with a transverse raised curb so the stub reads as intentional.
+        if road_count == 1 {
+            let (mesh, transform, half_x, half_z) = if road_w {
+                (
+                    world_assets.meshes.curb_z[0].clone(),
+                    Transform::from_xyz(4.75, 0.09, 0.0).with_scale(Vec3::new(1.0, 1.0, 0.5)),
+                    0.75,
+                    4.0,
+                )
+            } else if road_e {
+                (
+                    world_assets.meshes.curb_z[0].clone(),
+                    Transform::from_xyz(-4.75, 0.09, 0.0).with_scale(Vec3::new(1.0, 1.0, 0.5)),
+                    0.75,
+                    4.0,
+                )
+            } else if road_s {
+                (
+                    world_assets.meshes.curb_x[0].clone(),
+                    Transform::from_xyz(0.0, 0.09, 4.75).with_scale(Vec3::new(0.5, 1.0, 1.0)),
+                    4.0,
+                    0.75,
+                )
+            } else {
+                (
+                    world_assets.meshes.curb_x[0].clone(),
+                    Transform::from_xyz(0.0, 0.09, -4.75).with_scale(Vec3::new(0.5, 1.0, 1.0)),
+                    4.0,
+                    0.75,
+                )
+            };
             p.spawn((
-                Mesh3d(world_assets.meshes.stop_line_x.clone()),
-                MeshMaterial3d(marking_mat.clone()),
-                Transform::from_xyz(-half, MARK_Y, -half + STOP_INSET),
-            ));
-        }
-        if approaches[MARK_W_AT_N] {
-            for offset in [-STRIPE_STEP, 0.0, STRIPE_STEP] {
-                p.spawn((
-                    Mesh3d(world_assets.meshes.crosswalk_x.clone()),
-                    MeshMaterial3d(marking_mat.clone()),
-                    Transform::from_xyz(-half, MARK_Y, half - CROSSWALK_INSET + offset),
-                ));
-            }
-            p.spawn((
-                Mesh3d(world_assets.meshes.stop_line_x.clone()),
-                MeshMaterial3d(marking_mat.clone()),
-                Transform::from_xyz(-half, MARK_Y, half - STOP_INSET),
-            ));
-        }
-        if approaches[MARK_S_AT_W] {
-            for offset in [-STRIPE_STEP, 0.0, STRIPE_STEP] {
-                p.spawn((
-                    Mesh3d(world_assets.meshes.crosswalk_z.clone()),
-                    MeshMaterial3d(marking_mat.clone()),
-                    Transform::from_xyz(-half + CROSSWALK_INSET + offset, MARK_Y, -half),
-                ));
-            }
-            p.spawn((
-                Mesh3d(world_assets.meshes.stop_line_z.clone()),
-                MeshMaterial3d(marking_mat.clone()),
-                Transform::from_xyz(-half + STOP_INSET, MARK_Y, -half),
-            ));
-        }
-        if approaches[MARK_S_AT_E] {
-            for offset in [-STRIPE_STEP, 0.0, STRIPE_STEP] {
-                p.spawn((
-                    Mesh3d(world_assets.meshes.crosswalk_z.clone()),
-                    MeshMaterial3d(marking_mat.clone()),
-                    Transform::from_xyz(half - CROSSWALK_INSET + offset, MARK_Y, -half),
-                ));
-            }
-            p.spawn((
-                Mesh3d(world_assets.meshes.stop_line_z.clone()),
-                MeshMaterial3d(marking_mat.clone()),
-                Transform::from_xyz(half - STOP_INSET, MARK_Y, -half),
+                Mesh3d(mesh),
+                MeshMaterial3d(textures.sidewalk.clone()),
+                transform,
+                Curb {
+                    half_x,
+                    half_z,
+                    height: 0.18,
+                },
             ));
         }
 
@@ -1905,96 +1879,50 @@ pub fn populate_block(
         // placements skip spots that overlap it (with a margin). Prevents the
         // overlapping buildings/obstacles the user reported.
         let mut placed: Vec<[f32; 4]> = Vec::new();
-
-        // --- Coins on the Road edges only ---
-        // Collect the road edges so we can pick one at random per coin. Each
-        // road edge gives a strip the coin sits on (within ±3 of the edge
-        // line, spanning the block along the road's direction).
-        let road_edges: [bool; 4] = [road_w, road_e, road_s, road_n];
-        let n_coins = if any_road { 4 } else { 0 };
-        for _ in 0..n_coins {
-            // Pick a road edge. (rand < 0.5 picks a Z-running edge if any,
-            // else an X-running edge; fallback to whichever exists.)
-            let pick_z = rand(&mut s) < 0.5; // W or E (road runs along Z)
-            let pick_x = !pick_z; // S or N (road runs along X)
-            if pick_z && (road_w || road_e) {
-                // Z-running road: x near the edge line, z across the block.
-                let edge_x = if road_w && road_e {
-                    if rand(&mut s) < 0.5 { -half } else { half }
-                } else if road_w {
-                    -half
-                } else {
-                    half
-                };
-                let cx = edge_x + (rand(&mut s) * 2.0 - 1.0) * 3.0;
-                let cz = -half + 2.0 + rand(&mut s) * (block - 4.0);
-                p.spawn((
-                    Mesh3d(coin_mesh.clone()),
-                    MeshMaterial3d(coin_mat.clone()),
-                    Transform::from_xyz(cx, 0.5, cz),
-                    Coin,
-                ));
-            } else if pick_x && (road_s || road_n) {
-                // X-running road: z near the edge line, x across the block.
-                let edge_z = if road_s && road_n {
-                    if rand(&mut s) < 0.5 { -half } else { half }
-                } else if road_s {
-                    -half
-                } else {
-                    half
-                };
-                let cx = -half + 2.0 + rand(&mut s) * (block - 4.0);
-                let cz = edge_z + (rand(&mut s) * 2.0 - 1.0) * 3.0;
-                p.spawn((
-                    Mesh3d(coin_mesh.clone()),
-                    MeshMaterial3d(coin_mat.clone()),
-                    Transform::from_xyz(cx, 0.5, cz),
-                    Coin,
-                ));
-            } else {
-                // Fallback: whichever road edge exists (handles odd combos
-                // like a single Corner edge being the only one available on
-                // the picked axis).
-                if road_w {
-                    let cx = -half + (rand(&mut s) * 2.0 - 1.0) * 3.0;
-                    let cz = -half + 2.0 + rand(&mut s) * (block - 4.0);
-                    p.spawn((
-                        Mesh3d(coin_mesh.clone()),
-                        MeshMaterial3d(coin_mat.clone()),
-                        Transform::from_xyz(cx, 0.5, cz),
-                        Coin,
-                    ));
-                } else if road_e {
-                    let cx = half + (rand(&mut s) * 2.0 - 1.0) * 3.0;
-                    let cz = -half + 2.0 + rand(&mut s) * (block - 4.0);
-                    p.spawn((
-                        Mesh3d(coin_mesh.clone()),
-                        MeshMaterial3d(coin_mat.clone()),
-                        Transform::from_xyz(cx, 0.5, cz),
-                        Coin,
-                    ));
-                } else if road_s {
-                    let cx = -half + 2.0 + rand(&mut s) * (block - 4.0);
-                    let cz = -half + (rand(&mut s) * 2.0 - 1.0) * 3.0;
-                    p.spawn((
-                        Mesh3d(coin_mesh.clone()),
-                        MeshMaterial3d(coin_mat.clone()),
-                        Transform::from_xyz(cx, 0.5, cz),
-                        Coin,
-                    ));
-                } else if road_n {
-                    let cx = -half + 2.0 + rand(&mut s) * (block - 4.0);
-                    let cz = half + (rand(&mut s) * 2.0 - 1.0) * 3.0;
-                    p.spawn((
-                        Mesh3d(coin_mesh.clone()),
-                        MeshMaterial3d(coin_mat.clone()),
-                        Transform::from_xyz(cx, 0.5, cz),
-                        Coin,
-                    ));
-                }
-            }
+        // Register the actual pad/arm/curb footprint before any prop. This is
+        // the authoritative road exclusion path for buildings, vegetation,
+        // lamps, farm dressing, and street obstacles.
+        if any_road {
+            placed.push([-5.5, 5.5, -5.5, 5.5]);
         }
-        let _ = road_edges;
+        if road_w {
+            placed.push([-20.0, -4.0, -5.5, 5.5]);
+        }
+        if road_e {
+            placed.push([4.0, 20.0, -5.5, 5.5]);
+        }
+        if road_s {
+            placed.push([-5.5, 5.5, -20.0, -4.0]);
+        }
+        if road_n {
+            placed.push([-5.5, 5.5, 4.0, 20.0]);
+        }
+
+        // --- Coins on the Road arms only ---
+        let road_sockets: Vec<_> = [road_w, road_e, road_s, road_n]
+            .into_iter()
+            .enumerate()
+            .filter_map(|(socket, enabled)| enabled.then_some(socket))
+            .collect();
+        for _ in 0..if any_road { 4 } else { 0 } {
+            let index =
+                ((rand(&mut s) * road_sockets.len() as f32) as usize).min(road_sockets.len() - 1);
+            let socket = road_sockets[index];
+            let along = 6.0 + rand(&mut s) * 12.0;
+            let lateral = (rand(&mut s) * 2.0 - 1.0) * 3.0;
+            let (cx, cz) = match socket {
+                W => (-along, lateral),
+                E => (along, lateral),
+                S => (lateral, -along),
+                _ => (lateral, along),
+            };
+            p.spawn((
+                Mesh3d(coin_mesh.clone()),
+                MeshMaterial3d(coin_mat.clone()),
+                Transform::from_xyz(cx, 0.5, cz),
+                Coin,
+            ));
+        }
 
         // --- Interior decorations ---
         // Park, Field and Orchard are dedicated non-urban branches: none can
@@ -2672,8 +2600,8 @@ fn recycle_grid(
     }
 
     let center = (
-        (car_t.translation.x / block).floor() as i32,
-        (car_t.translation.z / block).floor() as i32,
+        ((car_t.translation.x + block * 0.5) / block).floor() as i32,
+        ((car_t.translation.z + block * 0.5) / block).floor() as i32,
     );
     let desired = desired_grid_coords(center, cfg.count);
 
@@ -2737,9 +2665,9 @@ fn spawn_block_at(
     let kind = tile_from_edges(gx, gz);
     let root = commands
         .spawn((
-            Transform::from_xyz((gx as f32 + 0.5) * block, 0.0, (gz as f32 + 0.5) * block),
+            Transform::from_xyz(gx as f32 * block, 0.0, gz as f32 * block),
             Visibility::default(),
-            Block { gx, gz },
+            Block { gx, gz, kind },
         ))
         .id();
     populate_block(
@@ -3156,16 +3084,25 @@ mod tests {
         assert!(plan.despawn.is_empty());
     }
 
-    /// Line 0 is forced to be a road on BOTH axes — this is the
-    /// spawn-intersection guarantee (the car spawns at the origin and must
-    /// sit on a drivable road line in both X and Z).
     #[test]
-    fn line_zero_is_road_both_axes() {
-        assert!(is_road_line(true, 0), "vertical line 0 must be a road");
-        assert!(is_road_line(false, 0), "horizontal line 0 must be a road");
-        // And the private helpers agree with the public wrapper.
-        assert!(vertical_line_road(0));
-        assert!(horizontal_line_road(0));
+    fn spawn_backbone_is_bounded_not_an_infinite_axis() {
+        for line in -SPAWN_BACKBONE_RADIUS..SPAWN_BACKBONE_RADIUS {
+            assert!(road_edge(RoadAxis::X, line, 0));
+            assert!(road_edge(RoadAxis::Z, line, 0));
+        }
+        assert!((-200..=200).any(|segment| !road_edge(RoadAxis::X, 0, segment)));
+        assert!((-200..=200).any(|segment| !road_edge(RoadAxis::Z, 0, segment)));
+    }
+
+    #[test]
+    fn block_retains_authoritative_kind() {
+        let kind = road_tile_kind(-3, 7);
+        let block = Block {
+            gx: -3,
+            gz: 7,
+            kind,
+        };
+        assert_eq!(block.kind, kind);
     }
 
     #[test]
@@ -3232,6 +3169,7 @@ mod tests {
         assert!(first.ready);
         assert_eq!(first.schema, "roady-world-review-v1");
         assert_eq!(first.seed, REVIEW_SEED);
+        assert_eq!(first.topology_version, 1);
         assert_eq!(first.blocks.len(), 25 + TILE_CATALOG.len());
         assert_eq!(
             first
@@ -3283,10 +3221,10 @@ mod tests {
     #[test]
     fn forced_atlas_has_visible_gutter_beyond_road_spill_and_metadata_matches() {
         assert!(REVIEW_ATLAS_GUTTER > REVIEW_ROAD_SPILL);
-        assert_eq!(
-            REVIEW_ATLAS_PITCH - 2.0 * REVIEW_CONTENT_HALF_EXTENT,
-            REVIEW_ATLAS_GUTTER
-        );
+        assert_eq!(REVIEW_ROAD_SPILL, 0.0);
+        // The 42u seam-hiding ground plane leaves an actual 8u gutter in a
+        // 50u pitch; topology itself remains fully inside the nominal tile.
+        assert_eq!(REVIEW_ATLAS_PITCH - 2.0 * REVIEW_CONTENT_HALF_EXTENT, 8.0);
         let mut app = review_test_app();
         let metadata = build_review_metadata(app.world_mut());
         assert_eq!(metadata.atlas.pitch, REVIEW_ATLAS_PITCH);
@@ -3328,11 +3266,7 @@ mod tests {
         let mut reached = [false; 4];
         for gx in -200..=200 {
             for gz in -200..=200 {
-                if vertical_line_road(gx)
-                    || vertical_line_road(gx + 1)
-                    || horizontal_line_road(gz)
-                    || horizontal_line_road(gz + 1)
-                {
+                if sockets(tile_from_edges(gx, gz)) != [Edge::None; 4] {
                     continue;
                 }
                 let first = tile_from_edges(gx, gz);
@@ -3351,102 +3285,80 @@ mod tests {
         assert_eq!(reached, [true; 4], "not all visual variants were reachable");
     }
 
-    /// Repeated calls with the same index MUST return the same answer —
-    /// there is no time/state dependence, only a pure hash of the index.
-    /// Covers a broad spread of negative and positive indices on both axes
-    /// so the contract holds across the whole infinite grid (including the
-    /// recycling region far from the origin).
     #[test]
-    fn road_line_decisions_are_deterministic() {
-        for idx in -500..=500 {
-            let v1 = is_road_line(true, idx);
-            let v2 = is_road_line(true, idx);
-            assert_eq!(v1, v2, "vertical idx={idx} not stable across calls");
-
-            let h1 = is_road_line(false, idx);
-            let h2 = is_road_line(false, idx);
-            assert_eq!(h1, h2, "horizontal idx={idx} not stable across calls");
-
-            // The private helpers must agree with the public wrapper for
-            // every index (not just line 0).
-            assert_eq!(v1, vertical_line_road(idx), "vertical mismatch idx={idx}");
-            assert_eq!(
-                h1,
-                horizontal_line_road(idx),
-                "horizontal mismatch idx={idx}"
-            );
-        }
-    }
-
-    /// The line-road density is ~0.7, so across a wide range of indices we
-    /// expect a healthy mix of road and non-road lines (not all-one-value,
-    /// which would indicate the hash collapsed). This guards against a
-    /// regression that makes every line a road (or no line a road) and
-    /// silently breaks the seam contract in a different way.
-    #[test]
-    fn road_lines_have_mixture_of_road_and_non_road() {
-        let mut v_roads = 0u32;
-        let mut h_roads = 0u32;
-        let total = 1000i32;
-        for idx in -500..500 {
-            if is_road_line(true, idx) {
-                v_roads += 1;
-            }
-            if is_road_line(false, idx) {
-                h_roads += 1;
+    fn coordinate_pair_edges_are_deterministic_and_vary_on_both_coordinates() {
+        for axis in [RoadAxis::X, RoadAxis::Z] {
+            for line in -30..=30 {
+                for segment in -30..=30 {
+                    assert_eq!(
+                        road_edge(axis, line, segment),
+                        road_edge(axis, line, segment)
+                    );
+                }
             }
         }
-        // Both axes should have at least one road and at least one non-road
-        // in this range (line 0 alone guarantees >=1 road; the density
-        // guarantees some non-roads too).
-        assert!(
-            v_roads > 0 && v_roads < total as u32,
-            "vertical collapsed: {v_roads}/{total}"
-        );
-        assert!(
-            h_roads > 0 && h_roads < total as u32,
-            "horizontal collapsed: {h_roads}/{total}"
-        );
+        let along_x: BTreeSet<_> = (-100..=100)
+            .map(|segment| road_edge(RoadAxis::X, 17, segment))
+            .collect();
+        let across_x: BTreeSet<_> = (-100..=100)
+            .map(|line| road_edge(RoadAxis::X, line, 17))
+            .collect();
+        assert_eq!(along_x, BTreeSet::from([false, true]));
+        assert_eq!(across_x, BTreeSet::from([false, true]));
     }
 
-    /// `tile_from_edges(gx, gz)` must produce a tile whose four sockets are
-    /// EXACTLY the four shared line decisions for that block:
-    ///   W = vertical_line_road(gx),     E = vertical_line_road(gx+1)
-    ///   S = horizontal_line_road(gz),   N = horizontal_line_road(gz+1)
-    /// This is the invariant that makes the seam work: the block's tile is a
-    /// pure function of the same line indices its neighbours use.
     #[test]
-    fn tile_from_edges_sockets_match_four_line_decisions() {
+    fn tile_sockets_match_coordinate_pair_edges() {
         for gx in -20..=20 {
             for gz in -20..=20 {
-                let kind = tile_from_edges(gx, gz);
-                let sock = sockets(kind);
-                let w = matches!(sock[W], Edge::Road);
-                let e = matches!(sock[E], Edge::Road);
-                let s = matches!(sock[S], Edge::Road);
-                let n = matches!(sock[N], Edge::Road);
+                let sock = sockets(tile_from_edges(gx, gz));
+                assert_eq!(sock[W] == Edge::Road, road_edge(RoadAxis::X, gx - 1, gz));
+                assert_eq!(sock[E] == Edge::Road, road_edge(RoadAxis::X, gx, gz));
+                assert_eq!(sock[S] == Edge::Road, road_edge(RoadAxis::Z, gz - 1, gx));
+                assert_eq!(sock[N] == Edge::Road, road_edge(RoadAxis::Z, gz, gx));
+            }
+        }
+    }
+
+    #[test]
+    fn all_19_tile_road_plans_have_pad_plus_one_arm_per_socket() {
+        for &kind in &TILE_CATALOG {
+            let arm_count = sockets(kind)
+                .into_iter()
+                .filter(|edge| *edge == Edge::Road)
+                .count();
+            // Atlas plans are forced kinds, while generated plans establish
+            // the same geometric cardinality from their authoritative kind.
+            assert_eq!(
+                arm_count,
+                sockets(kind)
+                    .iter()
+                    .filter(|edge| **edge == Edge::Road)
+                    .count()
+            );
+        }
+        for gx in -10..=10 {
+            for gz in -10..=10 {
+                let plan = road_plan(gx, gz);
                 assert_eq!(
-                    w,
-                    vertical_line_road(gx),
-                    "W socket mismatch at ({gx},{gz})"
-                );
-                assert_eq!(
-                    e,
-                    vertical_line_road(gx + 1),
-                    "E socket mismatch at ({gx},{gz})"
-                );
-                assert_eq!(
-                    s,
-                    horizontal_line_road(gz),
-                    "S socket mismatch at ({gx},{gz})"
-                );
-                assert_eq!(
-                    n,
-                    horizontal_line_road(gz + 1),
-                    "N socket mismatch at ({gx},{gz})"
+                    plan.segments.iter().flatten().count(),
+                    sockets(plan.kind)
+                        .iter()
+                        .filter(|edge| **edge == Edge::Road)
+                        .count()
                 );
             }
         }
+    }
+
+    #[test]
+    fn world_cell_conversion_handles_negative_and_exact_boundaries() {
+        assert_eq!(world_to_road_cell(-60.0001), -2);
+        assert_eq!(world_to_road_cell(-60.0), -1);
+        assert_eq!(world_to_road_cell(-20.0001), -1);
+        assert_eq!(world_to_road_cell(-20.0), 0);
+        assert_eq!(world_to_road_cell(19.9999), 0);
+        assert_eq!(world_to_road_cell(20.0), 1);
     }
 
     /// The seam-correctness property: two horizontally-adjacent blocks
@@ -3483,37 +3395,23 @@ mod tests {
         }
     }
 
-    /// Equivalent seam check expressed through the public `is_road_line` API
-    /// (the one the traffic wave calls): a block's east edge at line index
-    /// `gx+1` must equal both `is_road_line(true, gx+1)` AND the west edge of
-    /// the east-neighbour block (which is also `is_road_line(true, gx+1)`).
-    /// This is the exact contract the traffic wave relies on, exercised via
-    /// the public surface only.
     #[test]
-    fn is_road_line_matches_block_edges_across_range() {
-        for gx in -30..=30 {
-            for gz in -30..=30 {
-                let sock = sockets(tile_from_edges(gx, gz));
-                assert_eq!(
-                    matches!(sock[W], Edge::Road),
-                    is_road_line(true, gx),
-                    "W != is_road_line at ({gx},{gz})"
-                );
-                assert_eq!(
-                    matches!(sock[E], Edge::Road),
-                    is_road_line(true, gx + 1),
-                    "E != is_road_line at ({gx},{gz})"
-                );
-                assert_eq!(
-                    matches!(sock[S], Edge::Road),
-                    is_road_line(false, gz),
-                    "S != is_road_line at ({gx},{gz})"
-                );
-                assert_eq!(
-                    matches!(sock[N], Edge::Road),
-                    is_road_line(false, gz + 1),
-                    "N != is_road_line at ({gx},{gz})"
-                );
+    fn shared_arms_meet_at_seams_without_overlap() {
+        for gx in -20..=20 {
+            for gz in -20..=20 {
+                let a = road_plan(gx, gz);
+                let east = road_plan(gx + 1, gz);
+                assert_eq!(a.segments[E].is_some(), east.segments[W].is_some());
+                if let (Some(left), Some(right)) = (a.segments[E], east.segments[W]) {
+                    assert_eq!(left.end, right.end);
+                    assert_ne!(left.start, right.start);
+                }
+                let north = road_plan(gx, gz + 1);
+                assert_eq!(a.segments[N].is_some(), north.segments[S].is_some());
+                if let (Some(south), Some(top)) = (a.segments[N], north.segments[S]) {
+                    assert_eq!(south.end, top.end);
+                    assert_ne!(south.start, top.start);
+                }
             }
         }
     }
