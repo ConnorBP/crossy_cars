@@ -845,6 +845,34 @@ pub struct GridConfig {
 
 type GridCoord = (i32, i32);
 
+/// Cell at which the streamed grid was last fully reconciled or rebuilt.
+/// `None` means no generation has completed yet, so the first reconciliation
+/// must run. Pausing leaves this resource untouched; startup and fresh-round
+/// generation record the origin only after scheduling their complete window.
+#[derive(Resource, Default, Debug, PartialEq, Eq)]
+struct LastRecycledCell(Option<GridCoord>);
+
+fn grid_coord_for_position(coordinate: f32, block: f32) -> i32 {
+    if !coordinate.is_finite() || !block.is_finite() || block <= 0.0 {
+        return 0;
+    }
+    ((coordinate + block * 0.5) / block).floor() as i32
+}
+
+impl LastRecycledCell {
+    fn needs_recycle(&self, current: GridCoord) -> bool {
+        self.0 != Some(current)
+    }
+
+    fn invalidate(&mut self) {
+        self.0 = None;
+    }
+
+    fn record_completed(&mut self, cell: GridCoord) {
+        self.0 = Some(cell);
+    }
+}
+
 /// Return the exact grid-coordinate window centered on `center`.
 ///
 /// Odd counts are symmetric (`5` gives offsets `-2..=2`). Even counts use
@@ -1287,6 +1315,7 @@ impl Plugin for WorldReviewPlugin {
 impl Plugin for WorldPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<GridConfig>()
+            .init_resource::<LastRecycledCell>()
             .init_resource::<WorldAssets>()
             .add_systems(Startup, spawn_initial_grid)
             // Coin spin + pickup still live here (coins are environment now).
@@ -1325,6 +1354,7 @@ fn spawn_initial_grid(
     mut meshes: ResMut<Assets<Mesh>>,
     textures: Res<TextureAssets>,
     world_assets: Res<WorldAssets>,
+    mut last_recycled_cell: ResMut<LastRecycledCell>,
 ) {
     // --- Sun: warm directional light (shadows gated for web) ---
     commands.spawn((
@@ -1337,6 +1367,7 @@ fn spawn_initial_grid(
     ));
 
     spawn_grid_window(&mut commands, &cfg, &mut meshes, &textures, &world_assets);
+    last_recycled_cell.record_completed((0, 0));
 }
 
 /// Spawn the exact count×count grid of blocks centered on the origin. Each
@@ -3668,6 +3699,7 @@ fn recycle_grid(
     world_assets: Res<WorldAssets>,
     car: Query<&Transform, (With<Car>, Without<Block>)>,
     blocks: Query<(Entity, &Block)>,
+    mut last_recycled_cell: ResMut<LastRecycledCell>,
 ) {
     let Ok(car_t) = car.single() else {
         return;
@@ -3678,9 +3710,15 @@ fn recycle_grid(
     }
 
     let center = (
-        ((car_t.translation.x + block * 0.5) / block).floor() as i32,
-        ((car_t.translation.z + block * 0.5) / block).floor() as i32,
+        grid_coord_for_position(car_t.translation.x, block),
+        grid_coord_for_position(car_t.translation.z, block),
     );
+    // This gate deliberately precedes both desired-window construction and
+    // the block snapshot: stationary frames allocate no BTreeSet/BTreeMap.
+    if !last_recycled_cell.needs_recycle(center) {
+        return;
+    }
+
     let desired = desired_grid_coords(center, cfg.count);
 
     // One immutable ECS snapshot. Grouping entities by coordinate lets us
@@ -3725,6 +3763,10 @@ fn recycle_grid(
             gz,
         );
     }
+
+    // Record only after the complete plan has been applied to Commands. If a
+    // future early-return path is added above, this cell remains eligible.
+    last_recycled_cell.record_completed(center);
 }
 
 /// Spawn one block at (gx,gz): derive its tile deterministically from the road
@@ -3784,14 +3826,20 @@ fn reset_grid(
     world_assets: Res<WorldAssets>,
     blocks: Query<Entity, With<Block>>,
     round_active: Res<RoundActive>,
+    mut last_recycled_cell: ResMut<LastRecycledCell>,
 ) {
     if round_active.0 {
         return;
     }
+    // A fresh round is an unconditional world rebuild even when the car is
+    // already in cell zero. Invalidate before scheduling it, then record the
+    // rebuilt origin only after the complete window has been scheduled.
+    last_recycled_cell.invalidate();
     for e in &blocks {
         commands.entity(e).despawn();
     }
     spawn_grid_window(&mut commands, &cfg, &mut meshes, &textures, &world_assets);
+    last_recycled_cell.record_completed((0, 0));
 }
 
 // ---------------------------------------------------------------------------
@@ -4081,6 +4129,70 @@ mod tests {
             );
         }
         result
+    }
+
+    fn complete_recycle_if_needed(last: &mut LastRecycledCell, cell: GridCoord) -> bool {
+        if !last.needs_recycle(cell) {
+            return false;
+        }
+        last.record_completed(cell);
+        true
+    }
+
+    #[test]
+    fn configured_block_size_controls_recycle_boundaries() {
+        assert_eq!(grid_coord_for_position(9.99, 20.0), 0);
+        assert_eq!(grid_coord_for_position(10.0, 20.0), 1);
+        assert_eq!(grid_coord_for_position(-10.01, 20.0), -1);
+        assert_eq!(grid_coord_for_position(f32::NAN, 20.0), 0);
+        assert_eq!(grid_coord_for_position(12.0, 0.0), 0);
+    }
+
+    #[test]
+    fn stationary_frames_skip_after_initial_generation_completes() {
+        let mut last = LastRecycledCell::default();
+        assert!(complete_recycle_if_needed(&mut last, (0, 0)));
+        for _ in 0..120 {
+            assert!(!complete_recycle_if_needed(&mut last, (0, 0)));
+        }
+    }
+
+    #[test]
+    fn one_cell_and_teleport_transitions_each_recycle_exactly_once() {
+        let mut last = LastRecycledCell::default();
+        assert!(complete_recycle_if_needed(&mut last, (0, 0)));
+
+        assert!(complete_recycle_if_needed(&mut last, (1, 0)));
+        assert!(!complete_recycle_if_needed(&mut last, (1, 0)));
+
+        assert!(complete_recycle_if_needed(&mut last, (37, -24)));
+        assert!(!complete_recycle_if_needed(&mut last, (37, -24)));
+    }
+
+    #[test]
+    fn pause_style_repeated_cell_does_not_rearm_recycling() {
+        let mut last = LastRecycledCell(Some((-3, 8)));
+        for _ in 0..30 {
+            // No lifecycle hook mutates the resource while paused; resuming
+            // in the same authoritative cell therefore remains a skip.
+            assert!(!complete_recycle_if_needed(&mut last, (-3, 8)));
+        }
+        assert_eq!(last, LastRecycledCell(Some((-3, 8))));
+    }
+
+    #[test]
+    fn fresh_reset_invalidates_then_records_the_required_origin_rebuild() {
+        let mut last = LastRecycledCell(Some((12, -7)));
+        last.invalidate();
+        assert!(last.needs_recycle((0, 0)));
+
+        // reset_grid performs its unconditional rebuild between these calls.
+        last.record_completed((0, 0));
+        assert!(!last.needs_recycle((0, 0)));
+
+        // A new round at the same cell must still permit another rebuild.
+        last.invalidate();
+        assert!(last.needs_recycle((0, 0)));
     }
 
     /// The default odd window is exactly 5×5. In particular, integer
