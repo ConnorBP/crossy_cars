@@ -664,6 +664,87 @@ fn district_family_for(gx: i32, gz: i32, district: District) -> DistrictFamily {
     family_from_bucket(district, district_hash(gx, gz, FAMILY_SUB_DOMAIN) % 10_000)
 }
 
+/// Water families retain their stored identity but deliberately borrow one of
+/// the two Park policies until water geometry ships. This mapping is visual
+/// only and cannot affect district/family selection or review metadata.
+fn visual_family(family: DistrictFamily) -> DistrictFamily {
+    use DistrictFamily::*;
+    match family {
+        WaterGardenOval | WaterFarmReservoir => ParkMeadow,
+        WaterReedMarsh => ParkGrove,
+        family => family,
+    }
+}
+
+/// Layout randomness is domain-separated from road topology, district and
+/// family selection. Changing any family layout below cannot perturb those
+/// stable generation contracts.
+fn family_layout_seed(gx: i32, gz: i32, family: DistrictFamily) -> u32 {
+    district_hash(
+        gx,
+        gz,
+        0xf26a_0000_u32 ^ (family as u32).wrapping_mul(0x9e37_79b1),
+    )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct UrbanFamilyPolicy {
+    buildings: usize,
+    trees: usize,
+    lamps: usize,
+    obstacles: usize,
+    height_band: u8,
+}
+
+fn urban_family_policy(family: DistrictFamily) -> Option<UrbanFamilyPolicy> {
+    use DistrictFamily::*;
+    Some(match family {
+        DenseTowerCourt => UrbanFamilyPolicy {
+            buildings: 4,
+            trees: 1,
+            lamps: 2,
+            obstacles: 1,
+            height_band: 3,
+        },
+        DenseMidrisePerimeter => UrbanFamilyPolicy {
+            buildings: 5,
+            trees: 0,
+            lamps: 1,
+            obstacles: 2,
+            height_band: 2,
+        },
+        DenseSteppedPodium => UrbanFamilyPolicy {
+            buildings: 3,
+            trees: 2,
+            lamps: 1,
+            obstacles: 3,
+            height_band: 2,
+        },
+        LowMainStreet => UrbanFamilyPolicy {
+            buildings: 4,
+            trees: 1,
+            lamps: 2,
+            obstacles: 2,
+            height_band: 1,
+        },
+        LowHomesYards => UrbanFamilyPolicy {
+            buildings: 3,
+            trees: 4,
+            lamps: 0,
+            obstacles: 1,
+            height_band: 0,
+        },
+        LowServiceParking => UrbanFamilyPolicy {
+            buildings: 2,
+            trees: 1,
+            lamps: 1,
+            obstacles: 4,
+            height_band: 0,
+        },
+        _ => return None,
+    })
+}
+
 pub(crate) fn road_plan(gx: i32, gz: i32) -> RoadPlan {
     let kind = tile_from_edges(gx, gz);
     let center = Vec2::new(gx as f32 * ROAD_BLOCK_SIZE, gz as f32 * ROAD_BLOCK_SIZE);
@@ -838,6 +919,7 @@ const FARM_CRATE_HEIGHT: f32 = 0.7;
 
 struct WorldMeshAssets {
     ground: Handle<Mesh>,
+    unit_box: Handle<Mesh>,
     field_ground: Handle<Mesh>,
     field_furrow: Handle<Mesh>,
     hay_bale: Handle<Mesh>,
@@ -907,6 +989,10 @@ impl FromWorld for WorldAssets {
         // never overlap.
         let meshes = world.resource_scope(|_, mut a: Mut<Assets<Mesh>>| WorldMeshAssets {
             ground: a.add(Plane3d::default().mesh().size(40.0, 40.0)),
+            // All family-varying dimensions scale this cached unit primitive.
+            // Streaming and respawning therefore never append building,
+            // window, path, parking, or podium meshes to Assets<Mesh>.
+            unit_box: a.add(Cuboid::new(1.0, 1.0, 1.0)),
             // Countryside geometry is procedural but created once and cached;
             // recycled blocks only clone these lightweight handles.
             field_ground: a.add(Plane3d::default().mesh().size(40.0, 40.0)),
@@ -1236,6 +1322,7 @@ fn spawn_grid_window(
             seed_for(gx, gz),
             kind,
             district,
+            family,
         );
     }
 }
@@ -1513,6 +1600,7 @@ fn spawn_review_tile(
         seed,
         kind,
         district,
+        family,
     );
 }
 
@@ -1827,6 +1915,259 @@ fn lamp_arm_aabb_half_extents(dir_x: f32, dir_z: f32) -> Vec3 {
     )
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct BuildingPlacement {
+    position: Vec2,
+    size: Vec2,
+    height: f32,
+}
+
+const MAX_FAMILY_BUILDINGS: usize = 5;
+
+/// Family-specific urban massing. Positions are deliberately authored rather
+/// than sampled from topology: `try_place` remains the final authority and may
+/// omit a mass under road pressure. Small seeded height variation gives
+/// neighbouring members of one family variety without changing its silhouette.
+fn urban_building_layout(
+    family: DistrictFamily,
+    seed: u32,
+) -> ([BuildingPlacement; MAX_FAMILY_BUILDINGS], usize) {
+    use DistrictFamily::*;
+    let mut s = seed ^ 0xb17d_1a70;
+    let mut height = |base: f32| base + rand(&mut s) * 1.5;
+    let mut out = [BuildingPlacement {
+        position: Vec2::ZERO,
+        size: Vec2::splat(4.0),
+        height: 4.0,
+    }; MAX_FAMILY_BUILDINGS];
+    let specs: &[(f32, f32, f32, f32, f32)] = match family {
+        DenseTowerCourt => &[
+            (-10.5, -10.5, 5.0, 5.0, 13.5),
+            (10.5, -10.5, 5.0, 5.0, 11.0),
+            (-10.5, 10.5, 5.0, 5.0, 12.0),
+            (10.5, 10.5, 5.0, 5.0, 14.5),
+        ],
+        DenseMidrisePerimeter => &[
+            (-12.5, -11.5, 8.0, 4.0, 7.5),
+            (0.0, -13.5, 7.0, 4.0, 8.0),
+            (12.5, -11.5, 8.0, 4.0, 7.0),
+            (-13.0, 8.5, 4.0, 9.0, 7.5),
+            (13.0, 8.5, 4.0, 9.0, 8.0),
+        ],
+        DenseSteppedPodium => &[
+            (-10.0, 9.5, 8.0, 7.0, 5.5),
+            (0.0, 11.0, 7.0, 7.0, 8.0),
+            (10.0, 9.5, 8.0, 7.0, 11.0),
+        ],
+        LowMainStreet => &[
+            (-13.0, 10.5, 6.0, 5.0, 5.0),
+            (-4.5, 10.5, 6.0, 5.0, 5.5),
+            (4.5, 10.5, 6.0, 5.0, 4.5),
+            (13.0, 10.5, 6.0, 5.0, 5.0),
+        ],
+        LowHomesYards => &[
+            (-11.0, -10.0, 5.5, 5.0, 4.0),
+            (11.0, -10.0, 5.5, 5.0, 4.5),
+            (0.0, 11.0, 6.0, 5.0, 4.0),
+        ],
+        LowServiceParking => &[(-9.5, 11.5, 9.0, 6.0, 4.5), (9.5, 11.5, 9.0, 6.0, 5.0)],
+        _ => &[],
+    };
+    for (slot, &(x, z, w, d, h)) in out.iter_mut().zip(specs) {
+        *slot = BuildingPlacement {
+            position: Vec2::new(x, z),
+            size: Vec2::new(w, d),
+            height: height(h),
+        };
+    }
+    (out, specs.len())
+}
+
+const MAX_FAMILY_TREES: usize = 12;
+
+fn family_tree_layout(family: DistrictFamily) -> ([Vec2; MAX_FAMILY_TREES], usize) {
+    use DistrictFamily::*;
+    let mut out = [Vec2::ZERO; MAX_FAMILY_TREES];
+    let points: &[Vec2] = match visual_family(family) {
+        ParkGrove => &[
+            Vec2::new(-13.0, -13.0),
+            Vec2::new(-7.0, -11.0),
+            Vec2::new(8.0, -13.0),
+            Vec2::new(13.0, -8.0),
+            Vec2::new(-13.0, 1.0),
+            Vec2::new(-8.0, 6.0),
+            Vec2::new(8.0, 4.0),
+            Vec2::new(13.0, 9.0),
+            Vec2::new(-12.0, 14.0),
+            Vec2::new(0.0, 13.0),
+        ],
+        ParkMeadow => &[
+            Vec2::new(-14.0, -13.0),
+            Vec2::new(14.0, -12.0),
+            Vec2::new(-14.0, 13.0),
+            Vec2::new(14.0, 13.0),
+        ],
+        LowHomesYards => &[
+            Vec2::new(-15.0, -14.0),
+            Vec2::new(-6.0, -12.0),
+            Vec2::new(7.0, -13.0),
+            Vec2::new(15.0, -8.0),
+        ],
+        DenseSteppedPodium => &[Vec2::new(-14.0, -11.0), Vec2::new(14.0, -11.0)],
+        _ => &[Vec2::new(-14.0, 14.0)],
+    };
+    out[..points.len()].copy_from_slice(points);
+    (out, points.len())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct StripPlacement {
+    position: Vec2,
+    size: Vec2,
+}
+
+const MAX_FAMILY_STRIPS: usize = 14;
+
+fn family_strip_layout(family: DistrictFamily) -> ([StripPlacement; MAX_FAMILY_STRIPS], usize) {
+    use DistrictFamily::*;
+    let mut out = [StripPlacement {
+        position: Vec2::ZERO,
+        size: Vec2::ZERO,
+    }; MAX_FAMILY_STRIPS];
+    let strips: &[StripPlacement] = match visual_family(family) {
+        ParkMeadow => &[
+            StripPlacement {
+                position: Vec2::new(-10.0, 0.0),
+                size: Vec2::new(7.0, 0.65),
+            },
+            StripPlacement {
+                position: Vec2::new(10.0, 0.0),
+                size: Vec2::new(7.0, 0.65),
+            },
+        ],
+        FieldFurrowHay => &[
+            StripPlacement {
+                position: Vec2::new(-10.5, -15.0),
+                size: Vec2::new(7.0, 0.16),
+            },
+            StripPlacement {
+                position: Vec2::new(10.5, -15.0),
+                size: Vec2::new(7.0, 0.16),
+            },
+            StripPlacement {
+                position: Vec2::new(-10.5, -10.0),
+                size: Vec2::new(7.0, 0.16),
+            },
+            StripPlacement {
+                position: Vec2::new(10.5, -10.0),
+                size: Vec2::new(7.0, 0.16),
+            },
+            StripPlacement {
+                position: Vec2::new(-10.5, 10.0),
+                size: Vec2::new(7.0, 0.16),
+            },
+            StripPlacement {
+                position: Vec2::new(10.5, 10.0),
+                size: Vec2::new(7.0, 0.16),
+            },
+            StripPlacement {
+                position: Vec2::new(-10.5, 15.0),
+                size: Vec2::new(7.0, 0.16),
+            },
+            StripPlacement {
+                position: Vec2::new(10.5, 15.0),
+                size: Vec2::new(7.0, 0.16),
+            },
+        ],
+        FieldCrossRowsCrates => &[
+            StripPlacement {
+                position: Vec2::new(-11.0, -12.0),
+                size: Vec2::new(8.0, 0.16),
+            },
+            StripPlacement {
+                position: Vec2::new(11.0, -12.0),
+                size: Vec2::new(8.0, 0.16),
+            },
+            StripPlacement {
+                position: Vec2::new(-11.0, 12.0),
+                size: Vec2::new(8.0, 0.16),
+            },
+            StripPlacement {
+                position: Vec2::new(11.0, 12.0),
+                size: Vec2::new(8.0, 0.16),
+            },
+            StripPlacement {
+                position: Vec2::new(-12.0, -11.0),
+                size: Vec2::new(0.16, 8.0),
+            },
+            StripPlacement {
+                position: Vec2::new(-12.0, 11.0),
+                size: Vec2::new(0.16, 8.0),
+            },
+            StripPlacement {
+                position: Vec2::new(12.0, -11.0),
+                size: Vec2::new(0.16, 8.0),
+            },
+            StripPlacement {
+                position: Vec2::new(12.0, 11.0),
+                size: Vec2::new(0.16, 8.0),
+            },
+        ],
+        LowServiceParking => &[
+            StripPlacement {
+                position: Vec2::new(-12.0, -11.0),
+                size: Vec2::new(0.15, 5.0),
+            },
+            StripPlacement {
+                position: Vec2::new(-8.0, -11.0),
+                size: Vec2::new(0.15, 5.0),
+            },
+            StripPlacement {
+                position: Vec2::new(8.0, -11.0),
+                size: Vec2::new(0.15, 5.0),
+            },
+            StripPlacement {
+                position: Vec2::new(12.0, -11.0),
+                size: Vec2::new(0.15, 5.0),
+            },
+        ],
+        _ => &[],
+    };
+    out[..strips.len()].copy_from_slice(strips);
+    (out, strips.len())
+}
+
+#[cfg(test)]
+fn family_layout_signature(family: DistrictFamily) -> (usize, usize, usize, u8, usize, usize) {
+    let policy = urban_family_policy(family).unwrap_or(UrbanFamilyPolicy {
+        buildings: 0,
+        trees: 0,
+        lamps: 0,
+        obstacles: 0,
+        height_band: 0,
+    });
+    let (_, authored_buildings) = urban_building_layout(family, family_layout_seed(7, -9, family));
+    let (_, trees) = family_tree_layout(family);
+    let (_, strips) = family_strip_layout(family);
+    let rural_code = match visual_family(family) {
+        DistrictFamily::ParkGrove => 1,
+        DistrictFamily::ParkMeadow => 2,
+        DistrictFamily::FieldFurrowHay => 3,
+        DistrictFamily::FieldCrossRowsCrates => 4,
+        DistrictFamily::OrchardLongRows => 5,
+        DistrictFamily::OrchardSplitRows => 6,
+        _ => 0,
+    };
+    (
+        authored_buildings,
+        policy.trees.max(trees),
+        strips,
+        policy.height_band,
+        policy.obstacles,
+        rural_code,
+    )
+}
+
 /// Build all of one block's contents as children of `root`, per the chosen
 /// Wang-tile `kind`: grass cell (always); a road segment on each `Road`
 /// edge of the tile (W=−X, E=+X, S=−Z, N=+Z); curbs + lane dashes on each
@@ -1840,7 +2181,7 @@ fn lamp_arm_aabb_half_extents(dir_x: f32, dir_z: f32) -> Vec3 {
 #[allow(clippy::too_many_arguments)]
 pub fn populate_block(
     commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
+    _meshes: &mut Assets<Mesh>,
     textures: &TextureAssets,
     world_assets: &WorldAssets,
     root: Entity,
@@ -1849,6 +2190,7 @@ pub fn populate_block(
     seed: u32,
     kind: TileKind,
     district: District,
+    family: DistrictFamily,
 ) {
     let block = 40.0_f32; // matches GridConfig default; decorations are laid
     // out relative to this.
@@ -1860,6 +2202,8 @@ pub fn populate_block(
     let road_s = sock[S] == Edge::Road;
     let road_n = sock[N] == Edge::Road;
     let any_road = road_w || road_e || road_s || road_n;
+    debug_assert_eq!(family_district(family), district);
+    let visual_family = visual_family(family);
     let presentation = district_presentation(district);
     let is_park = presentation == DistrictPresentation::Park;
     let is_field = presentation == DistrictPresentation::Field;
@@ -1879,7 +2223,9 @@ pub fn populate_block(
     let field_mat = world_assets.materials.field.clone();
     let orchard_mat = world_assets.materials.orchard.clone();
 
-    let _ = (gx, gz); // available for callers; layout uses the seed instead.
+    // Family detail uses a separate domain; the legacy seed remains dedicated
+    // to topology-independent generic decoration such as coins.
+    let layout_seed = family_layout_seed(gx, gz, family);
 
     commands.entity(root).with_children(|p| {
         // --- Ground cell (exactly block-wide; neighbours only touch edges) ---
@@ -1896,15 +2242,6 @@ pub fn populate_block(
                 MeshMaterial3d(field_mat.clone()),
                 Transform::from_xyz(0.0, 0.01, 0.0),
             ));
-            // Parallel low ridges make the procedural field readable while
-            // reusing one cached strip mesh for every furrow.
-            for z in [-15.0_f32, -10.0, -5.0, 0.0, 5.0, 10.0, 15.0] {
-                p.spawn((
-                    Mesh3d(world_assets.meshes.field_furrow.clone()),
-                    MeshMaterial3d(world_assets.materials.field_furrow.clone()),
-                    Transform::from_xyz(0.0, 0.025, z),
-                ));
-            }
         } else if is_orchard {
             p.spawn((
                 Mesh3d(world_assets.meshes.ground.clone()),
@@ -2121,6 +2458,7 @@ pub fn populate_block(
 
         // --- Shared obstacle assets ---
         let a = world_assets;
+        let unit_box_mesh = a.meshes.unit_box.clone();
         let trunk_mesh = a.meshes.trunk.clone();
         let trunk_mat = a.materials.trunk.clone();
         let foliage_mesh = a.meshes.foliage.clone();
@@ -2200,60 +2538,66 @@ pub fn populate_block(
         // DenseUrban and LowRise retain the existing urban behavior. Interior
         // bounds are shrunk away from Road edges; None edges use the block.
         if is_park {
-            // --- Park: more trees, no buildings/lamps/obstacles ---
-            for _ in 0..6 {
+            // Grove clusters and Meadow perimeter trees are authored, stable
+            // signatures. Water families reach exactly one of these policies.
+            let (trees, count) = family_tree_layout(visual_family);
+            let mut tree_seed = layout_seed ^ 0x7ee0_0001;
+            for pos in trees.into_iter().take(count) {
                 let Some((tx, tz)) = try_place(
                     &mut placed,
-                    &mut s,
+                    &mut tree_seed,
                     0.3,
                     0.3,
-                    interior_max_x_lo,
-                    interior_max_x_hi,
-                    interior_max_z_lo,
-                    interior_max_z_hi,
-                    1.0,
-                    10,
+                    pos.x,
+                    pos.x,
+                    pos.y,
+                    pos.y,
+                    0.8,
+                    1,
                 ) else {
                     continue;
                 };
-                p.spawn((
-                    Transform::from_xyz(tx, 0.0, tz),
-                    Visibility::default(),
-                    Collider {
-                        half_x: 0.3,
-                        half_z: 0.3,
-                    },
-                    Tree,
-                ))
-                .with_children(|tp| {
-                    tp.spawn((
-                        Mesh3d(trunk_mesh.clone()),
-                        MeshMaterial3d(trunk_mat.clone()),
-                        Transform::from_xyz(0.0, 0.45, 0.0),
-                    ));
-                    tp.spawn((
-                        Mesh3d(foliage_mesh.clone()),
-                        MeshMaterial3d(foliage_mat.clone()),
-                        Transform::from_xyz(0.0, 1.35, 0.0),
-                    ));
-                    tp.spawn((
-                        Mesh3d(tree_shadow_mesh.clone()),
-                        MeshMaterial3d(shadow_mat.clone()),
-                        Transform::from_xyz(0.0, 0.05, 0.0),
-                    ));
-                });
+                spawn_tree_root(
+                    p,
+                    tx,
+                    tz,
+                    &trunk_mesh,
+                    &trunk_mat,
+                    &foliage_mesh,
+                    &foliage_mat,
+                    &tree_shadow_mesh,
+                    &shadow_mat,
+                );
             }
+            // Meadow's open axis is marked by low, non-colliding path strips;
+            // every strip is still admitted through road exclusion.
+            spawn_family_strips(
+                p,
+                visual_family,
+                &mut placed,
+                layout_seed,
+                &unit_box_mesh,
+                &world_assets.materials.field_furrow,
+            );
         } else if is_field {
             // --- Field: a bounded deterministic set of cached farm props ---
             // The layout helper uses widely separated slots, so full collider
             // footprints remain in bounds and never overlap.
-            let (props, count) = field_prop_layout(seed);
+            spawn_family_strips(
+                p,
+                visual_family,
+                &mut placed,
+                layout_seed,
+                &world_assets.meshes.field_furrow,
+                &world_assets.materials.field_furrow,
+            );
+            let (props, count) = field_prop_layout_for_family(visual_family, layout_seed);
             // Keep the existing slot/jitter layout, but admit each fixed
             // candidate through the same footprint path as other obstacles.
             // Degenerate center ranges mean `try_place` validates/registers
             // the candidate without changing its visual position. The exact
             // same rotation-independent half-extent is assigned to Collider.
-            let mut footprint_seed = seed ^ 0xa511_e9b3;
+            let mut footprint_seed = layout_seed ^ 0xa511_e9b3;
             for prop in props.into_iter().take(count) {
                 let half_extent = field_prop_collider_half_extent(prop.kind);
                 let Some((prop_x, prop_z)) = try_place(
@@ -2309,8 +2653,8 @@ pub fn populate_block(
             // --- Orchard: aligned rows admitted through the shared footprint
             // exclusion path so road-bearing orchard cells never place trees
             // on the center pad or an active arm.
-            let mut orchard_seed = seed ^ 0x0ac4_a2d1;
-            for pos in orchard_tree_layout(seed) {
+            let mut orchard_seed = layout_seed ^ 0x0ac4_a2d1;
+            for pos in orchard_tree_layout_for_family(visual_family, layout_seed) {
                 if footprint_overlaps_road(sock, pos, Vec2::splat(0.3), 0.75) {
                     continue;
                 }
@@ -2356,35 +2700,33 @@ pub fn populate_block(
                 });
             }
         } else {
-            // --- ~3 buildings (overlap-rejected, block interior) ---
-            for _ in 0..3 {
-                let w = 3.5 + rand(&mut s) * 1.5; // 3.5..5.0
-                let h = 4.0 + rand(&mut s) * 5.0; // 4.0..9.0
-                let d = 3.5 + rand(&mut s) * 1.5;
-                let ci = (rand(&mut s) * 3.0) as usize % 3;
+            let policy = urban_family_policy(visual_family)
+                .expect("urban district must have an urban family");
+            let mut family_seed = layout_seed;
+            let (buildings, building_count) = urban_building_layout(visual_family, layout_seed);
+            for building in buildings
+                .into_iter()
+                .take(building_count.min(policy.buildings))
+            {
+                let w = building.size.x;
+                let d = building.size.y;
+                let h = building.height;
                 let Some((bx, bz)) = try_place(
                     &mut placed,
-                    &mut s,
+                    &mut family_seed,
                     w / 2.0,
                     d / 2.0,
-                    // Shrink the center range by the building's half-extent so
-                    // the FULL footprint (center +/- half) stays past the curb /
-                    // sidewalk (the user-reported "buildings on top of sidewalk").
-                    interior_max_x_lo + w / 2.0,
-                    interior_max_x_hi - w / 2.0,
-                    interior_max_z_lo + d / 2.0,
-                    interior_max_z_hi - d / 2.0,
-                    1.5,
-                    8,
+                    building.position.x,
+                    building.position.x,
+                    building.position.y,
+                    building.position.y,
+                    0.8,
+                    1,
                 ) else {
                     continue;
                 };
-                // Facade dimensions vary with the building, so these two
-                // meshes stay per-building like its body/roof/shadow. All
-                // rows and buildings share the one cached glass material.
+                let ci = family as usize % 3;
                 let window_rows = window_row_heights(h);
-                let window_x_mesh = meshes.add(Cuboid::new(w * 0.72, 0.55, 0.08));
-                let window_z_mesh = meshes.add(Cuboid::new(0.08, 0.55, d * 0.72));
                 p.spawn((
                     Transform::from_xyz(bx, 0.0, bz),
                     Visibility::default(),
@@ -2396,41 +2738,66 @@ pub fn populate_block(
                 ))
                 .with_children(|bp| {
                     bp.spawn((
-                        Mesh3d(meshes.add(Cuboid::new(w, h, d))),
+                        Mesh3d(unit_box_mesh.clone()),
                         MeshMaterial3d(body_mats[ci].clone()),
-                        Transform::from_xyz(0.0, h / 2.0, 0.0),
+                        Transform::from_xyz(0.0, h / 2.0, 0.0).with_scale(Vec3::new(w, h, d)),
                     ));
                     bp.spawn((
-                        Mesh3d(meshes.add(Cuboid::new(w * 1.12, 0.4, d * 1.12))),
+                        Mesh3d(unit_box_mesh.clone()),
                         MeshMaterial3d(roof_mats[ci].clone()),
-                        Transform::from_xyz(0.0, h + 0.2, 0.0),
+                        Transform::from_xyz(0.0, h + 0.2, 0.0).with_scale(Vec3::new(
+                            w * 1.12,
+                            0.4,
+                            d * 1.12,
+                        )),
                     ));
                     bp.spawn((
-                        Mesh3d(meshes.add(Plane3d::default().mesh().size(w * 1.4, d * 1.4))),
+                        Mesh3d(unit_box_mesh.clone()),
                         MeshMaterial3d(shadow_mat.clone()),
-                        Transform::from_xyz(0.0, 0.05, 0.0),
+                        Transform::from_xyz(0.0, 0.025, 0.0).with_scale(Vec3::new(
+                            w * 1.4,
+                            0.025,
+                            d * 1.4,
+                        )),
                     ));
                     for &row_y in &window_rows {
                         for z in [-d / 2.0 - 0.045, d / 2.0 + 0.045] {
                             bp.spawn((
-                                Mesh3d(window_x_mesh.clone()),
+                                Mesh3d(unit_box_mesh.clone()),
                                 MeshMaterial3d(window_mat.clone()),
-                                Transform::from_xyz(0.0, row_y, z),
+                                Transform::from_xyz(0.0, row_y, z).with_scale(Vec3::new(
+                                    w * 0.72,
+                                    0.55,
+                                    0.08,
+                                )),
                             ));
                         }
                         for x in [-w / 2.0 - 0.045, w / 2.0 + 0.045] {
                             bp.spawn((
-                                Mesh3d(window_z_mesh.clone()),
+                                Mesh3d(unit_box_mesh.clone()),
                                 MeshMaterial3d(window_mat.clone()),
-                                Transform::from_xyz(x, row_y, 0.0),
+                                Transform::from_xyz(x, row_y, 0.0).with_scale(Vec3::new(
+                                    0.08,
+                                    0.55,
+                                    d * 0.72,
+                                )),
                             ));
                         }
                     }
                 });
             }
+            spawn_family_strips(
+                p,
+                visual_family,
+                &mut placed,
+                layout_seed,
+                &unit_box_mesh,
+                &world_assets.materials.line,
+            );
 
-            // --- ~3 trees (overlap-rejected, block interior) ---
-            for _ in 0..3 {
+            // Trees use a family-specific count while retaining random open
+            // placement, always through the same exclusion path.
+            for _ in 0..policy.trees {
                 let Some((tx, tz)) = try_place(
                     &mut placed,
                     &mut s,
@@ -2474,7 +2841,7 @@ pub fn populate_block(
             }
 
             // --- ~2 lamp posts (overlap-rejected, block interior) ---
-            for _ in 0..2 {
+            for _ in 0..policy.lamps {
                 let Some((lx, lz)) = try_place(
                     &mut placed,
                     &mut s,
@@ -2525,7 +2892,7 @@ pub fn populate_block(
             }
 
             // --- Scatter 2-4 T12 obstacles (mix of four types, overlap-rejected) ---
-            let n_obs = 2 + (rand(&mut s) * 3.0) as usize; // 2..4
+            let n_obs = policy.obstacles;
             for _ in 0..n_obs {
                 let kind = (rand(&mut s) * 4.0) as usize % 4; // 0=cone,1=hydrant,2=bench,3=hedge
                 // Footprint half-extents per kind (matches the Collider below).
@@ -2702,6 +3069,96 @@ pub fn populate_block(
     });
 }
 
+#[allow(clippy::too_many_arguments)]
+fn spawn_tree_root(
+    parent: &mut ChildSpawnerCommands,
+    x: f32,
+    z: f32,
+    trunk_mesh: &Handle<Mesh>,
+    trunk_mat: &Handle<StandardMaterial>,
+    foliage_mesh: &Handle<Mesh>,
+    foliage_mat: &Handle<StandardMaterial>,
+    shadow_mesh: &Handle<Mesh>,
+    shadow_mat: &Handle<StandardMaterial>,
+) {
+    parent
+        .spawn((
+            Transform::from_xyz(x, 0.0, z),
+            Visibility::default(),
+            Collider {
+                half_x: 0.3,
+                half_z: 0.3,
+            },
+            Tree,
+        ))
+        .with_children(|tree| {
+            tree.spawn((
+                Mesh3d(trunk_mesh.clone()),
+                MeshMaterial3d(trunk_mat.clone()),
+                Transform::from_xyz(0.0, 0.45, 0.0),
+            ));
+            tree.spawn((
+                Mesh3d(foliage_mesh.clone()),
+                MeshMaterial3d(foliage_mat.clone()),
+                Transform::from_xyz(0.0, 1.35, 0.0),
+            ));
+            tree.spawn((
+                Mesh3d(shadow_mesh.clone()),
+                MeshMaterial3d(shadow_mat.clone()),
+                Transform::from_xyz(0.0, 0.05, 0.0),
+            ));
+        });
+}
+
+/// Spawn low visual strips (paths, furrows or parking marks). They are not
+/// colliders, but their full raised footprint is registered through
+/// `try_place`, ensuring no strip can appear on asphalt or outside its authored
+/// block position under Empty or Cross pressure.
+fn spawn_family_strips(
+    parent: &mut ChildSpawnerCommands,
+    family: DistrictFamily,
+    placed: &mut Vec<[f32; 4]>,
+    seed: u32,
+    mesh: &Handle<Mesh>,
+    material: &Handle<StandardMaterial>,
+) {
+    let (strips, count) = family_strip_layout(family);
+    let mut strip_seed = seed ^ 0x57a1_9001;
+    for strip in strips.into_iter().take(count) {
+        if try_place(
+            placed,
+            &mut strip_seed,
+            strip.size.x / 2.0,
+            strip.size.y / 2.0,
+            strip.position.x,
+            strip.position.x,
+            strip.position.y,
+            strip.position.y,
+            0.05,
+            1,
+        )
+        .is_none()
+        {
+            continue;
+        }
+        let is_field = family_district(family) == District::Field;
+        let base = if is_field {
+            Vec2::new(36.0, 0.16)
+        } else {
+            Vec2::ONE
+        };
+        parent.spawn((
+            Mesh3d(mesh.clone()),
+            MeshMaterial3d(material.clone()),
+            Transform::from_xyz(strip.position.x, 0.035, strip.position.y).with_scale(Vec3::new(
+                strip.size.x / base.x,
+                if is_field { 1.0 } else { 0.04 },
+                strip.size.y / base.y,
+            )),
+        ));
+    }
+}
+
 /// Marker for collidable field dressing. `Collider` also keeps these props on
 /// the existing minimap obstacle path without any minimap-specific entities.
 #[derive(Component)]
@@ -2797,6 +3254,29 @@ fn field_prop_layout(seed: u32) -> ([FieldPropPlacement; FIELD_PROP_MAX], usize)
     (placements, count)
 }
 
+fn field_prop_layout_for_family(
+    family: DistrictFamily,
+    seed: u32,
+) -> ([FieldPropPlacement; FIELD_PROP_MAX], usize) {
+    let (mut placements, count) = field_prop_layout(seed);
+    match family {
+        DistrictFamily::FieldFurrowHay => {
+            for prop in &mut placements[..count] {
+                prop.kind = FieldPropKind::HayBale;
+            }
+        }
+        DistrictFamily::FieldCrossRowsCrates => {
+            for prop in &mut placements[..count] {
+                prop.kind = FieldPropKind::FarmCrate;
+                // Crates read as two service clusters rather than hay scatter.
+                prop.rotation = 0.0;
+            }
+        }
+        _ => {}
+    }
+    (placements, count)
+}
+
 const ORCHARD_ROWS: usize = 3;
 const ORCHARD_TREES_PER_ROW: usize = 4;
 const ORCHARD_TREE_COUNT: usize = ORCHARD_ROWS * ORCHARD_TREES_PER_ROW;
@@ -2819,6 +3299,30 @@ fn orchard_tree_layout(seed: u32) -> [Vec2; ORCHARD_TREE_COUNT] {
             Vec2::new(ACROSS[row], ALONG[tree])
         }
     })
+}
+
+fn orchard_tree_layout_for_family(family: DistrictFamily, seed: u32) -> [Vec2; ORCHARD_TREE_COUNT] {
+    let mut trees = orchard_tree_layout(seed);
+    if family == DistrictFamily::OrchardSplitRows {
+        // Pull alternate half-rows away from the central service aisle. The
+        // individual tree colliders leave that aisle open; no union collider.
+        for (index, tree) in trees.iter_mut().enumerate() {
+            let row = index / ORCHARD_TREES_PER_ROW;
+            if row == 1 {
+                tree.y += if index % ORCHARD_TREES_PER_ROW < 2 {
+                    -4.0
+                } else {
+                    4.0
+                };
+            }
+        }
+    } else if family == DistrictFamily::OrchardLongRows {
+        // Stable long rows always run X, independent of per-block variation.
+        const ACROSS: [f32; ORCHARD_ROWS] = [-10.0, 0.0, 10.0];
+        const ALONG: [f32; ORCHARD_TREES_PER_ROW] = [-13.5, -4.5, 4.5, 13.5];
+        trees = std::array::from_fn(|i| Vec2::new(ALONG[i % 4], ACROSS[i / 4]));
+    }
+    trees
 }
 
 /// Tiny LCG for deterministic-but-varied placement without pulling in `rand`.
@@ -2976,6 +3480,7 @@ fn spawn_block_at(
         seed_for(gx, gz),
         kind,
         district,
+        family,
     );
 }
 
@@ -3388,6 +3893,89 @@ mod tests {
         }
         assert!((-200..=200).any(|segment| !road_edge(RoadAxis::X, 0, segment)));
         assert!((-200..=200).any(|segment| !road_edge(RoadAxis::Z, 0, segment)));
+    }
+
+    #[test]
+    fn every_non_water_family_has_a_distinct_layout_signature() {
+        let families = [
+            DistrictFamily::DenseTowerCourt,
+            DistrictFamily::DenseMidrisePerimeter,
+            DistrictFamily::DenseSteppedPodium,
+            DistrictFamily::LowMainStreet,
+            DistrictFamily::LowHomesYards,
+            DistrictFamily::LowServiceParking,
+            DistrictFamily::ParkGrove,
+            DistrictFamily::ParkMeadow,
+            DistrictFamily::FieldFurrowHay,
+            DistrictFamily::FieldCrossRowsCrates,
+            DistrictFamily::OrchardLongRows,
+            DistrictFamily::OrchardSplitRows,
+        ];
+        let signatures: BTreeSet<_> = families.into_iter().map(family_layout_signature).collect();
+        assert_eq!(signatures.len(), families.len());
+        for family in [
+            DistrictFamily::WaterGardenOval,
+            DistrictFamily::WaterReedMarsh,
+            DistrictFamily::WaterFarmReservoir,
+        ] {
+            assert!(matches!(
+                visual_family(family),
+                DistrictFamily::ParkGrove | DistrictFamily::ParkMeadow
+            ));
+        }
+    }
+
+    #[test]
+    fn authored_family_footprints_clear_empty_and_cross_roads() {
+        for family in FAMILY_CATALOG {
+            let visual = visual_family(family);
+            for kind in [TileKind::Empty, TileKind::Cross] {
+                let sock = sockets(kind);
+                let (buildings, count) =
+                    urban_building_layout(visual, family_layout_seed(3, -4, family));
+                for building in buildings.into_iter().take(count) {
+                    assert!(building.position.x.abs() + building.size.x * 0.5 <= 20.0);
+                    assert!(building.position.y.abs() + building.size.y * 0.5 <= 20.0);
+                    if kind == TileKind::Cross {
+                        // Exercise the same fixed-candidate admission path as
+                        // runtime. Anything accepted under road pressure must
+                        // clear the complete curb-expanded road envelope.
+                        let mut placed = road_exclusion_rects(sock);
+                        let mut seed = 1;
+                        let admitted = try_place(
+                            &mut placed,
+                            &mut seed,
+                            building.size.x * 0.5,
+                            building.size.y * 0.5,
+                            building.position.x,
+                            building.position.x,
+                            building.position.y,
+                            building.position.y,
+                            1.0,
+                            1,
+                        );
+                        if admitted.is_some() {
+                            assert!(!footprint_overlaps_road(
+                                sock,
+                                building.position,
+                                building.size * 0.5,
+                                1.0,
+                            ));
+                        }
+                    }
+                }
+                let (trees, tree_count) = family_tree_layout(visual);
+                for position in trees.into_iter().take(tree_count) {
+                    assert!(position.x.abs() + 0.3 <= 20.0);
+                    assert!(position.y.abs() + 0.3 <= 20.0);
+                }
+                let (strips, strip_count) = family_strip_layout(visual);
+                for strip in strips.into_iter().take(strip_count) {
+                    assert!(strip.position.x.abs() + strip.size.x * 0.5 <= 20.0);
+                    assert!(strip.position.y.abs() + strip.size.y * 0.5 <= 20.0);
+                }
+            }
+        }
     }
 
     #[test]
