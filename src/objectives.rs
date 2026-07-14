@@ -111,8 +111,26 @@ pub struct ObjectiveCompleted {
     pub kind: ObjectiveKind,
 }
 
+#[derive(SystemSet, Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct ObjectiveSelectionSet;
+
+pub(crate) fn mission_action(kind: ObjectiveKind) -> String {
+    match kind {
+        ObjectiveKind::HitChickens { target } => format!("Hit {target} chickens"),
+        ObjectiveKind::CollectCoins { target } => format!("Collect {target} coins"),
+        ObjectiveKind::ReachCombo { target } => format!("Reach a {target}x combo"),
+    }
+}
+
+pub(crate) fn mission_announcement(kind: ObjectiveKind) -> String {
+    format!(
+        "ROUND MISSION\n{}\nComplete once: +{OBJECTIVE_BONUS} bonus",
+        mission_action(kind)
+    )
+}
+
 #[derive(Component)]
-struct ObjectiveHudRoot;
+pub(crate) struct ObjectiveHudRoot;
 
 #[derive(Component)]
 struct ObjectiveHudText;
@@ -223,7 +241,9 @@ impl Plugin for ObjectivesPlugin {
             // RoundActive remains false throughout SpawnSet on a fresh entry.
             .add_systems(
                 OnEnter(GameState::Playing),
-                select_fresh_objective.in_set(SpawnSet),
+                select_fresh_objective
+                    .in_set(SpawnSet)
+                    .in_set(ObjectiveSelectionSet),
             )
             // Recreate presentation after selection. On pause resume this uses
             // the preserved objective rather than resetting it.
@@ -322,7 +342,10 @@ fn spawn_objective_hud(
     commands
         .spawn((objective_root_node(touch.0), ObjectiveHudRoot))
         .with_child((
-            Text::new(format!("OBJECTIVE | {}", objective.summary())),
+            Text::new(format!(
+                "MISSION | {} | BONUS +{OBJECTIVE_BONUS}",
+                objective.summary()
+            )),
             objective_font(touch.0),
             TextColor(Color::srgb(1.0, 0.86, 0.22)),
             objective_panel_node(touch.0),
@@ -393,7 +416,10 @@ fn update_objective_hud(
     objective: Res<ActiveObjective>,
     mut labels: Query<&mut Text, With<ObjectiveHudText>>,
 ) {
-    let summary = format!("OBJECTIVE | {}", objective.summary());
+    let summary = format!(
+        "MISSION | {} | BONUS +{OBJECTIVE_BONUS}",
+        objective.summary()
+    );
     for mut label in &mut labels {
         **label = summary.clone();
     }

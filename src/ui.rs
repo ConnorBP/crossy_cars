@@ -489,7 +489,9 @@ fn spawn_menu(mut commands: Commands, condition_bests: Res<ConditionBests>) {
                 },
             ));
             p.spawn((
-                Text::new("Hit wandering chickens for score!\nCoins give bonus time."),
+                Text::new(
+                    "CORE SCORE - Chickens give at least +1. Coins give +1 and time.\nROUND MISSION - Complete the shown target once for a +10 bonus.",
+                ),
                 TextFont {
                     font_size: FontSize::Px(15.0),
                     ..default()
@@ -1591,7 +1593,7 @@ mod tests {
     fn rendered_static_labels_are_ascii() {
         for label in [
             "ROADY CAR",
-            "Hit wandering chickens for score!\nCoins give bonus time.",
+            "CORE SCORE - Chickens give at least +1. Coins give +1 and time.\nROUND MISSION - Complete the shown target once for a +10 bonus.",
             "WASD / Arrows - Drive   |   Space - Brake   |   Esc - Pause",
             "B/S/G = BRONZE/SILVER/GOLD   [X] EARNED   [-] LOCKED",
             "Press ENTER / SPACE to drive",

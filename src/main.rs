@@ -16,6 +16,7 @@ mod objectives;
 mod palette;
 mod persist;
 mod pickups;
+mod round_intro;
 mod run_events;
 mod settings;
 mod shaders;
@@ -45,6 +46,7 @@ use modifiers::ModifiersPlugin;
 use objectives::ObjectivesPlugin;
 use persist::PersistPlugin;
 use pickups::PickupsPlugin;
+use round_intro::RoundIntroPlugin;
 use run_events::RunEventsPlugin;
 use settings::SettingsPlugin;
 use shaders::ShaderPlugin;
@@ -147,6 +149,9 @@ fn main() {
         // Bonus objectives own their deterministic round state and HUD, and
         // remain independent of persistence and the main feature tuple.
         .add_plugins(ObjectivesPlugin)
+        // Fresh-round mission announcement is presentation-only and ordered
+        // after objective selection.
+        .add_plugins(RoundIntroPlugin)
         // Mid-run event scheduling is independent of the feature tuple for
         // the same tuple-limit reason as modifiers.
         .add_plugins(RunEventsPlugin)
