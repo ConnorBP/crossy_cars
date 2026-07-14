@@ -102,6 +102,136 @@ pub struct CameraPlugin;
 /// shake, speed zoom, bloom, or other frame-dependent behavior.
 pub struct WorldReviewCameraPlugin;
 
+/// Minimal deterministic studio used only by `?car_review=1`. It owns a
+/// neutral platform, fixed key/fill lights and one non-animated camera; no
+/// production world, UI, follow, shake or gameplay systems are installed.
+pub struct CarReviewCameraPlugin;
+
+impl Plugin for CarReviewCameraPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(Startup, (spawn_car_review_studio, mark_car_review_ready));
+    }
+}
+
+fn mark_car_review_ready() {
+    #[cfg(target_arch = "wasm32")]
+    if let Some(root) = web_sys::window()
+        .and_then(|window| window.document())
+        .and_then(|document| document.document_element())
+    {
+        let _ = root.set_attribute("data-roady-car-review-ready", "true");
+    }
+}
+
+#[derive(Clone, Copy)]
+enum CarReviewView {
+    Front,
+    Rear,
+    Left,
+    Right,
+    FrontLeft,
+    FrontRight,
+    RearLeft,
+    RearRight,
+}
+
+fn car_review_view_name() -> String {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let query = web_sys::window()
+            .and_then(|window| js_sys::Reflect::get(window.as_ref(), &"location".into()).ok())
+            .and_then(|location| js_sys::Reflect::get(&location, &"search".into()).ok())
+            .and_then(|search| search.as_string())
+            .unwrap_or_default();
+        for part in query.trim_start_matches('?').split('&') {
+            if let Some(value) = part.strip_prefix("car_view=") {
+                return value.to_ascii_lowercase();
+            }
+        }
+        "front_left".into()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::env::var("ROADY_CAR_REVIEW_VIEW").unwrap_or_else(|_| "front_left".into())
+    }
+}
+
+fn car_review_view(name: &str) -> CarReviewView {
+    match name {
+        "front" => CarReviewView::Front,
+        "rear" => CarReviewView::Rear,
+        "left" => CarReviewView::Left,
+        "right" => CarReviewView::Right,
+        "front_right" => CarReviewView::FrontRight,
+        "rear_left" => CarReviewView::RearLeft,
+        "rear_right" => CarReviewView::RearRight,
+        _ => CarReviewView::FrontLeft,
+    }
+}
+
+fn car_review_camera_position(view: CarReviewView) -> Vec3 {
+    let (x, z) = match view {
+        CarReviewView::Front => (0.0, -3.6),
+        CarReviewView::Rear => (0.0, 3.6),
+        CarReviewView::Left => (-3.6, 0.0),
+        CarReviewView::Right => (3.6, 0.0),
+        CarReviewView::FrontLeft => (-2.75, -2.75),
+        CarReviewView::FrontRight => (2.75, -2.75),
+        CarReviewView::RearLeft => (-2.75, 2.75),
+        CarReviewView::RearRight => (2.75, 2.75),
+    };
+    Vec3::new(x, 1.75, z)
+}
+
+fn spawn_car_review_studio(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    let platform = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.33, 0.34, 0.35),
+        metallic: 0.0,
+        perceptual_roughness: 0.82,
+        ..default()
+    });
+    commands.spawn((
+        Mesh3d(meshes.add(Cylinder::new(1.55, 0.05))),
+        MeshMaterial3d(platform),
+        Transform::from_xyz(0.0, -0.01, 0.0),
+    ));
+    commands.spawn((
+        DirectionalLight {
+            color: Color::srgb(1.0, 0.96, 0.90),
+            illuminance: 8_000.0,
+            shadow_maps_enabled: true,
+            ..default()
+        },
+        Transform::from_xyz(-3.0, 5.0, -4.0).looking_at(Vec3::ZERO, Vec3::Y),
+    ));
+    commands.spawn((
+        DirectionalLight {
+            color: Color::srgb(0.72, 0.82, 1.0),
+            illuminance: 2_200.0,
+            shadow_maps_enabled: false,
+            ..default()
+        },
+        Transform::from_xyz(4.0, 3.0, 3.0).looking_at(Vec3::ZERO, Vec3::Y),
+    ));
+    let position = car_review_camera_position(car_review_view(&car_review_view_name()));
+    commands.spawn((
+        Camera3d::default(),
+        Msaa::Sample4,
+        Tonemapping::TonyMcMapface,
+        Projection::Perspective(PerspectiveProjection {
+            fov: 32.0_f32.to_radians(),
+            near: 0.1,
+            far: 20.0,
+            ..default()
+        }),
+        Transform::from_translation(position).looking_at(Vec3::new(0.0, 0.43, 0.0), Vec3::Y),
+    ));
+}
+
 impl Plugin for WorldReviewCameraPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, spawn_world_review_camera)
@@ -535,9 +665,10 @@ fn ground_offset_for_ndc(ndc: Vec2, rotation: Quat, height: f32, aspect: f32) ->
 #[cfg(test)]
 mod tests {
     use super::{
-        ANCHOR_MAX_SPEED, CameraObstacleFeedbackSet, DIRECTION_SMOOTH, GameplayCamera,
-        LEAD_VERTICAL_NDC_PER_SECOND, TRAILING_NDC_LIMIT, camera_target_translation,
-        camera_viewport_height, capped_anchor_step, configure_obstacle_feedback_order,
+        ANCHOR_MAX_SPEED, CameraObstacleFeedbackSet, CarReviewView, DIRECTION_SMOOTH,
+        GameplayCamera, LEAD_VERTICAL_NDC_PER_SECOND, TRAILING_NDC_LIMIT,
+        camera_target_translation, camera_viewport_height, capped_anchor_step,
+        car_review_camera_position, car_review_view, configure_obstacle_feedback_order,
         damped_lead_ndc, exp_smoothing_alpha, ground_offset_for_ndc, next_trauma,
         projected_ground_direction, reset_camera_framing_for_fresh_round,
         review_projection_for_bounds, smoothed_direction, trailing_ndc_offset, travel_direction,
@@ -554,6 +685,29 @@ mod tests {
 
     fn record_feedback(mut order: ResMut<ExecutionOrder>) {
         order.0.push("camera feedback");
+    }
+
+    #[test]
+    fn car_review_names_map_to_distinct_deterministic_orbits() {
+        let cases = [
+            ("front", CarReviewView::Front),
+            ("rear", CarReviewView::Rear),
+            ("left", CarReviewView::Left),
+            ("right", CarReviewView::Right),
+            ("front_left", CarReviewView::FrontLeft),
+            ("front_right", CarReviewView::FrontRight),
+            ("rear_left", CarReviewView::RearLeft),
+            ("rear_right", CarReviewView::RearRight),
+        ];
+        let mut positions = Vec::new();
+        for (name, expected) in cases {
+            let actual = car_review_camera_position(car_review_view(name));
+            let expected = car_review_camera_position(expected);
+            assert_eq!(actual, expected);
+            assert!(actual.y > 0.0);
+            assert!(positions.iter().all(|position| *position != actual));
+            positions.push(actual);
+        }
     }
 
     #[test]

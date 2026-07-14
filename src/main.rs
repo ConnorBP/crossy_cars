@@ -30,8 +30,8 @@ use bevy::asset::{AssetMetaCheck, AssetPlugin};
 use bevy::prelude::*;
 
 use audio::AudioPlugin;
-use camera::{CameraPlugin, WorldReviewCameraPlugin};
-use car::CarPlugin;
+use camera::{CameraPlugin, CarReviewCameraPlugin, WorldReviewCameraPlugin};
+use car::{CarPlugin, CarReviewPlugin};
 use chickens::ChickensPlugin;
 use combos::CombosPlugin;
 use countdown::CountdownPlugin;
@@ -56,33 +56,45 @@ use transparency::TransparencyPlugin;
 use ui::UiPlugin;
 use world::{WorldPlugin, WorldReviewPlugin};
 
-/// Explicit opt-in only: URL `?world_review=1` on WASM, or native
-/// `ROADY_WORLD_REVIEW=1`. Normal production startup is unchanged.
-fn world_review_requested() -> bool {
+/// Shared exact query/native-env flag parser. Review modes remain explicit;
+/// normal production startup is unchanged.
+fn query_flag_requested(query_name: &str, native_env: &str) -> bool {
     #[cfg(target_arch = "wasm32")]
     {
+        let _ = native_env;
         return web_sys::window()
             .and_then(|window| js_sys::Reflect::get(window.as_ref(), &"location".into()).ok())
             .and_then(|location| js_sys::Reflect::get(&location, &"search".into()).ok())
             .and_then(|search| search.as_string())
             .is_some_and(|query| {
-                query.split('&').any(|part| {
-                    matches!(
-                        part.trim_start_matches('?'),
-                        "world_review=1" | "world_review=true"
-                    )
+                query.trim_start_matches('?').split('&').any(|part| {
+                    part.split_once('=').is_some_and(|(name, value)| {
+                        name == query_name && matches!(value, "1" | "true")
+                    })
                 })
             });
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        std::env::var("ROADY_WORLD_REVIEW")
-            .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "TRUE"))
+        let _ = query_name;
+        std::env::var(native_env).is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "TRUE"))
     }
 }
 
+/// URL `?world_review=1` on WASM, or native `ROADY_WORLD_REVIEW=1`.
+fn world_review_requested() -> bool {
+    query_flag_requested("world_review", "ROADY_WORLD_REVIEW")
+}
+
+/// Explicit opt-in only: URL `?car_review=1&car_view=front_left` on WASM,
+/// or native `ROADY_CAR_REVIEW=1` plus `ROADY_CAR_REVIEW_VIEW=front_left`.
+fn car_review_requested() -> bool {
+    query_flag_requested("car_review", "ROADY_CAR_REVIEW")
+}
+
 fn main() {
-    let review = world_review_requested();
+    let world_review = world_review_requested();
+    let car_review = car_review_requested();
     let mut app = App::new();
     let defaults = DefaultPlugins
         .set(AssetPlugin {
@@ -114,7 +126,21 @@ fn main() {
             ..default()
         });
 
-    if review {
+    if car_review {
+        // Controlled visual-review harness: production car rendering only,
+        // isolated from the production world, UI, audio and gameplay systems.
+        app.insert_resource(ClearColor(Color::srgb(0.12, 0.125, 0.13)))
+            .insert_resource(GlobalAmbientLight {
+                color: Color::WHITE,
+                brightness: 120.0,
+                ..default()
+            })
+            .add_plugins((TexturesPlugin, CarReviewPlugin, CarReviewCameraPlugin));
+        app.run();
+        return;
+    }
+
+    if world_review {
         // Smallest robust harness: production world/textures/rendering only.
         // No game state, car, HUD, audio, movement, timers, or recycling.
         app.add_plugins(WaterMaterialPlugin).add_plugins((

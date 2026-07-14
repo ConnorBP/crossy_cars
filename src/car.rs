@@ -1,5 +1,6 @@
+use bevy::asset::RenderAssetUsages;
 use bevy::color::LinearRgba;
-use bevy::mesh::VertexAttributeValues;
+use bevy::mesh::{Indices, PrimitiveTopology, VertexAttributeValues};
 use bevy::prelude::*;
 use std::f32::consts::{FRAC_PI_2, TAU};
 
@@ -114,28 +115,78 @@ const DRIFT_WIDE_STEER: f32 = 0.22;
 /// Ignore analog noise and non-finite input until steering is deliberate.
 const DRIFT_STEER_DEADZONE: f32 = 0.05;
 
-// Pure player-car geometry shared by spawning and footprint tests. Keeping the
-// wheel/chassis/fascia dimensions together makes it difficult for a cosmetic
-// tweak to separate the running gear from the body again.
+// Pure player-car geometry shared by spawning and geometry tests.
 const BODY_AXES: Vec3 = Vec3::new(0.5, 0.25, 1.0);
 const BODY_CENTER_Y: f32 = 0.35;
-const CHASSIS_WIDTH: f32 = 0.82;
-const CHASSIS_HEIGHT: f32 = 0.16;
-const CHASSIS_LENGTH: f32 = 1.55;
-const CHASSIS_Y: f32 = 0.20;
-const ROCKER_LENGTH: f32 = 1.02;
-const WHEEL_RADIUS: f32 = 0.15;
-const WHEEL_WIDTH: f32 = 0.18;
-const WHEEL_X: f32 = 0.47;
-const WHEEL_Y: f32 = 0.17;
-const WHEEL_Z: f32 = 0.66;
-const BUMPER_WIDTH: f32 = 0.94;
-const BUMPER_DEPTH: f32 = 0.08;
-const BUMPER_Z: f32 = 0.90;
-const SHADOW_BODY_WIDTH: f32 = 1.02;
-const SHADOW_BODY_LENGTH: f32 = 2.0;
-const SHADOW_WHEEL_WIDTH: f32 = 0.28;
-const SHADOW_WHEEL_LENGTH: f32 = 0.34;
+// Iteration 9 retains the wheel centers but replaces the thin wheel-space
+// annulus with a broad, body-rooted shoulder blister. Its complete perimeter
+// returns tangentially to the ellipsoid; the outboard half is a rounded return,
+// not an exposed lip, blade, or ridge.
+const WHEEL_RADIUS: f32 = 0.18;
+const WHEEL_WIDTH: f32 = 0.16;
+const WHEEL_X: f32 = 0.49;
+const WHEEL_Y: f32 = 0.18;
+const WHEEL_Z: f32 = 0.65;
+const FENDER_ROOT_X: f32 = 0.12;
+const FENDER_WELD_INSET: f32 = 0.0025;
+const FENDER_Z_HALF_SPAN: f32 = 0.21;
+const FENDER_END_ROUND: f32 = 0.08;
+const FENDER_BULGE: f32 = 0.25;
+const FENDER_BULGE_RISE: f32 = -0.08;
+const FENDER_Z_STEPS: usize = 20;
+const FENDER_X_STEPS: usize = 12;
+const FASCIA_LIGHT_X: f32 = 0.22;
+const FASCIA_LIGHT_WIDTH: f32 = 0.12;
+const FASCIA_LIGHT_HEIGHT: f32 = 0.07;
+const FASCIA_LIGHT_Y: f32 = -0.015;
+const FASCIA_GRILLE_WIDTH: f32 = 0.26;
+const FASCIA_GRILLE_HEIGHT: f32 = 0.06;
+const FASCIA_GRILLE_Y: f32 = FASCIA_LIGHT_Y;
+const FASCIA_SURFACE_LIFT: f32 = 0.002;
+
+// Greenhouse profiles are authored in the painted body's local
+// space. A nearest-point ellipsoid weld and short analytic tangent keep the
+// cowl/shoulder join compact and smooth. The rear remains a little narrower,
+// with a rake deliberately distinct from the windscreen.
+const GREENHOUSE_SILL_Y: f32 = 0.13;
+const GREENHOUSE_ROOF_BASE_Y: f32 = 0.49;
+const GREENHOUSE_ROOF_CENTER_CROWN: f32 = 0.095;
+#[cfg(test)]
+const GREENHOUSE_TOP_Y: f32 = GREENHOUSE_ROOF_BASE_Y + GREENHOUSE_ROOF_CENTER_CROWN;
+const GREENHOUSE_FRONT_SILL_Z: f32 = -0.39;
+const GREENHOUSE_FRONT_TOP_Z: f32 = -0.12;
+const GREENHOUSE_REAR_SILL_Z: f32 = 0.55;
+const GREENHOUSE_REAR_TOP_Z: f32 = 0.43;
+const GREENHOUSE_FRONT_SILL_HALF_WIDTH: f32 = 0.39;
+const GREENHOUSE_REAR_SILL_HALF_WIDTH: f32 = 0.35;
+const GREENHOUSE_FRONT_TOP_HALF_WIDTH: f32 = 0.27;
+const GREENHOUSE_REAR_TOP_HALF_WIDTH: f32 = 0.245;
+#[cfg(test)]
+const GREENHOUSE_TRANSITION_SEGMENTS: usize = 12;
+const GREENHOUSE_TANGENT_LENGTH: f32 = 0.018;
+const GREENHOUSE_WELD_INSET: f32 = 0.001;
+// Keep only a narrow painted sill above the body weld. Lowering the sill
+// without lowering the aperture would recreate the broad perimeter shelf.
+const GREENHOUSE_WINDOW_BOTTOM_Y: f32 = 0.145;
+const GREENHOUSE_WINDOW_TOP_Y: f32 = 0.465;
+const GREENHOUSE_B_PILLAR_Z: f32 = 0.12;
+const GREENHOUSE_B_PILLAR_HALF_WIDTH: f32 = 0.018;
+const GREENHOUSE_CORNER_BAND: f32 = 0.08;
+// Panes now sit well behind the painted aperture rather than nearly flush with
+// it. The backing retreats another 22 mm, keeping either layer's cut edge out
+// of every oblique sightline while retaining almost 90% of the aperture height.
+const GREENHOUSE_GLASS_INSET: f32 = 0.018;
+const GREENHOUSE_BACKING_INSET: f32 = 0.040;
+// Preserve the accepted painted lower/upper seal dimensions independently of
+// the deeper backing; iteration 9 changes containment, not frame geometry.
+const GREENHOUSE_SEAL_BAND: f32 = 0.024;
+const GREENHOUSE_SEAL_OVERLAP: f32 = 0.004;
+// Glazing and backing also continue 25 mm beneath both faces of every painted
+// corner pillar. This is independent from the face-normal depth: adjacent
+// raked panes retreat in different directions and need a generous hidden plan
+// overlap as well as depth to guarantee a painted containment margin.
+const GREENHOUSE_CORNER_OVERLAP: f32 = 0.025;
+const GREENHOUSE_GLASS_ROUGHNESS: f32 = 0.16;
 const WHEEL_POSITIONS: [(f32, f32); 4] = [
     (WHEEL_X, WHEEL_Z),
     (-WHEEL_X, WHEEL_Z),
@@ -143,33 +194,13 @@ const WHEEL_POSITIONS: [(f32, f32); 4] = [
     (-WHEEL_X, -WHEEL_Z),
 ];
 
-const fn max_f32(a: f32, b: f32) -> f32 {
-    if a > b { a } else { b }
-}
+// Gameplay collision remains the current oriented 1.12 x 2.00 footprint,
+// independent of cosmetic wheel/fender overhang in the procedural visual.
+const COLLISION_HALF_WIDTH: f32 = 0.56;
+const COLLISION_HALF_LENGTH: f32 = 1.0;
 
-#[cfg(test)]
-const fn bumper_outer_z() -> f32 {
-    BUMPER_Z + BUMPER_DEPTH * 0.5
-}
-
-/// Half-extents of everything that contacts or overhangs the ground plane.
 const fn car_footprint_half_extents() -> (f32, f32) {
-    (
-        max_f32(BODY_AXES.x, WHEEL_X + WHEEL_WIDTH * 0.5),
-        max_f32(BODY_AXES.z, WHEEL_Z + WHEEL_RADIUS),
-    )
-}
-
-/// Aggregate half-extents of the central body patch plus wheel patches.
-#[cfg(test)]
-const fn shadow_footprint_half_extents() -> (f32, f32) {
-    (
-        max_f32(SHADOW_BODY_WIDTH * 0.5, WHEEL_X + SHADOW_WHEEL_WIDTH * 0.5),
-        max_f32(
-            SHADOW_BODY_LENGTH * 0.5,
-            WHEEL_Z + SHADOW_WHEEL_LENGTH * 0.5,
-        ),
-    )
+    (COLLISION_HALF_WIDTH, COLLISION_HALF_LENGTH)
 }
 
 /// Pure speed integration shared by gameplay and tests. Exponential response
@@ -410,6 +441,15 @@ struct FrontWheel;
 #[derive(Component)]
 struct BrakeLight;
 
+/// Tags make the three coherent greenhouse layers explicit: a painted frame,
+/// dielectric glazing, and a small dark volume visible through the glass.
+#[derive(Component)]
+struct GreenhouseFrame;
+#[derive(Component)]
+struct GreenhouseGlass;
+#[derive(Component)]
+struct GreenhouseInterior;
+
 /// Update ordering shared by keyboard, touch, and car simulation. Touch input
 /// augments the keyboard-populated [`PlayerInput`] before driving consumes it.
 #[derive(SystemSet, Clone, Debug, PartialEq, Eq, Hash)]
@@ -422,6 +462,16 @@ pub(crate) struct TouchInputSet;
 pub(crate) struct DrivingSet;
 
 pub struct CarPlugin;
+
+/// Review-only plugin: spawn the production car assembly without input,
+/// movement, collision, or gameplay-state systems.
+pub struct CarReviewPlugin;
+
+impl Plugin for CarReviewPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(Startup, spawn_car);
+    }
+}
 
 impl Plugin for CarPlugin {
     fn build(&self, app: &mut App) {
@@ -475,18 +525,970 @@ fn car_body_mesh() -> Mesh {
         .map(|position| {
             let sphere_position = Vec3::from_array(position);
             let p = sphere_position * (BODY_AXES / 0.5);
-            let n = Vec3::new(
-                p.x / BODY_AXES.x.powi(2),
-                p.y / BODY_AXES.y.powi(2),
-                p.z / BODY_AXES.z.powi(2),
-            )
-            .normalize();
+            let n = body_normal(p);
             (p.to_array(), n.to_array())
         })
         .unzip();
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
     mesh
+}
+
+/// Position on a broad shoulder cap. `along` runs nose-to-tail and `across`
+/// runs from the upper-body root to the outer flank. The unmodified base spans
+/// the ellipsoid all the way to its side silhouette. A separable sin² dome
+/// pushes the middle outward and down around the tire shoulder, while value and
+/// first derivative vanish on all four edges. Consequently the whole perimeter
+/// is a tangent body weld and neither longitudinal end collapses to a point.
+fn fender_point(side: f32, wheel_z: f32, along: f32, across: f32) -> Vec3 {
+    let along = along.clamp(0.0, 1.0);
+    let across = across.clamp(0.0, 1.0);
+    let longitudinal_round = (std::f32::consts::PI * along).sin().powi(4);
+    let half_span =
+        FENDER_Z_HALF_SPAN - FENDER_END_ROUND * (1.0 - (std::f32::consts::PI * across).sin());
+    let z = wheel_z + half_span * (along * 2.0 - 1.0);
+    let side_limit = BODY_AXES.x * (1.0 - z.powi(2) / BODY_AXES.z.powi(2)).max(0.0).sqrt();
+    let abs_x = FENDER_ROOT_X + (side_limit - FENDER_ROOT_X) * across;
+    let surface = Vec3::new(side * abs_x, body_surface_y(side * abs_x, z), z);
+    let base = surface - body_normal(surface) * FENDER_WELD_INSET;
+    let lateral_round = (std::f32::consts::PI * across).sin();
+    let direction = Vec3::new(side, FENDER_BULGE_RISE, 0.0).normalize();
+    base + direction * (FENDER_BULGE * longitudinal_round * lateral_round)
+}
+
+/// Position and geometric normal on the rounded shoulder. Centered numerical
+/// derivatives keep the normal tied to the actual multi-ring surface; at the
+/// boundary one-sided derivatives converge to the analytic ellipsoid tangent
+/// because the sin² displacement has zero slope there.
+fn fender_point_normal(side: f32, wheel_z: f32, along: f32, across: f32) -> (Vec3, Vec3) {
+    const H: f32 = 1e-3;
+    let point = fender_point(side, wheel_z, along, across);
+    if along <= f32::EPSILON
+        || along >= 1.0 - f32::EPSILON
+        || across <= f32::EPSILON
+        || across >= 1.0 - f32::EPSILON
+    {
+        return (point, body_normal(point));
+    }
+    let along0 = (along - H).max(0.0);
+    let along1 = (along + H).min(1.0);
+    let across0 = (across - H).max(0.0);
+    let across1 = (across + H).min(1.0);
+    let dz =
+        fender_point(side, wheel_z, along1, across) - fender_point(side, wheel_z, along0, across);
+    let dx =
+        fender_point(side, wheel_z, along, across1) - fender_point(side, wheel_z, along, across0);
+    let mut normal = if side > 0.0 {
+        dz.cross(dx)
+    } else {
+        dx.cross(dz)
+    }
+    .normalize();
+    if normal.dot(Vec3::new(side, 1.0, 0.0)) < 0.0 {
+        normal = -normal;
+    }
+    (point, normal)
+}
+
+/// One closed-perimeter shoulder patch per wheel. There is no inner/outer
+/// annulus and no closure wall: every edge is already buried tangentially in
+/// the body, while the dense two-dimensional surface reads as a rounded cap.
+fn fender_mesh(side: f32, wheel_z: f32) -> Mesh {
+    let mut mesh = GreenhouseMeshBuilder::default();
+    for iz in 0..FENDER_Z_STEPS {
+        for ix in 0..FENDER_X_STEPS {
+            let z0 = iz as f32 / FENDER_Z_STEPS as f32;
+            let z1 = (iz + 1) as f32 / FENDER_Z_STEPS as f32;
+            let x0 = ix as f32 / FENDER_X_STEPS as f32;
+            let x1 = (ix + 1) as f32 / FENDER_X_STEPS as f32;
+            let (a, na) = fender_point_normal(side, wheel_z, z0, x0);
+            let (b, nb) = fender_point_normal(side, wheel_z, z0, x1);
+            let (c, nc) = fender_point_normal(side, wheel_z, z1, x1);
+            let (d, nd) = fender_point_normal(side, wheel_z, z1, x0);
+            mesh.quad_with_normals_outward([a, b, c, d], [na, nb, nc, nd]);
+        }
+    }
+    mesh.finish()
+}
+
+/// Geometry/material role for one cached greenhouse layer. Frame includes the
+/// tangent-matched lower transition, sill, corner pillars, B-pillars and roof;
+/// glass is offset slightly to prevent coplanar flicker; interior is a closed
+/// dark box. All three meshes and their materials are allocated only once by
+/// `spawn_car`, then reused through cloned asset handles.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GreenhouseMeshPart {
+    Frame,
+    Glass,
+    Interior,
+}
+
+/// Small indexed-mesh builder. Most vertices are duplicated per face for
+/// crisp glazing/pillar breaks. The welded transition instead supplies shared
+/// analytic-to-sill normals, keeping its paint sweep coherent with the rounded
+/// body rather than producing a stack of hard slabs.
+#[derive(Default)]
+struct GreenhouseMeshBuilder {
+    positions: Vec<[f32; 3]>,
+    normals: Vec<[f32; 3]>,
+    indices: Vec<u32>,
+}
+
+impl GreenhouseMeshBuilder {
+    fn quad(&mut self, a: Vec3, b: Vec3, c: Vec3, d: Vec3) {
+        let normal = (b - a).cross(c - a).normalize_or_zero();
+        debug_assert!(normal.length_squared() > 0.99, "degenerate greenhouse quad");
+        let base = self.positions.len() as u32;
+        self.positions
+            .extend([a.to_array(), b.to_array(), c.to_array(), d.to_array()]);
+        self.normals.extend([normal.to_array(); 4]);
+        self.indices
+            .extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+
+    fn quad_with_normals(&mut self, points: [Vec3; 4], normals: [Vec3; 4]) {
+        let geometric = (points[1] - points[0]).cross(points[2] - points[0]);
+        debug_assert!(
+            geometric.length_squared() > 1e-10,
+            "degenerate greenhouse quad"
+        );
+        debug_assert!(
+            geometric.dot(normals[0]) > 0.0,
+            "greenhouse winding faces inward"
+        );
+        let base = self.positions.len() as u32;
+        self.positions.extend(points.map(|point| point.to_array()));
+        self.normals
+            .extend(normals.map(|n| n.normalize().to_array()));
+        self.indices
+            .extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+
+    fn triangle_with_normals_outward(&mut self, mut points: [Vec3; 3], mut normals: [Vec3; 3]) {
+        // Endpoint-tapered curved surfaces intentionally collapse to a point.
+        // Do not emit zero-area triangles at those poles.
+        if (points[1] - points[0])
+            .cross(points[2] - points[0])
+            .length_squared()
+            <= 1e-10
+        {
+            return;
+        }
+        let average = normals.into_iter().sum::<Vec3>().normalize_or_zero();
+        if (points[1] - points[0])
+            .cross(points[2] - points[0])
+            .dot(average)
+            < 0.0
+        {
+            points.swap(1, 2);
+            normals.swap(1, 2);
+        }
+        let base = self.positions.len() as u32;
+        self.positions.extend(points.map(|point| point.to_array()));
+        self.normals
+            .extend(normals.map(|normal| normal.normalize().to_array()));
+        self.indices.extend([base, base + 1, base + 2]);
+    }
+
+    /// Add a smooth quad while selecting winding from its supplied outward
+    /// normals. Useful for planar fender closure faces whose orientation changes
+    /// by side/end and would otherwise duplicate fragile winding branches.
+    fn quad_with_normals_outward(&mut self, points: [Vec3; 4], normals: [Vec3; 4]) {
+        // Curved quads are not necessarily planar. Orient each triangle from
+        // its own three vertex normals instead of choosing one winding from a
+        // quad-wide average that can be wrong for the second half.
+        self.triangle_with_normals_outward(
+            [points[0], points[1], points[2]],
+            [normals[0], normals[1], normals[2]],
+        );
+        self.triangle_with_normals_outward(
+            [points[0], points[2], points[3]],
+            [normals[0], normals[2], normals[3]],
+        );
+    }
+
+    fn cuboid(&mut self, min: Vec3, max: Vec3) {
+        let p000 = Vec3::new(min.x, min.y, min.z);
+        let p001 = Vec3::new(min.x, min.y, max.z);
+        let p010 = Vec3::new(min.x, max.y, min.z);
+        let p011 = Vec3::new(min.x, max.y, max.z);
+        let p100 = Vec3::new(max.x, min.y, min.z);
+        let p101 = Vec3::new(max.x, min.y, max.z);
+        let p110 = Vec3::new(max.x, max.y, min.z);
+        let p111 = Vec3::new(max.x, max.y, max.z);
+        self.quad(p000, p001, p011, p010); // -X
+        self.quad(p100, p110, p111, p101); // +X
+        self.quad(p000, p100, p101, p001); // -Y
+        self.quad(p010, p011, p111, p110); // +Y
+        self.quad(p000, p010, p110, p100); // -Z
+        self.quad(p001, p101, p111, p011); // +Z
+    }
+
+    fn finish(self) -> Mesh {
+        let mut mesh = Mesh::new(
+            PrimitiveTopology::TriangleList,
+            RenderAssetUsages::default(),
+        );
+        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, self.positions);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, self.normals);
+        mesh.insert_indices(Indices::U32(self.indices));
+        mesh
+    }
+}
+
+fn profile_lerp(y: f32, sill: f32, top: f32) -> f32 {
+    let t =
+        ((y - GREENHOUSE_SILL_Y) / (GREENHOUSE_ROOF_BASE_Y - GREENHOUSE_SILL_Y)).clamp(0.0, 1.0);
+    sill + (top - sill) * t
+}
+
+fn front_z(y: f32) -> f32 {
+    profile_lerp(y, GREENHOUSE_FRONT_SILL_Z, GREENHOUSE_FRONT_TOP_Z)
+}
+
+fn rear_z(y: f32) -> f32 {
+    profile_lerp(y, GREENHOUSE_REAR_SILL_Z, GREENHOUSE_REAR_TOP_Z)
+}
+
+fn front_half_width(y: f32) -> f32 {
+    profile_lerp(
+        y,
+        GREENHOUSE_FRONT_SILL_HALF_WIDTH,
+        GREENHOUSE_FRONT_TOP_HALF_WIDTH,
+    )
+}
+
+fn rear_half_width(y: f32) -> f32 {
+    profile_lerp(
+        y,
+        GREENHOUSE_REAR_SILL_HALF_WIDTH,
+        GREENHOUSE_REAR_TOP_HALF_WIDTH,
+    )
+}
+
+fn side_x(y: f32, z: f32, side: f32) -> f32 {
+    let t = ((z - front_z(y)) / (rear_z(y) - front_z(y))).clamp(0.0, 1.0);
+    side * (front_half_width(y) + (rear_half_width(y) - front_half_width(y)) * t)
+}
+
+fn body_surface_y(x: f32, z: f32) -> f32 {
+    let radial = 1.0 - x.powi(2) / BODY_AXES.x.powi(2) - z.powi(2) / BODY_AXES.z.powi(2);
+    BODY_AXES.y * radial.max(0.0).sqrt()
+}
+
+fn body_normal(p: Vec3) -> Vec3 {
+    Vec3::new(
+        p.x / BODY_AXES.x.powi(2),
+        p.y / BODY_AXES.y.powi(2),
+        p.z / BODY_AXES.z.powi(2),
+    )
+    .normalize()
+}
+
+fn body_surface_z(x: f32, y: f32) -> f32 {
+    BODY_AXES.z
+        * (1.0 - x.powi(2) / BODY_AXES.x.powi(2) - y.powi(2) / BODY_AXES.y.powi(2))
+            .max(0.0)
+            .sqrt()
+}
+
+/// A gently tessellated lens/grille patch that follows the analytic body
+/// ellipsoid.  `end` is -1 for the nose and +1 for the tail.  All vertices are
+/// lifted only two millimetres along Z to avoid z-fighting while remaining far
+/// inside the projected silhouette; smooth normals retain the nose curvature.
+fn fascia_surface_mesh(end: f32, center: Vec2, size: Vec2) -> Mesh {
+    const X_STEPS: usize = 4;
+    const Y_STEPS: usize = 3;
+    let mut mesh = GreenhouseMeshBuilder::default();
+    let sample = |ix: usize, iy: usize| {
+        let x = center.x + size.x * (ix as f32 / X_STEPS as f32 - 0.5);
+        let y = center.y + size.y * (iy as f32 / Y_STEPS as f32 - 0.5);
+        let z = end * (body_surface_z(x, y) + FASCIA_SURFACE_LIFT);
+        let p = Vec3::new(x, y, z);
+        (p, body_normal(Vec3::new(x, y, end * body_surface_z(x, y))))
+    };
+    for iy in 0..Y_STEPS {
+        for ix in 0..X_STEPS {
+            let (a, na) = sample(ix, iy);
+            let (b, nb) = sample(ix + 1, iy);
+            let (c, nc) = sample(ix + 1, iy + 1);
+            let (d, nd) = sample(ix, iy + 1);
+            if end < 0.0 {
+                mesh.quad_with_normals([a, d, c, b], [na, nd, nc, nb]);
+            } else {
+                mesh.quad_with_normals([a, b, c, d], [na, nb, nc, nd]);
+            }
+        }
+    }
+    mesh.finish()
+}
+
+/// A point on one of the four sill perimeter edges. The ordering is chosen so
+/// each transition strip can use the same outward winding convention.
+fn sill_edge(edge: usize, u: f32) -> Vec3 {
+    let u = u.clamp(0.0, 1.0);
+    match edge {
+        0 => Vec3::new(
+            -GREENHOUSE_FRONT_SILL_HALF_WIDTH + 2.0 * GREENHOUSE_FRONT_SILL_HALF_WIDTH * u,
+            GREENHOUSE_SILL_Y,
+            GREENHOUSE_FRONT_SILL_Z,
+        ),
+        1 => Vec3::new(
+            GREENHOUSE_FRONT_SILL_HALF_WIDTH
+                + (GREENHOUSE_REAR_SILL_HALF_WIDTH - GREENHOUSE_FRONT_SILL_HALF_WIDTH) * u,
+            GREENHOUSE_SILL_Y,
+            GREENHOUSE_FRONT_SILL_Z + (GREENHOUSE_REAR_SILL_Z - GREENHOUSE_FRONT_SILL_Z) * u,
+        ),
+        2 => Vec3::new(
+            GREENHOUSE_REAR_SILL_HALF_WIDTH - 2.0 * GREENHOUSE_REAR_SILL_HALF_WIDTH * u,
+            GREENHOUSE_SILL_Y,
+            GREENHOUSE_REAR_SILL_Z,
+        ),
+        _ => Vec3::new(
+            -GREENHOUSE_REAR_SILL_HALF_WIDTH
+                + (-GREENHOUSE_FRONT_SILL_HALF_WIDTH + GREENHOUSE_REAR_SILL_HALF_WIDTH) * u,
+            GREENHOUSE_SILL_Y,
+            GREENHOUSE_REAR_SILL_Z + (GREENHOUSE_FRONT_SILL_Z - GREENHOUSE_REAR_SILL_Z) * u,
+        ),
+    }
+}
+
+fn sill_edge_derivative(edge: usize) -> Vec3 {
+    match edge {
+        0 => Vec3::new(2.0 * GREENHOUSE_FRONT_SILL_HALF_WIDTH, 0.0, 0.0),
+        1 => Vec3::new(
+            GREENHOUSE_REAR_SILL_HALF_WIDTH - GREENHOUSE_FRONT_SILL_HALF_WIDTH,
+            0.0,
+            GREENHOUSE_REAR_SILL_Z - GREENHOUSE_FRONT_SILL_Z,
+        ),
+        2 => Vec3::new(-2.0 * GREENHOUSE_REAR_SILL_HALF_WIDTH, 0.0, 0.0),
+        _ => Vec3::new(
+            GREENHOUSE_REAR_SILL_HALF_WIDTH - GREENHOUSE_FRONT_SILL_HALF_WIDTH,
+            0.0,
+            GREENHOUSE_FRONT_SILL_Z - GREENHOUSE_REAR_SILL_Z,
+        ),
+    }
+}
+
+/// Euclidean nearest point on the upper ellipsoid and its exact derivative
+/// along a sill edge. At the solution sill-surface is parallel to the normal;
+/// unlike constant-height radial projection this produces a compact weld.
+fn nearest_ellipsoid_projection(sill: Vec3, dsill: Vec3) -> (Vec3, Vec3, Vec3, Vec3) {
+    let axes2 = BODY_AXES * BODY_AXES;
+    let constraint = |lambda: f32| {
+        axes2.x * sill.x.powi(2) / (lambda + axes2.x).powi(2)
+            + axes2.y * sill.y.powi(2) / (lambda + axes2.y).powi(2)
+            + axes2.z * sill.z.powi(2) / (lambda + axes2.z).powi(2)
+    };
+    let (mut low, mut high) = if constraint(0.0) < 1.0 {
+        // The sill can lie inside the shell near edge midpoints. The upper,
+        // closest branch is bracketed before the Y-axis pole.
+        (-axes2.y + 1e-7, 0.0)
+    } else {
+        (0.0, 1.0)
+    };
+    while constraint(high) > 1.0 {
+        high *= 2.0;
+    }
+    for _ in 0..48 {
+        let mid = (low + high) * 0.5;
+        if constraint(mid) > 1.0 {
+            low = mid;
+        } else {
+            high = mid;
+        }
+    }
+    let lambda = (low + high) * 0.5;
+    let denom = axes2 + Vec3::splat(lambda);
+    let surface = axes2 * sill / denom;
+    let lambda_numerator = axes2.x * sill.x * dsill.x / denom.x.powi(2)
+        + axes2.y * sill.y * dsill.y / denom.y.powi(2)
+        + axes2.z * sill.z * dsill.z / denom.z.powi(2);
+    let lambda_denominator = axes2.x * sill.x.powi(2) / denom.x.powi(3)
+        + axes2.y * sill.y.powi(2) / denom.y.powi(3)
+        + axes2.z * sill.z.powi(2) / denom.z.powi(3);
+    let dlambda = lambda_numerator / lambda_denominator;
+    let dsurface = axes2 * (dsill * denom - sill * dlambda) / (denom * denom);
+    let gradient = surface / axes2;
+    let normal = gradient.normalize();
+    let dgradient = dsurface / axes2;
+    let dnormal = (dgradient - normal * normal.dot(dgradient)) / gradient.length();
+    (surface, dsurface, normal, dnormal)
+}
+
+/// Cubic nearest-point weld with exact parametric derivatives. Its generated
+/// normal is the analytic cross product of the Hermite surface derivatives.
+fn transition_point_normal(edge: usize, u: f32, t: f32) -> (Vec3, Vec3) {
+    let sill = sill_edge(edge, u);
+    let dsill = sill_edge_derivative(edge);
+    let (surface, dsurface, n0, dn0) = nearest_ellipsoid_projection(sill, dsill);
+    let p0 = surface - n0 * GREENHOUSE_WELD_INSET;
+    let dp0 = dsurface - dn0 * GREENHOUSE_WELD_INSET;
+    // Follow the downward direction projected into the ellipsoid tangent
+    // plane. Most of the low Y=.13 sill is buried into the upper shell, so
+    // this avoids the upward loop/perimeter shelf of the old high sill. The
+    // tiny exterior corner spans remain smooth because the endpoint tangent
+    // below uses their exact signed vertical displacement.
+    let vertical_delta = GREENHOUSE_SILL_Y - p0.y;
+    let tangent = -Vec3::Y + n0 * n0.y;
+    let dtangent = dn0 * n0.y + n0 * dn0.y;
+    let tangent_length = tangent.length();
+    let unit_tangent = tangent / tangent_length;
+    let dunit_tangent = (dtangent - unit_tangent * unit_tangent.dot(dtangent)) / tangent_length;
+    let m0 = unit_tangent * GREENHOUSE_TANGENT_LENGTH;
+    let dm0 = dunit_tangent * GREENHOUSE_TANGENT_LENGTH;
+    let m1 = Vec3::Y * vertical_delta;
+    let dm1 = -Vec3::Y * dp0.y;
+
+    let t = t.clamp(0.0, 1.0);
+    let t2 = t * t;
+    let t3 = t2 * t;
+    let h00 = 2.0 * t3 - 3.0 * t2 + 1.0;
+    let h10 = t3 - 2.0 * t2 + t;
+    let h01 = -2.0 * t3 + 3.0 * t2;
+    let h11 = t3 - t2;
+    let p = p0 * h00 + m0 * h10 + sill * h01 + m1 * h11;
+    let _du = dp0 * h00 + dm0 * h10 + dsill * h01 + dm1 * h11;
+    let _dt = p0 * (6.0 * t2 - 6.0 * t)
+        + m0 * (3.0 * t2 - 4.0 * t + 1.0)
+        + sill * (-6.0 * t2 + 6.0 * t)
+        + m1 * (3.0 * t2 - 2.0 * t);
+    // Exact perimeter corners have a singular derivative basis even though the
+    // nearest-point weld is smooth. Interpolate shading from the analytic body
+    // normal to the sill's radial frame normal to avoid a reflection flip.
+    let frame_normal = Vec3::new(sill.x, 0.0, sill.z).normalize_or_zero();
+    let smooth_t = t2 * (3.0 - 2.0 * t);
+    (p, n0.lerp(frame_normal, smooth_t).normalize_or_zero())
+}
+
+fn add_side_patch(
+    mesh: &mut GreenhouseMeshBuilder,
+    side: f32,
+    y0: f32,
+    y1: f32,
+    z0_at_y0: f32,
+    z1_at_y0: f32,
+    z0_at_y1: f32,
+    z1_at_y1: f32,
+    offset: f32,
+) {
+    let a = Vec3::new(side_x(y0, z0_at_y0, side), y0, z0_at_y0);
+    let b = Vec3::new(side_x(y0, z1_at_y0, side), y0, z1_at_y0);
+    let c = Vec3::new(side_x(y1, z1_at_y1, side), y1, z1_at_y1);
+    let d = Vec3::new(side_x(y1, z0_at_y1, side), y1, z0_at_y1);
+    // Offset the complete pane along its own raked face normal, rather than
+    // along a world axis, so every edge remains parallel to its backing.
+    let mut points = if side > 0.0 {
+        [d, c, b, a]
+    } else {
+        [a, b, c, d]
+    };
+    let normal = (points[1] - points[0])
+        .cross(points[2] - points[0])
+        .normalize();
+    for point in &mut points {
+        *point += normal * offset;
+    }
+    mesh.quad(points[0], points[1], points[2], points[3]);
+}
+
+fn add_end_patch(
+    mesh: &mut GreenhouseMeshBuilder,
+    front: bool,
+    y0: f32,
+    y1: f32,
+    x0_at_y0: f32,
+    x1_at_y0: f32,
+    x0_at_y1: f32,
+    x1_at_y1: f32,
+    offset: f32,
+) {
+    let z0 = if front { front_z(y0) } else { rear_z(y0) };
+    let z1 = if front { front_z(y1) } else { rear_z(y1) };
+    let a = Vec3::new(x0_at_y0, y0, z0);
+    let b = Vec3::new(x1_at_y0, y0, z0);
+    let c = Vec3::new(x1_at_y1, y1, z1);
+    let d = Vec3::new(x0_at_y1, y1, z1);
+    let mut points = if front { [d, c, b, a] } else { [a, b, c, d] };
+    let normal = (points[1] - points[0])
+        .cross(points[2] - points[0])
+        .normalize();
+    for point in &mut points {
+        *point += normal * offset;
+    }
+    mesh.quad(points[0], points[1], points[2], points[3]);
+}
+
+/// Point and smooth shading normal on a front/rear header. Four Hermite rings
+/// turn the raked end surface into the roof rather than bridging them with one
+/// flat span. The lower derivative follows the end profile, while the upper
+/// derivative lies in the roof's longitudinal tangent plane. Consequently the
+/// first ring joins the lower header smoothly and the final ring copies the
+/// exact position and normal returned by `roof_sample`.
+fn end_header_sample(front: bool, y0: f32, u: f32, t: f32) -> (Vec3, Vec3) {
+    let v = if front { 0.0 } else { 1.0 };
+    let x_unit = u * 2.0 - 1.0;
+    let lower_half = if front {
+        front_half_width(y0)
+    } else {
+        rear_half_width(y0)
+    };
+    let lower_z = if front { front_z(y0) } else { rear_z(y0) };
+    let p0 = Vec3::new(x_unit * lower_half, y0, lower_z);
+    let (p1, roof_du, roof_dv) = roof_sample(u, v);
+
+    let profile_height = GREENHOUSE_ROOF_BASE_Y - GREENHOUSE_SILL_Y;
+    let dhalf_dy = if front {
+        (GREENHOUSE_FRONT_TOP_HALF_WIDTH - GREENHOUSE_FRONT_SILL_HALF_WIDTH) / profile_height
+    } else {
+        (GREENHOUSE_REAR_TOP_HALF_WIDTH - GREENHOUSE_REAR_SILL_HALF_WIDTH) / profile_height
+    };
+    let dz_dy = if front {
+        (GREENHOUSE_FRONT_TOP_Z - GREENHOUSE_FRONT_SILL_Z) / profile_height
+    } else {
+        (GREENHOUSE_REAR_TOP_Z - GREENHOUSE_REAR_SILL_Z) / profile_height
+    };
+    let end_du = Vec3::new(2.0 * lower_half, 0.0, 0.0);
+    let end_dy = Vec3::new(x_unit * dhalf_dy, 1.0, dz_dy);
+    let lower_normal = if front {
+        end_dy.cross(end_du)
+    } else {
+        end_du.cross(end_dy)
+    }
+    .normalize();
+    let roof_normal = roof_dv.cross(roof_du).normalize();
+
+    let span = p0.distance(p1);
+    let m0 = end_dy.normalize() * span;
+    // Approaching the roof follows its longitudinal tangent toward the cabin.
+    // The rear transition parameter approaches its seam in the opposite
+    // geometric direction, hence its sign differs from the front.
+    let roof_direction = if front { roof_dv } else { -roof_dv };
+    let m1 = roof_direction.normalize() * span;
+    let t = t.clamp(0.0, 1.0);
+    let t2 = t * t;
+    let t3 = t2 * t;
+    let point = p0 * (2.0 * t3 - 3.0 * t2 + 1.0)
+        + m0 * (t3 - 2.0 * t2 + t)
+        + p1 * (-2.0 * t3 + 3.0 * t2)
+        + m1 * (t3 - t2);
+    let smooth_t = t2 * (3.0 - 2.0 * t);
+    let normal = lower_normal.lerp(roof_normal, smooth_t).normalize();
+    (point, normal)
+}
+
+/// Four-ring curved/beveled transition between each end header and the crown.
+fn add_end_header(mesh: &mut GreenhouseMeshBuilder, front: bool, y0: f32) {
+    const HEADER_STEPS: usize = 10;
+    const HEADER_RINGS: usize = 4;
+    for ix in 0..HEADER_STEPS {
+        for ring in 0..HEADER_RINGS {
+            let u0 = ix as f32 / HEADER_STEPS as f32;
+            let u1 = (ix + 1) as f32 / HEADER_STEPS as f32;
+            let t0 = ring as f32 / HEADER_RINGS as f32;
+            let t1 = (ring + 1) as f32 / HEADER_RINGS as f32;
+            let (a, na) = end_header_sample(front, y0, u0, t0);
+            let (b, nb) = end_header_sample(front, y0, u1, t0);
+            let (c, nc) = end_header_sample(front, y0, u1, t1);
+            let (d, nd) = end_header_sample(front, y0, u0, t1);
+            mesh.quad_with_normals_outward([a, b, c, d], [na, nb, nc, nd]);
+        }
+    }
+}
+
+/// Cross-car crowned roof and exact derivatives. The `sin²(u)` crown reaches
+/// both front/rear boundaries, where tessellated headers share these samples;
+/// only the side rails return to roof-base height.
+fn roof_sample(u: f32, v: f32) -> (Vec3, Vec3, Vec3) {
+    let half = GREENHOUSE_FRONT_TOP_HALF_WIDTH
+        + (GREENHOUSE_REAR_TOP_HALF_WIDTH - GREENHOUSE_FRONT_TOP_HALF_WIDTH) * v;
+    let x_unit = u * 2.0 - 1.0;
+    let su = (std::f32::consts::PI * u).sin();
+    let cu = (std::f32::consts::PI * u).cos();
+    let crown = GREENHOUSE_ROOF_CENTER_CROWN * su.powi(2);
+    let dz = GREENHOUSE_REAR_TOP_Z - GREENHOUSE_FRONT_TOP_Z;
+    let dhalf = GREENHOUSE_REAR_TOP_HALF_WIDTH - GREENHOUSE_FRONT_TOP_HALF_WIDTH;
+    let point = Vec3::new(
+        x_unit * half,
+        GREENHOUSE_ROOF_BASE_Y + crown,
+        GREENHOUSE_FRONT_TOP_Z + dz * v,
+    );
+    let du = Vec3::new(
+        2.0 * half,
+        2.0 * std::f32::consts::PI * GREENHOUSE_ROOF_CENTER_CROWN * su * cu,
+        0.0,
+    );
+    let dv = Vec3::new(x_unit * dhalf, 0.0, dz);
+    (point, du, dv)
+}
+
+fn greenhouse_frame_mesh() -> Mesh {
+    let mut mesh = GreenhouseMeshBuilder::default();
+    let sill_top = GREENHOUSE_WINDOW_BOTTOM_Y;
+    let glass_top = GREENHOUSE_WINDOW_TOP_Y;
+    let roof_base = GREENHOUSE_ROOF_BASE_Y;
+    let split_half = GREENHOUSE_B_PILLAR_HALF_WIDTH;
+    let corner_band = GREENHOUSE_CORNER_BAND;
+
+    // A finely sampled, continuous weld from the body surface to the sill.
+    // The first ring is an ellipsoid profile and receives exactly its analytic
+    // normals; Hermite tangents prevent the angular collar of iteration 2.
+    const EDGE_STEPS: usize = 8;
+    const RING_STEPS: usize = 4;
+    for edge in 0..4 {
+        for iu in 0..EDGE_STEPS {
+            for it in 0..RING_STEPS {
+                let u0 = iu as f32 / EDGE_STEPS as f32;
+                let u1 = (iu + 1) as f32 / EDGE_STEPS as f32;
+                let t0 = it as f32 / RING_STEPS as f32;
+                let t1 = (it + 1) as f32 / RING_STEPS as f32;
+                let (p00, n00) = transition_point_normal(edge, u0, t0);
+                let (p10, n10) = transition_point_normal(edge, u1, t0);
+                let (p01, n01) = transition_point_normal(edge, u0, t1);
+                let (p11, n11) = transition_point_normal(edge, u1, t1);
+                // This Hermite transition cell is non-planar. Orient its two
+                // triangles independently so both halves follow the analytic
+                // outward normals.
+                mesh.triangle_with_normals_outward([p10, p00, p01], [n10, n00, n01]);
+                mesh.triangle_with_normals_outward([p10, p01, p11], [n10, n01, n11]);
+            }
+        }
+    }
+
+    // Close the short painted sill belt between the smooth transition and all
+    // four glazing/pillar surfaces.  Its overlaps are buried behind the corner
+    // pillars, eliminating the tiny dark corner wedges of the prior iteration.
+    for side in [-1.0, 1.0] {
+        add_side_patch(
+            &mut mesh,
+            side,
+            GREENHOUSE_SILL_Y,
+            sill_top,
+            GREENHOUSE_FRONT_SILL_Z,
+            GREENHOUSE_REAR_SILL_Z,
+            front_z(sill_top),
+            rear_z(sill_top),
+            0.0,
+        );
+    }
+    for front in [true, false] {
+        let low_half = if front {
+            GREENHOUSE_FRONT_SILL_HALF_WIDTH
+        } else {
+            GREENHOUSE_REAR_SILL_HALF_WIDTH
+        };
+        let high_half = if front {
+            front_half_width(sill_top)
+        } else {
+            rear_half_width(sill_top)
+        };
+        add_end_patch(
+            &mut mesh,
+            front,
+            GREENHOUSE_SILL_Y,
+            sill_top,
+            -low_half,
+            low_half,
+            -high_half,
+            high_half,
+            0.0,
+        );
+    }
+
+    // A-, B- and C-pillars on both inward-sloping side surfaces.
+    for side in [-1.0, 1.0] {
+        add_side_patch(
+            &mut mesh,
+            side,
+            sill_top,
+            glass_top,
+            front_z(sill_top),
+            front_z(sill_top) + corner_band,
+            front_z(glass_top),
+            front_z(glass_top) + corner_band,
+            0.0,
+        );
+        add_side_patch(
+            &mut mesh,
+            side,
+            sill_top,
+            glass_top,
+            GREENHOUSE_B_PILLAR_Z - split_half,
+            GREENHOUSE_B_PILLAR_Z + split_half,
+            GREENHOUSE_B_PILLAR_Z - split_half,
+            GREENHOUSE_B_PILLAR_Z + split_half,
+            0.0,
+        );
+        add_side_patch(
+            &mut mesh,
+            side,
+            sill_top,
+            glass_top,
+            rear_z(sill_top) - corner_band,
+            rear_z(sill_top),
+            rear_z(glass_top) - corner_band,
+            rear_z(glass_top),
+            0.0,
+        );
+        // The roof boundary meets roof_base exactly behind this header.
+        add_side_patch(
+            &mut mesh,
+            side,
+            glass_top,
+            roof_base,
+            front_z(glass_top),
+            rear_z(glass_top),
+            GREENHOUSE_FRONT_TOP_Z,
+            GREENHOUSE_REAR_TOP_Z,
+            0.0,
+        );
+    }
+
+    // Front/rear corner pillars and the short header below the roof.
+    for front in [true, false] {
+        let low_half = if front {
+            front_half_width(sill_top)
+        } else {
+            rear_half_width(sill_top)
+        };
+        let high_half = if front {
+            front_half_width(glass_top)
+        } else {
+            rear_half_width(glass_top)
+        };
+        for side in [-1.0, 1.0] {
+            let low_outer = side * low_half;
+            let low_inner = side * (low_half - corner_band);
+            let high_outer = side * high_half;
+            let high_inner = side * (high_half - corner_band);
+            if side > 0.0 {
+                add_end_patch(
+                    &mut mesh, front, sill_top, glass_top, low_inner, low_outer, high_inner,
+                    high_outer, 0.0,
+                );
+            } else {
+                add_end_patch(
+                    &mut mesh, front, sill_top, glass_top, low_outer, low_inner, high_outer,
+                    high_inner, 0.0,
+                );
+            }
+        }
+        // Four curved rings turn the lower end face into every exact
+        // `roof_sample(u, 0/1)` crown position and normal, avoiding both a
+        // flat cross-car strip and a shading seam at the roof boundary.
+        add_end_header(&mut mesh, front, glass_top);
+    }
+
+    // Continuous painted lower and upper seals overlap both pane and backing
+    // boundaries on all four faces. Their own-face offset puts paint just
+    // outside the glazing without axis-dependent gaps at the raked corners.
+    let seal_lower_y0 = GREENHOUSE_WINDOW_BOTTOM_Y;
+    let seal_lower_y1 = GREENHOUSE_WINDOW_BOTTOM_Y + GREENHOUSE_SEAL_BAND + GREENHOUSE_SEAL_OVERLAP;
+    let seal_upper_y0 = GREENHOUSE_WINDOW_TOP_Y - GREENHOUSE_SEAL_BAND - GREENHOUSE_SEAL_OVERLAP;
+    let seal_upper_y1 = GREENHOUSE_WINDOW_TOP_Y;
+    for (y0, y1) in [
+        (seal_lower_y0, seal_lower_y1),
+        (seal_upper_y0, seal_upper_y1),
+    ] {
+        for side in [-1.0, 1.0] {
+            add_side_patch(
+                &mut mesh,
+                side,
+                y0,
+                y1,
+                front_z(y0),
+                rear_z(y0),
+                front_z(y1),
+                rear_z(y1),
+                0.001,
+            );
+        }
+        for front in [true, false] {
+            let low_half = if front {
+                front_half_width(y0)
+            } else {
+                rear_half_width(y0)
+            };
+            let high_half = if front {
+                front_half_width(y1)
+            } else {
+                rear_half_width(y1)
+            };
+            add_end_patch(
+                &mut mesh, front, y0, y1, -low_half, low_half, -high_half, high_half, 0.001,
+            );
+        }
+    }
+
+    // A flush cross-car crown continues unchanged through both end headers.
+    // Eleven cross-car and nine longitudinal samples make the silhouette
+    // genuinely round. Duplicate grid vertices share analytic normals.
+    const Z_RINGS: usize = 9;
+    const X_RINGS: usize = 11;
+    for iz in 0..Z_RINGS - 1 {
+        for ix in 0..X_RINGS - 1 {
+            let sample = |iz: usize, ix: usize| {
+                let v = iz as f32 / (Z_RINGS - 1) as f32;
+                let u = ix as f32 / (X_RINGS - 1) as f32;
+                let (point, du, dv) = roof_sample(u, v);
+                (point, dv.cross(du).normalize())
+            };
+            let (a, na) = sample(iz, ix);
+            let (b, nb) = sample(iz + 1, ix);
+            let (c, nc) = sample(iz + 1, ix + 1);
+            let (d, nd) = sample(iz, ix + 1);
+            mesh.quad_with_normals_outward([a, b, c, d], [na, nb, nc, nd]);
+        }
+    }
+    mesh.finish()
+}
+
+fn greenhouse_glass_mesh() -> Mesh {
+    let mut mesh = GreenhouseMeshBuilder::default();
+    let y0 = GREENHOUSE_WINDOW_BOTTOM_Y + GREENHOUSE_GLASS_INSET;
+    let y1 = GREENHOUSE_WINDOW_TOP_Y - GREENHOUSE_GLASS_INSET;
+    let corner_gap = GREENHOUSE_CORNER_BAND - GREENHOUSE_CORNER_OVERLAP;
+    let pillar_gap = GREENHOUSE_B_PILLAR_HALF_WIDTH + GREENHOUSE_SEAL_OVERLAP;
+    // The inset keeps glazing well behind the paint. At corners both this pane
+    // and its adjacent end pane continue 25 mm beneath the pillar, independently
+    // of their differing face-normal offsets, so no viewing angle sees a slot.
+    let surface_offset = -GREENHOUSE_GLASS_INSET;
+
+    // Two side panes per side share the exact same raked envelope and leave a
+    // real painted B-pillar between them.
+    for side in [-1.0, 1.0] {
+        add_side_patch(
+            &mut mesh,
+            side,
+            y0,
+            y1,
+            front_z(y0) + corner_gap,
+            GREENHOUSE_B_PILLAR_Z - pillar_gap,
+            front_z(y1) + corner_gap,
+            GREENHOUSE_B_PILLAR_Z - pillar_gap,
+            surface_offset,
+        );
+        add_side_patch(
+            &mut mesh,
+            side,
+            y0,
+            y1,
+            GREENHOUSE_B_PILLAR_Z + pillar_gap,
+            rear_z(y0) - corner_gap,
+            GREENHOUSE_B_PILLAR_Z + pillar_gap,
+            rear_z(y1) - corner_gap,
+            surface_offset,
+        );
+    }
+
+    // Front/rear panes are coherent trapezoids sharing the same side taper and
+    // fore/aft rake as the frame. Each extends beneath both painted corner
+    // pillars before its own face-normal inset is applied.
+    for front in [true, false] {
+        let x0 = (if front {
+            front_half_width(y0)
+        } else {
+            rear_half_width(y0)
+        }) - corner_gap;
+        let x1 = (if front {
+            front_half_width(y1)
+        } else {
+            rear_half_width(y1)
+        }) - corner_gap;
+        add_end_patch(&mut mesh, front, y0, y1, -x0, x0, -x1, x1, surface_offset);
+    }
+    mesh.finish()
+}
+
+/// Opaque glazing still needs a complete dark backing to read as a cabin from
+/// every review angle. This outer backing follows every pane, offset inward;
+/// the closed inner box below fills any oblique gaps between pane backs.
+fn greenhouse_glass_backing_mesh() -> Mesh {
+    let mut mesh = GreenhouseMeshBuilder::default();
+    // The backing has tighter vertical bounds and a substantially deeper
+    // face-normal inset. Oblique views therefore hit paint or glass before
+    // dark backing and cannot reveal wedges.
+    let y0 = GREENHOUSE_WINDOW_BOTTOM_Y + GREENHOUSE_BACKING_INSET;
+    let y1 = GREENHOUSE_WINDOW_TOP_Y - GREENHOUSE_BACKING_INSET;
+    let corner_gap = GREENHOUSE_CORNER_BAND - GREENHOUSE_CORNER_OVERLAP;
+    let pillar_gap = GREENHOUSE_B_PILLAR_HALF_WIDTH + GREENHOUSE_SEAL_OVERLAP;
+    let inset = -GREENHOUSE_BACKING_INSET;
+    for side in [-1.0, 1.0] {
+        add_side_patch(
+            &mut mesh,
+            side,
+            y0,
+            y1,
+            front_z(y0) + corner_gap,
+            GREENHOUSE_B_PILLAR_Z - pillar_gap,
+            front_z(y1) + corner_gap,
+            GREENHOUSE_B_PILLAR_Z - pillar_gap,
+            inset,
+        );
+        add_side_patch(
+            &mut mesh,
+            side,
+            y0,
+            y1,
+            GREENHOUSE_B_PILLAR_Z + pillar_gap,
+            rear_z(y0) - corner_gap,
+            GREENHOUSE_B_PILLAR_Z + pillar_gap,
+            rear_z(y1) - corner_gap,
+            inset,
+        );
+    }
+    for front in [true, false] {
+        let x0 = (if front {
+            front_half_width(y0)
+        } else {
+            rear_half_width(y0)
+        }) - corner_gap;
+        let x1 = (if front {
+            front_half_width(y1)
+        } else {
+            rear_half_width(y1)
+        }) - corner_gap;
+        add_end_patch(&mut mesh, front, y0, y1, -x0, x0, -x1, x1, inset);
+    }
+    mesh.finish()
+}
+
+fn greenhouse_interior_mesh() -> Mesh {
+    let mut mesh = GreenhouseMeshBuilder::default();
+    // Deliberately compact and inset beyond the backing on every boundary, so
+    // no dark corner can escape through a glass/pillar join at an oblique view.
+    mesh.cuboid(
+        Vec3::new(-0.18, GREENHOUSE_WINDOW_BOTTOM_Y + 0.035, -0.02),
+        Vec3::new(0.18, GREENHOUSE_WINDOW_TOP_Y - 0.045, 0.28),
+    );
+    mesh.finish()
+}
+
+fn greenhouse_material(part: GreenhouseMeshPart) -> StandardMaterial {
+    match part {
+        GreenhouseMeshPart::Glass => StandardMaterial {
+            base_color: Color::srgb(0.025, 0.055, 0.085),
+            metallic: 0.0,
+            perceptual_roughness: GREENHOUSE_GLASS_ROUGHNESS,
+            reflectance: 0.5,
+            alpha_mode: AlphaMode::Opaque,
+            ..default()
+        },
+        GreenhouseMeshPart::Interior => StandardMaterial {
+            base_color: Color::srgb(0.008, 0.009, 0.012),
+            metallic: 0.0,
+            perceptual_roughness: 0.92,
+            ..default()
+        },
+        GreenhouseMeshPart::Frame => StandardMaterial {
+            base_color: Color::srgb(0.62, 0.025, 0.02),
+            metallic: 0.9,
+            perceptual_roughness: 0.16,
+            clearcoat: 1.0,
+            clearcoat_perceptual_roughness: 0.10,
+            ..default()
+        },
+    }
 }
 
 fn spawn_car(
@@ -496,49 +1498,51 @@ fn spawn_car(
     textures: Res<TextureAssets>,
 ) {
     // --- Shared meshes/materials for the body's nested children ---
-    let cabin_mesh = meshes.add(Cuboid::new(0.8, 0.4, 1.0));
-    let cabin_mat = materials.add(StandardMaterial {
-        base_color: palette::CAR_CABIN,
-        perceptual_roughness: 0.4,
-        metallic: 0.1,
-        ..default()
-    });
+    // One cached mesh per greenhouse layer replaces the hard cabin box and
+    // floating window plates. Frame and panes are generated from the same
+    // taper/rake functions, so their seams remain coherent by construction.
+    let greenhouse_frame_mesh = meshes.add(greenhouse_frame_mesh());
+    let greenhouse_glass_mesh = meshes.add(greenhouse_glass_mesh());
+    let greenhouse_interior_mesh = meshes.add(greenhouse_interior_mesh());
+    let greenhouse_backing_mesh = meshes.add(greenhouse_glass_backing_mesh());
+    let glass_mat = materials.add(greenhouse_material(GreenhouseMeshPart::Glass));
+    let interior_mat = materials.add(greenhouse_material(GreenhouseMeshPart::Interior));
+    // This keeps the paint contract centralized/testable; runtime frame
+    // entities intentionally share the existing textured car-paint handle.
+    let _paint_contract = greenhouse_material(GreenhouseMeshPart::Frame);
 
-    // A few shared primitives make a readable greenhouse without generating
-    // unique meshes or materials per window (important for the web build).
-    let end_glass_mesh = meshes.add(Cuboid::new(0.68, 0.23, 0.025));
-    let side_glass_mesh = meshes.add(Cuboid::new(0.025, 0.22, 0.56));
-    let roof_mesh = meshes.add(Cuboid::new(0.72, 0.07, 0.74));
-    let glass_mat = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.035, 0.065, 0.1),
-        perceptual_roughness: 0.08,
-        metallic: 0.55,
-        ..default()
-    });
-
-    // Front and rear fascia overlap the ellipsoid; lower valances overlap both
-    // fascia and chassis so the bumpers have no visible air gap beneath them.
-    let fascia_mesh = meshes.add(Cuboid::new(0.84, 0.17, 0.10));
-    let bumper_mesh = meshes.add(Cuboid::new(BUMPER_WIDTH, 0.075, BUMPER_DEPTH));
-    let valance_mesh = meshes.add(Cuboid::new(0.78, 0.10, 0.16));
-    let chassis_mesh = meshes.add(Cuboid::new(CHASSIS_WIDTH, CHASSIS_HEIGHT, CHASSIS_LENGTH));
-    let rocker_mesh = meshes.add(Cuboid::new(0.10, 0.15, ROCKER_LENGTH));
-    let axle_mesh = meshes.add(Cylinder::new(0.025, 0.88));
-    let trim_mat = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.06, 0.07, 0.075),
-        metallic: 0.65,
-        perceptual_roughness: 0.3,
-        ..default()
-    });
-    let grille_mesh = meshes.add(Cuboid::new(0.32, 0.075, 0.025));
+    // No painted undertray/platform or spawned skirt cuboids: the smooth body
+    // and tapered fenders alone define the lower painted silhouette.
+    let fender_meshes = [
+        [
+            meshes.add(fender_mesh(-1.0, -WHEEL_Z)),
+            meshes.add(fender_mesh(-1.0, WHEEL_Z)),
+        ],
+        [
+            meshes.add(fender_mesh(1.0, -WHEEL_Z)),
+            meshes.add(fender_mesh(1.0, WHEEL_Z)),
+        ],
+    ];
+    let grille_mesh = meshes.add(fascia_surface_mesh(
+        -1.0,
+        Vec2::new(0.0, FASCIA_GRILLE_Y),
+        Vec2::new(FASCIA_GRILLE_WIDTH, FASCIA_GRILLE_HEIGHT),
+    ));
     let grille_mat = materials.add(StandardMaterial {
         base_color: Color::srgb(0.008, 0.01, 0.012),
         perceptual_roughness: 0.9,
         ..default()
     });
 
-    // Headlights: warm emissive lenses seated in the front fascia.
-    let headlight_mesh = meshes.add(Cuboid::new(0.18, 0.1, 0.025));
+    // Fascia lenses are individually conformed to the actual ellipsoid near
+    // |z|=.95.  Their baked vertices stay flush and visibly face the camera.
+    let headlight_meshes = [-FASCIA_LIGHT_X, FASCIA_LIGHT_X].map(|x| {
+        meshes.add(fascia_surface_mesh(
+            -1.0,
+            Vec2::new(x, FASCIA_LIGHT_Y),
+            Vec2::new(FASCIA_LIGHT_WIDTH, FASCIA_LIGHT_HEIGHT),
+        ))
+    });
     let headlight_mat = materials.add(StandardMaterial {
         base_color: Color::srgb(1.0, 0.9, 0.6),
         emissive: LinearRgba::new(1.0, 0.9, 0.6, 1.0),
@@ -546,9 +1550,15 @@ fn spawn_car(
         ..default()
     });
 
-    // Brake lights: red emissive lenses at the rear. Both children share one
-    // material handle so `brake_lights` can dim/brighten them in one place.
-    let brake_mesh = meshes.add(Cuboid::new(0.18, 0.1, 0.025));
+    // Brake lights use the same surface construction at the tail. Both
+    // children share one material so `brake_lights` can dim/brighten them.
+    let brake_meshes = [-FASCIA_LIGHT_X, FASCIA_LIGHT_X].map(|x| {
+        meshes.add(fascia_surface_mesh(
+            1.0,
+            Vec2::new(x, FASCIA_LIGHT_Y),
+            Vec2::new(FASCIA_LIGHT_WIDTH, FASCIA_LIGHT_HEIGHT),
+        ))
+    });
     let brake_mat = materials.add(StandardMaterial {
         base_color: Color::srgb(0.3, 0.02, 0.02),
         emissive: LinearRgba::new(0.8, 0.05, 0.05, 1.0),
@@ -556,46 +1566,20 @@ fn spawn_car(
         ..default()
     });
 
-    // Wheels: cylinders with the axle along X, tire-black. Their inner sidewalls
-    // overlap the chassis/axles slightly, while the tread remains clear of the
-    // body shell. One shared hub mesh exposes a metallic cap on each outside.
+    // Wheels: cylinders with the axle along X, tire-black. Their inner
+    // sidewalls tuck beneath the new fender volume and overlap only hidden
+    // axle ends. A shared hub exposes a metallic cap on each outside.
     let wheel_mesh = meshes.add(Cylinder::new(WHEEL_RADIUS, WHEEL_WIDTH));
     let wheel_mat = materials.add(StandardMaterial {
         base_color: palette::CAR_WHEEL,
         perceptual_roughness: 0.9,
         ..default()
     });
-    let hub_mesh = meshes.add(Cylinder::new(0.066, 0.19));
+    let hub_mesh = meshes.add(Cylinder::new(0.066, WHEEL_WIDTH));
     let hub_mat = materials.add(StandardMaterial {
         base_color: Color::srgb(0.42, 0.45, 0.48),
         metallic: 0.9,
         perceptual_roughness: 0.2,
-        ..default()
-    });
-
-    // Composite fake shadow: a restrained central body patch plus four shared
-    // tire-contact patches follows the actual footprint much more closely than
-    // the old oversized rectangle. All assets are allocated once at startup.
-    let body_shadow_mesh = meshes.add(
-        Plane3d::default()
-            .mesh()
-            .size(SHADOW_BODY_WIDTH, SHADOW_BODY_LENGTH),
-    );
-    let wheel_shadow_mesh = meshes.add(
-        Plane3d::default()
-            .mesh()
-            .size(SHADOW_WHEEL_WIDTH, SHADOW_WHEEL_LENGTH),
-    );
-    let body_shadow_mat = materials.add(StandardMaterial {
-        base_color: Color::srgba(0.0, 0.0, 0.0, 0.24),
-        alpha_mode: AlphaMode::Blend,
-        perceptual_roughness: 1.0,
-        ..default()
-    });
-    let wheel_shadow_mat = materials.add(StandardMaterial {
-        base_color: Color::srgba(0.0, 0.0, 0.0, 0.30),
-        alpha_mode: AlphaMode::Blend,
-        perceptual_roughness: 1.0,
         ..default()
     });
 
@@ -621,106 +1605,71 @@ fn spawn_car(
                 BodyMotion::default(),
             ))
             .with_children(|body| {
-                // Cabin core, four dark glass faces, and a painted roof make a
-                // compact greenhouse whose front/rear slope reads at a glance.
+                // The frame begins on the smooth body with matched tangent and
+                // analytic normal. A compact dark interior spawns first, then
+                // contained glass and the painted pillar/roof shell surround it.
                 body.spawn((
-                    Mesh3d(cabin_mesh.clone()),
-                    MeshMaterial3d(cabin_mat.clone()),
-                    Transform::from_xyz(0.0, 0.35, 0.2),
+                    Mesh3d(greenhouse_interior_mesh.clone()),
+                    MeshMaterial3d(interior_mat.clone()),
+                    Transform::IDENTITY,
+                    GreenhouseInterior,
                 ));
                 body.spawn((
-                    Mesh3d(end_glass_mesh.clone()),
+                    Mesh3d(greenhouse_backing_mesh.clone()),
+                    MeshMaterial3d(interior_mat.clone()),
+                    Transform::IDENTITY,
+                    GreenhouseInterior,
+                ));
+                body.spawn((
+                    Mesh3d(greenhouse_glass_mesh.clone()),
                     MeshMaterial3d(glass_mat.clone()),
-                    Transform::from_xyz(0.0, 0.39, -0.305)
-                        .with_rotation(Quat::from_rotation_x(0.24)),
+                    Transform::IDENTITY,
+                    GreenhouseGlass,
                 ));
                 body.spawn((
-                    Mesh3d(end_glass_mesh.clone()),
-                    MeshMaterial3d(glass_mat.clone()),
-                    Transform::from_xyz(0.0, 0.39, 0.705)
-                        .with_rotation(Quat::from_rotation_x(-0.24)),
-                ));
-                for x in [-0.405, 0.405] {
-                    body.spawn((
-                        Mesh3d(side_glass_mesh.clone()),
-                        MeshMaterial3d(glass_mat.clone()),
-                        Transform::from_xyz(x, 0.39, 0.2),
-                    ));
-                }
-                body.spawn((
-                    Mesh3d(roof_mesh.clone()),
+                    Mesh3d(greenhouse_frame_mesh.clone()),
                     MeshMaterial3d(textures.car_paint.clone()),
-                    Transform::from_xyz(0.0, 0.575, 0.2),
+                    Transform::IDENTITY,
+                    GreenhouseFrame,
                 ));
 
-                // Painted fascia, seated bumper, and subtle lower valance are
-                // shared nose-to-tail. These remain body children so every
-                // painted/lit upper detail follows visual pitch and roll.
-                for z in [-0.88_f32, 0.88] {
-                    let sign = z.signum();
-                    body.spawn((
-                        Mesh3d(fascia_mesh.clone()),
-                        MeshMaterial3d(textures.car_paint.clone()),
-                        Transform::from_xyz(0.0, -0.07, z),
-                    ));
-                    body.spawn((
-                        Mesh3d(bumper_mesh.clone()),
-                        MeshMaterial3d(trim_mat.clone()),
-                        Transform::from_xyz(0.0, -0.14, sign * BUMPER_Z),
-                    ));
-                    body.spawn((
-                        Mesh3d(valance_mesh.clone()),
-                        MeshMaterial3d(trim_mat.clone()),
-                        Transform::from_xyz(0.0, -0.19, sign * 0.84),
-                    ));
-                }
-                // The recessed black grille marks the nose (front is -Z).
+                // Surface-conforming fascia has no carrier plate or bumper.
+                // Its baked points sit at the actual |z|≈.95 nose/tail skin.
                 body.spawn((
                     Mesh3d(grille_mesh.clone()),
                     MeshMaterial3d(grille_mat.clone()),
-                    Transform::from_xyz(0.0, -0.07, -0.942),
+                    Transform::IDENTITY,
                 ));
-                for x in [-0.27, 0.27] {
+                for (index, _x) in [-FASCIA_LIGHT_X, FASCIA_LIGHT_X].into_iter().enumerate() {
                     body.spawn((
-                        Mesh3d(headlight_mesh.clone()),
+                        Mesh3d(headlight_meshes[index].clone()),
                         MeshMaterial3d(headlight_mat.clone()),
-                        Transform::from_xyz(x, -0.055, -0.941),
+                        Transform::IDENTITY,
                     ));
                     body.spawn((
-                        Mesh3d(brake_mesh.clone()),
+                        Mesh3d(brake_meshes[index].clone()),
                         MeshMaterial3d(brake_mat.clone()),
-                        Transform::from_xyz(x, -0.055, 0.941),
+                        Transform::IDENTITY,
                         BrakeLight,
                     ));
                 }
+
+                // Broad body-rooted shoulder caps sweep over each upper tire.
+                // Their rounded outer returns and wide tangent roots contain no
+                // annular hoop, exposed edge, or pointed longitudinal endpoint.
+                for (side_index, _side) in [-1.0_f32, 1.0].into_iter().enumerate() {
+                    for (z_index, _z) in [-WHEEL_Z, WHEEL_Z].into_iter().enumerate() {
+                        body.spawn((
+                            Mesh3d(fender_meshes[side_index][z_index].clone()),
+                            MeshMaterial3d(textures.car_paint.clone()),
+                            Transform::IDENTITY,
+                        ));
+                    }
+                }
             });
 
-            // The dark running gear stays root-level: pitch/roll is visual body
-            // motion only. Chassis and rockers overlap the wheel inner faces and
-            // the lower valances, making one connected silhouette.
-            car.spawn((
-                Mesh3d(chassis_mesh.clone()),
-                MeshMaterial3d(trim_mat.clone()),
-                Transform::from_xyz(0.0, CHASSIS_Y, 0.0),
-            ));
-            for x in [-0.43, 0.43] {
-                car.spawn((
-                    Mesh3d(rocker_mesh.clone()),
-                    MeshMaterial3d(trim_mat.clone()),
-                    Transform::from_xyz(x, 0.27, 0.0),
-                ));
-            }
-            for z in [-WHEEL_Z, WHEEL_Z] {
-                car.spawn((
-                    Mesh3d(axle_mesh.clone()),
-                    MeshMaterial3d(trim_mat.clone()),
-                    Transform::from_xyz(0.0, WHEEL_Y, z)
-                        .with_rotation(Quat::from_rotation_z(FRAC_PI_2)),
-                ));
-            }
-
-            // Wheels sit modestly inward/up and overlap the axle ends without
-            // penetrating the smooth painted shell. Negative Z remains front.
+            // Wheels tuck inward beneath the connected fender volumes and
+            // overlap hidden axle ends. Negative Z remains front.
             for &(x, z) in &WHEEL_POSITIONS {
                 let mut wheel = car.spawn((
                     Mesh3d(wheel_mesh.clone()),
@@ -742,21 +1691,6 @@ fn spawn_car(
                         Transform::default(),
                     ));
                 });
-            }
-
-            // Plane3d lies in XZ. Separate heights avoid coplanar alpha z-fight;
-            // both stay high enough to avoid the ground plane's depth precision.
-            car.spawn((
-                Mesh3d(body_shadow_mesh.clone()),
-                MeshMaterial3d(body_shadow_mat.clone()),
-                Transform::from_xyz(0.0, 0.058, 0.0),
-            ));
-            for &(x, z) in &WHEEL_POSITIONS {
-                car.spawn((
-                    Mesh3d(wheel_shadow_mesh.clone()),
-                    MeshMaterial3d(wheel_shadow_mat.clone()),
-                    Transform::from_xyz(x, 0.062, z),
-                ));
             }
         });
 }
@@ -1256,6 +2190,584 @@ mod tests {
         )
     }
 
+    fn mesh_positions(mesh: &Mesh) -> &Vec<[f32; 3]> {
+        match mesh.attribute(Mesh::ATTRIBUTE_POSITION) {
+            Some(VertexAttributeValues::Float32x3(values)) => values,
+            _ => panic!("greenhouse positions must be Float32x3"),
+        }
+    }
+
+    fn mesh_normals(mesh: &Mesh) -> &Vec<[f32; 3]> {
+        match mesh.attribute(Mesh::ATTRIBUTE_NORMAL) {
+            Some(VertexAttributeValues::Float32x3(values)) => values,
+            _ => panic!("greenhouse normals must be Float32x3"),
+        }
+    }
+
+    fn mesh_bounds(mesh: &Mesh) -> (Vec3, Vec3) {
+        mesh_positions(mesh).iter().fold(
+            (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)),
+            |(min, max), p| {
+                let p = Vec3::from_array(*p);
+                (min.min(p), max.max(p))
+            },
+        )
+    }
+
+    #[test]
+    fn review_plugin_spawns_one_complete_production_visual_assembly() {
+        let mut app = App::new();
+        app.init_resource::<Assets<Mesh>>()
+            .init_resource::<Assets<Image>>()
+            .init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<TextureAssets>()
+            .add_plugins(CarReviewPlugin);
+        app.update();
+
+        assert_eq!(app.world_mut().query::<&Car>().iter(app.world()).count(), 1);
+        assert_eq!(
+            app.world_mut()
+                .query::<&CarBody>()
+                .iter(app.world())
+                .count(),
+            1
+        );
+        assert_eq!(
+            app.world_mut()
+                .query::<&GreenhouseFrame>()
+                .iter(app.world())
+                .count(),
+            1
+        );
+        assert_eq!(
+            app.world_mut()
+                .query::<&GreenhouseGlass>()
+                .iter(app.world())
+                .count(),
+            1
+        );
+        // Interior volume and separate glazing backing deliberately share the
+        // marker/material layer; both must exist exactly once.
+        assert_eq!(
+            app.world_mut()
+                .query::<&GreenhouseInterior>()
+                .iter(app.world())
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn welded_transition_starts_on_ellipsoid_with_analytic_normal_and_tangent() {
+        for edge in 0..4 {
+            for i in 0..=GREENHOUSE_TRANSITION_SEGMENTS {
+                let u = i as f32 / GREENHOUSE_TRANSITION_SEGMENTS as f32;
+                let (p0, n0) = transition_point_normal(edge, u, 0.0);
+                let sill = sill_edge(edge, u);
+                let (surface, _, expected_normal, _) =
+                    nearest_ellipsoid_projection(sill, sill_edge_derivative(edge));
+                assert!((p0 - (surface - expected_normal * GREENHOUSE_WELD_INSET)).length() < 1e-6);
+                let ellipsoid = surface.x.powi(2) / BODY_AXES.x.powi(2)
+                    + surface.y.powi(2) / BODY_AXES.y.powi(2)
+                    + surface.z.powi(2) / BODY_AXES.z.powi(2);
+                assert!((ellipsoid - 1.0).abs() < 1e-5);
+                assert!((sill - surface).normalize().dot(expected_normal).abs() > 0.99999);
+                assert!(n0.dot(expected_normal) > 0.99999);
+                let (p1, _) = transition_point_normal(edge, u, 1e-3);
+                let derivative = (p1 - p0).normalize_or_zero();
+                assert!(
+                    derivative.dot(n0).abs() < 0.035,
+                    "transition is not tangent"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn transition_uses_nearest_projection_compact_span_and_smooth_analytic_normals() {
+        assert!(GREENHOUSE_TANGENT_LENGTH <= 0.02);
+        for edge in 0..4 {
+            for u in [0.0, 0.37, 1.0] {
+                let sill = sill_edge(edge, u);
+                let (surface, _, expected, _) =
+                    nearest_ellipsoid_projection(sill, sill_edge_derivative(edge));
+                let (p0, n0) = transition_point_normal(edge, u, 0.0);
+                assert!(p0.distance(surface) <= GREENHOUSE_WELD_INSET + 1e-6);
+                assert!(n0.dot(expected) > 0.99999);
+                assert!(surface.distance(sill) < 0.14, "weld span is not compact");
+                let mut previous = n0;
+                for i in 1..=32 {
+                    let normal = transition_point_normal(edge, u, i as f32 / 32.0).1;
+                    assert!(
+                        previous.dot(normal) > 0.97,
+                        "transition normal jump edge={edge} u={u} step={i} dot={}",
+                        previous.dot(normal)
+                    );
+                    previous = normal;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn greenhouse_surfaces_have_finite_unit_normals_valid_indices_and_winding() {
+        for mesh in [
+            greenhouse_frame_mesh(),
+            greenhouse_glass_mesh(),
+            greenhouse_glass_backing_mesh(),
+            greenhouse_interior_mesh(),
+            fender_mesh(-1.0, -WHEEL_Z),
+            fender_mesh(1.0, WHEEL_Z),
+            fascia_surface_mesh(
+                -1.0,
+                Vec2::new(FASCIA_LIGHT_X, FASCIA_LIGHT_Y),
+                Vec2::new(FASCIA_LIGHT_WIDTH, FASCIA_LIGHT_HEIGHT),
+            ),
+        ] {
+            let positions = mesh_positions(&mesh);
+            let normals = mesh_normals(&mesh);
+            assert!(!positions.is_empty());
+            assert_eq!(positions.len(), normals.len());
+            for normal in normals {
+                let n = Vec3::from_array(*normal);
+                assert!(n.is_finite() && (n.length() - 1.0).abs() < 1e-5);
+            }
+            let Some(Indices::U32(indices)) = mesh.indices() else {
+                panic!("u32 indices required")
+            };
+            assert_eq!(indices.len() % 3, 0);
+            for triangle in indices.chunks_exact(3) {
+                assert!(triangle.iter().all(|&i| i < positions.len() as u32));
+                let a = Vec3::from_array(positions[triangle[0] as usize]);
+                let b = Vec3::from_array(positions[triangle[1] as usize]);
+                let c = Vec3::from_array(positions[triangle[2] as usize]);
+                let face = (b - a).cross(c - a);
+                assert!(
+                    face.length_squared() > 1e-10,
+                    "degenerate triangle: {triangle:?}"
+                );
+                let expected = (Vec3::from_array(normals[triangle[0] as usize])
+                    + Vec3::from_array(normals[triangle[1] as usize])
+                    + Vec3::from_array(normals[triangle[2] as usize]))
+                .normalize_or_zero();
+                assert!(face.dot(expected) > 0.0, "triangle winding opposes normals");
+            }
+        }
+    }
+
+    #[test]
+    fn roof_is_densely_tessellated_crowned_through_end_headers_and_smooth() {
+        let frame = greenhouse_frame_mesh();
+        let positions = mesh_positions(&frame);
+        let normals = mesh_normals(&frame);
+        let (_, max) = mesh_bounds(&frame);
+        assert!((max.y - GREENHOUSE_TOP_Y).abs() < 1e-5);
+
+        let roof_floor = GREENHOUSE_ROOF_BASE_Y;
+        let roof: Vec<(Vec3, Vec3)> = positions
+            .iter()
+            .zip(normals)
+            .map(|(p, n)| (Vec3::from_array(*p), Vec3::from_array(*n)))
+            .filter(|(p, _)| {
+                p.y >= roof_floor - 1e-6
+                    && p.z >= GREENHOUSE_FRONT_TOP_Z - 1e-6
+                    && p.z <= GREENHOUSE_REAR_TOP_Z + 1e-6
+            })
+            .collect();
+        let distinct_x: std::collections::BTreeSet<i32> = roof
+            .iter()
+            .map(|(p, _)| (p.x * 10_000.0).round() as i32)
+            .collect();
+        let distinct_z: std::collections::BTreeSet<i32> = roof
+            .iter()
+            .map(|(p, _)| (p.z * 10_000.0).round() as i32)
+            .collect();
+        assert!(distinct_x.len() >= 11 && distinct_z.len() >= 9);
+
+        // Side rails return to roof-base with zero crown slope. The cross-car
+        // crown continues at full height through both front/rear boundaries.
+        for (u, v) in [(0.0, 0.4), (1.0, 0.6)] {
+            let (p, du, dv) = roof_sample(u, v);
+            assert!((p.y - roof_floor).abs() < 1e-6);
+            assert!(du.y.abs() < 1e-6 && dv.y.abs() < 1e-6);
+        }
+        for v in [0.0, 0.5, 1.0] {
+            let (center, du, dv) = roof_sample(0.5, v);
+            assert!((center.y - GREENHOUSE_TOP_Y).abs() < 1e-6);
+            assert!(du.is_finite() && dv.is_finite() && du.cross(dv).length_squared() > 1e-6);
+        }
+
+        // Each end header is a four-ring curved transition, not a flat span.
+        // Its complete upper row exactly matches roof positions and normals,
+        // while its lower row matches the raked end face normal.
+        for front in [true, false] {
+            let mut header = GreenhouseMeshBuilder::default();
+            add_end_header(&mut header, front, GREENHOUSE_WINDOW_TOP_Y);
+            let header = header.finish();
+            assert_eq!(mesh_positions(&header).len(), 10 * 4 * 2 * 3);
+            let v = if front { 0.0 } else { 1.0 };
+            for ix in 0..=10 {
+                let u = ix as f32 / 10.0;
+                let (expected, du, dv) = roof_sample(u, v);
+                let expected_normal = dv.cross(du).normalize();
+                let matching_normals: Vec<Vec3> = mesh_positions(&header)
+                    .iter()
+                    .zip(mesh_normals(&header))
+                    .filter(|(p, _)| Vec3::from_array(**p).distance(expected) < 1e-6)
+                    .map(|(_, n)| Vec3::from_array(*n))
+                    .collect();
+                assert!(
+                    !matching_normals.is_empty(),
+                    "header omitted roof boundary sample {ix}"
+                );
+                assert!(
+                    matching_normals
+                        .iter()
+                        .all(|normal| normal.dot(expected_normal) > 0.99999)
+                );
+
+                let (_, lower_normal) = end_header_sample(front, GREENHOUSE_WINDOW_TOP_Y, u, 0.0);
+                assert!(lower_normal.y.abs() < 0.8);
+                assert!(if front {
+                    lower_normal.z < -0.5
+                } else {
+                    lower_normal.z > 0.5
+                });
+                let h = 1e-4;
+                let lower_tangent = (end_header_sample(front, GREENHOUSE_WINDOW_TOP_Y, u, h).0
+                    - end_header_sample(front, GREENHOUSE_WINDOW_TOP_Y, u, 0.0).0)
+                    / h;
+                assert!(lower_tangent.dot(lower_normal).abs() < 2e-3);
+            }
+        }
+
+        // Analytic derivatives agree with centered finite differences.
+        for (u, v) in [(0.2, 0.3), (0.5, 0.5), (0.8, 0.7)] {
+            let h = 1e-3;
+            let (_, analytic_u, analytic_v) = roof_sample(u, v);
+            let numeric_u = (roof_sample(u + h, v).0 - roof_sample(u - h, v).0) / (2.0 * h);
+            let numeric_v = (roof_sample(u, v + h).0 - roof_sample(u, v - h).0) / (2.0 * h);
+            assert!(analytic_u.distance(numeric_u) < 2e-4);
+            assert!(analytic_v.distance(numeric_v) < 2e-4);
+        }
+
+        // The generated normals at every shared roof-grid vertex equal the
+        // exact derivative cross product (and therefore each duplicate agrees).
+        for iz in 0..9 {
+            for ix in 0..11 {
+                let u = ix as f32 / 10.0;
+                let v = iz as f32 / 8.0;
+                let (p, du, dv) = roof_sample(u, v);
+                let expected = dv.cross(du).normalize();
+                let matches: Vec<Vec3> = positions
+                    .iter()
+                    .zip(normals)
+                    .map(|(candidate, normal)| {
+                        (Vec3::from_array(*candidate), Vec3::from_array(*normal))
+                    })
+                    .filter(|(candidate, normal)| {
+                        candidate.distance_squared(p) < 1e-12 && normal.dot(expected) > 0.9
+                    })
+                    .map(|(_, normal)| normal)
+                    .collect();
+                assert!(!matches.is_empty());
+                assert!(matches.iter().all(|normal| normal.dot(expected) > 0.99999));
+            }
+        }
+    }
+
+    #[test]
+    fn glazing_and_backing_overlap_corner_pillars_without_exposing_edges() {
+        let glass = greenhouse_glass_mesh();
+        let backing = greenhouse_glass_backing_mesh();
+        for mesh in [&glass, &backing] {
+            for p in mesh_positions(mesh) {
+                let p = Vec3::from_array(*p);
+                assert!(p.y > GREENHOUSE_WINDOW_BOTTOM_Y && p.y < GREENHOUSE_WINDOW_TOP_Y);
+                assert!(p.z >= front_z(p.y) - 0.01 && p.z <= rear_z(p.y) + 0.01);
+                assert!(p.x.abs() <= side_x(p.y, p.z, 1.0).abs() + 0.01);
+                // Side panes (points near the side envelope) cannot enter the
+                // B-pillar strip. They deliberately do enter corner pillars.
+                if (p.x.abs() - side_x(p.y, p.z, 1.0).abs()).abs() < 0.02 {
+                    assert!(
+                        (p.z - GREENHOUSE_B_PILLAR_Z).abs()
+                            >= GREENHOUSE_B_PILLAR_HALF_WIDTH + GREENHOUSE_SEAL_OVERLAP - 0.003
+                    );
+                }
+            }
+        }
+        assert!((0.075..=0.085).contains(&GREENHOUSE_CORNER_BAND));
+        assert!(((GREENHOUSE_B_PILLAR_HALF_WIDTH + GREENHOUSE_SEAL_OVERLAP) - 0.022).abs() < 1e-6);
+        assert!(GREENHOUSE_CORNER_OVERLAP >= 0.025);
+        assert!(GREENHOUSE_CORNER_OVERLAP > GREENHOUSE_SEAL_OVERLAP);
+        let pane_corner_inset = GREENHOUSE_CORNER_BAND - GREENHOUSE_CORNER_OVERLAP;
+        assert!(pane_corner_inset <= 0.055);
+        // Both adjacent pane coordinates cross the inner edge of an 80 mm
+        // pillar by at least 25 mm before their differing normal offsets.
+        assert!(GREENHOUSE_CORNER_BAND - pane_corner_inset >= 0.025 - 1e-6);
+        assert!(GREENHOUSE_GLASS_INSET >= 0.018);
+        assert!(GREENHOUSE_BACKING_INSET - GREENHOUSE_GLASS_INSET >= 0.020);
+        assert!(
+            GREENHOUSE_WINDOW_BOTTOM_Y + GREENHOUSE_BACKING_INSET
+                < GREENHOUSE_WINDOW_BOTTOM_Y + GREENHOUSE_BACKING_INSET + GREENHOUSE_SEAL_OVERLAP
+        );
+        assert!(
+            GREENHOUSE_WINDOW_TOP_Y - GREENHOUSE_BACKING_INSET
+                > GREENHOUSE_WINDOW_TOP_Y - GREENHOUSE_BACKING_INSET - GREENHOUSE_SEAL_OVERLAP
+        );
+
+        // The first left-side pane is displaced exclusively along its own
+        // raked face normal by the requested glass inset.
+        let y0 = GREENHOUSE_WINDOW_BOTTOM_Y + GREENHOUSE_GLASS_INSET;
+        let y1 = GREENHOUSE_WINDOW_TOP_Y - GREENHOUSE_GLASS_INSET;
+        let nominal = [
+            Vec3::new(
+                side_x(
+                    y0,
+                    front_z(y0) + GREENHOUSE_CORNER_BAND - GREENHOUSE_CORNER_OVERLAP,
+                    -1.0,
+                ),
+                y0,
+                front_z(y0) + GREENHOUSE_CORNER_BAND - GREENHOUSE_CORNER_OVERLAP,
+            ),
+            Vec3::new(
+                side_x(
+                    y0,
+                    GREENHOUSE_B_PILLAR_Z
+                        - GREENHOUSE_B_PILLAR_HALF_WIDTH
+                        - GREENHOUSE_SEAL_OVERLAP,
+                    -1.0,
+                ),
+                y0,
+                GREENHOUSE_B_PILLAR_Z - GREENHOUSE_B_PILLAR_HALF_WIDTH - GREENHOUSE_SEAL_OVERLAP,
+            ),
+            Vec3::new(
+                side_x(
+                    y1,
+                    GREENHOUSE_B_PILLAR_Z
+                        - GREENHOUSE_B_PILLAR_HALF_WIDTH
+                        - GREENHOUSE_SEAL_OVERLAP,
+                    -1.0,
+                ),
+                y1,
+                GREENHOUSE_B_PILLAR_Z - GREENHOUSE_B_PILLAR_HALF_WIDTH - GREENHOUSE_SEAL_OVERLAP,
+            ),
+            Vec3::new(
+                side_x(
+                    y1,
+                    front_z(y1) + GREENHOUSE_CORNER_BAND - GREENHOUSE_CORNER_OVERLAP,
+                    -1.0,
+                ),
+                y1,
+                front_z(y1) + GREENHOUSE_CORNER_BAND - GREENHOUSE_CORNER_OVERLAP,
+            ),
+        ];
+        let face_normal = (nominal[1] - nominal[0])
+            .cross(nominal[2] - nominal[0])
+            .normalize();
+        for (actual, nominal) in mesh_positions(&glass)[0..4].iter().zip(nominal) {
+            let delta = Vec3::from_array(*actual) - nominal;
+            assert!(delta.cross(face_normal).length() < 1e-6);
+            assert!((delta.dot(face_normal) + GREENHOUSE_GLASS_INSET).abs() < 1e-6);
+        }
+
+        // Backing is vertically tighter and substantially deeper than glass,
+        // ensuring an exposed edge cannot reveal a dark wedge behind a pillar.
+        let (gmin, gmax) = mesh_bounds(&glass);
+        let (bmin, bmax) = mesh_bounds(&backing);
+        assert!(bmin.y > gmin.y && bmax.y < gmax.y);
+        assert!(bmin.x > gmin.x && bmax.x < gmax.x);
+        // Own-normal offsets can move a raked pane's world-Z bound in either
+        // direction; containment is guaranteed by tighter vertical edges and
+        // a larger inward face-normal distance, not axis-aligned Z.
+
+        let (imin, imax) = mesh_bounds(&greenhouse_interior_mesh());
+        assert!(
+            imin.x > -GREENHOUSE_REAR_TOP_HALF_WIDTH && imax.x < GREENHOUSE_REAR_TOP_HALF_WIDTH
+        );
+        assert!(imin.z > GREENHOUSE_FRONT_TOP_Z && imax.z < GREENHOUSE_REAR_TOP_Z);
+    }
+
+    #[test]
+    fn greenhouse_has_asymmetric_rake_and_inward_sloping_sides() {
+        assert!((GREENHOUSE_SILL_Y - 0.13).abs() < 1e-6);
+        assert!(GREENHOUSE_WINDOW_BOTTOM_Y - GREENHOUSE_SILL_Y <= 0.02);
+        assert!(front_z(GREENHOUSE_ROOF_BASE_Y) > front_z(GREENHOUSE_SILL_Y));
+        assert!(rear_z(GREENHOUSE_ROOF_BASE_Y) < rear_z(GREENHOUSE_SILL_Y));
+        assert!(front_half_width(GREENHOUSE_ROOF_BASE_Y) < front_half_width(GREENHOUSE_SILL_Y));
+        assert!(rear_half_width(GREENHOUSE_ROOF_BASE_Y) < rear_half_width(GREENHOUSE_SILL_Y));
+        let normals = mesh_normals(&greenhouse_glass_mesh()).clone();
+        assert!(normals.iter().any(|n| n[2] < -0.5));
+        assert!(normals.iter().any(|n| n[2] > 0.5));
+        assert!(normals.iter().any(|n| n[0].abs() > 0.8));
+    }
+
+    #[test]
+    fn greenhouse_materials_separate_paint_glass_and_dark_interior() {
+        let frame = greenhouse_material(GreenhouseMeshPart::Frame);
+        let glass = greenhouse_material(GreenhouseMeshPart::Glass);
+        let interior = greenhouse_material(GreenhouseMeshPart::Interior);
+        assert!(frame.metallic >= 0.8 && frame.perceptual_roughness <= 0.2);
+        assert_eq!(glass.metallic, 0.0, "glass must be dielectric");
+        assert!((0.14..=0.20).contains(&glass.perceptual_roughness));
+        assert_eq!(glass.alpha_mode, AlphaMode::Opaque);
+        assert_eq!(glass.base_color.to_srgba().alpha, 1.0);
+        assert!(interior.metallic == 0.0 && interior.perceptual_roughness > 0.8);
+        let glass_luma = glass.base_color.to_linear().red
+            + glass.base_color.to_linear().green
+            + glass.base_color.to_linear().blue;
+        let interior_luma = interior.base_color.to_linear().red
+            + interior.base_color.to_linear().green
+            + interior.base_color.to_linear().blue;
+        assert!(interior_luma < glass_luma);
+    }
+
+    #[test]
+    fn iteration9_fenders_are_broad_rounded_body_rooted_shoulders() {
+        assert_eq!(
+            WHEEL_POSITIONS,
+            [(0.49, 0.65), (-0.49, 0.65), (0.49, -0.65), (-0.49, -0.65)]
+        );
+        assert!(FENDER_Z_HALF_SPAN >= WHEEL_RADIUS + 0.02);
+        assert!(FENDER_BULGE >= 0.24);
+        assert!(FENDER_X_STEPS >= 10 && FENDER_Z_STEPS >= 16);
+
+        for side in [-1.0, 1.0] {
+            for wheel_z in [-WHEEL_Z, WHEEL_Z] {
+                let mesh = fender_mesh(side, wheel_z);
+                let (min, max) = mesh_bounds(&mesh);
+                assert!((min.z - (wheel_z - FENDER_Z_HALF_SPAN)).abs() <= FENDER_WELD_INSET);
+                assert!((max.z - (wheel_z + FENDER_Z_HALF_SPAN)).abs() <= FENDER_WELD_INSET);
+
+                // Minimum surface breadth: even the front/rear boundary is a
+                // wide line on the body, never the point of a tapered annulus.
+                for along in [0.0, 0.5, 1.0] {
+                    let inner = fender_point(side, wheel_z, along, 0.0);
+                    let outer = fender_point(side, wheel_z, along, 1.0);
+                    let chord = inner.distance(outer);
+                    assert!(chord >= 0.15, "narrow shoulder chord {chord}");
+                    assert!(chord / (2.0 * FENDER_Z_HALF_SPAN) >= 0.38);
+                }
+
+                // The visible longitudinal profile leaves the buried end weld
+                // quickly, rounds into a broad shoulder, and remains symmetric.
+                let displacement = |along: f32| {
+                    let p = fender_point(side, wheel_z, along, 0.5);
+                    let z = wheel_z + FENDER_Z_HALF_SPAN * (along * 2.0 - 1.0);
+                    let side_limit =
+                        BODY_AXES.x * (1.0 - z.powi(2) / BODY_AXES.z.powi(2)).max(0.0).sqrt();
+                    let x = side * (FENDER_ROOT_X + (side_limit - FENDER_ROOT_X) * 0.5);
+                    let surface = Vec3::new(x, body_surface_y(x, z), z);
+                    p.distance(surface - body_normal(surface) * FENDER_WELD_INSET)
+                };
+                assert!(displacement(0.1) < FENDER_BULGE * 0.02);
+                assert!(displacement(0.25) > FENDER_BULGE * 0.20);
+                assert!((displacement(0.25) - displacement(0.75)).abs() < 1e-5);
+                assert!((displacement(0.5) - FENDER_BULGE).abs() < 1e-5);
+
+                // The middle has substantial two-dimensional area and a
+                // rounded, non-blade profile above the body base.
+                let center = fender_point(side, wheel_z, 0.5, 0.5);
+                let center_base =
+                    center - Vec3::new(side, FENDER_BULGE_RISE, 0.0).normalize() * FENDER_BULGE;
+                let base_y = body_surface_y(center_base.x, center_base.z);
+                assert!(center.distance(center_base) >= 0.24);
+                assert!(base_y - center.y > 0.01, "cap does not wrap around tire");
+                assert!(
+                    center.x.abs() > WHEEL_X,
+                    "shoulder does not reach tire flank"
+                );
+                let center_world_y = center.y + BODY_CENTER_Y;
+                assert!(center_world_y > WHEEL_Y + WHEEL_RADIUS + 0.03);
+                assert!(center_world_y < WHEEL_Y + WHEEL_RADIUS + 0.12);
+
+                // Every perimeter edge is narrowly buried beneath the body to
+                // prevent coplanar z-fighting, while its generated normal stays
+                // continuous with the analytic body normal.
+                for i in 0..=20 {
+                    let t = i as f32 / 20.0;
+                    for (along, across) in [(0.0, t), (1.0, t), (t, 0.0), (t, 1.0)] {
+                        let (p, n) = fender_point_normal(side, wheel_z, along, across);
+                        let ellipsoid = p.x.powi(2) / BODY_AXES.x.powi(2)
+                            + p.y.powi(2) / BODY_AXES.y.powi(2)
+                            + p.z.powi(2) / BODY_AXES.z.powi(2);
+                        assert!(ellipsoid < 0.999 && ellipsoid > 0.95);
+                        assert!(n.dot(body_normal(p)) > 0.995, "fender root normal seam");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn glazing_has_painted_oblique_containment_margin() {
+        let aperture_height = GREENHOUSE_WINDOW_TOP_Y - GREENHOUSE_WINDOW_BOTTOM_Y;
+        let glass_height = aperture_height - 2.0 * GREENHOUSE_GLASS_INSET;
+        assert!(
+            glass_height / aperture_height > 0.85,
+            "window readability lost"
+        );
+        assert!(GREENHOUSE_GLASS_INSET >= 0.018);
+        assert!(GREENHOUSE_BACKING_INSET >= 0.040);
+        assert!(GREENHOUSE_BACKING_INSET - GREENHOUSE_GLASS_INSET >= 0.020);
+        assert!(GREENHOUSE_CORNER_OVERLAP >= 0.025);
+        assert!(GREENHOUSE_CORNER_BAND - GREENHOUSE_CORNER_OVERLAP >= 0.05);
+
+        // At every aperture corner the pane lies behind paint in all three
+        // relevant dimensions: vertical seal, plan overlap, and face depth.
+        for y in [
+            GREENHOUSE_WINDOW_BOTTOM_Y + GREENHOUSE_GLASS_INSET,
+            GREENHOUSE_WINDOW_TOP_Y - GREENHOUSE_GLASS_INSET,
+        ] {
+            assert!(
+                (y - GREENHOUSE_WINDOW_BOTTOM_Y).min(GREENHOUSE_WINDOW_TOP_Y - y)
+                    >= GREENHOUSE_GLASS_INSET - 1e-6
+            );
+        }
+        let (gmin, gmax) = mesh_bounds(&greenhouse_glass_mesh());
+        let (bmin, bmax) = mesh_bounds(&greenhouse_glass_backing_mesh());
+        assert!(
+            bmin.y > gmin.y && bmax.y < gmax.y,
+            "vertical containment bottom={} top={}",
+            bmin.y - gmin.y,
+            gmax.y - bmax.y
+        );
+    }
+
+    #[test]
+    fn fascia_conforms_to_visible_ellipsoid_nose_and_tail() {
+        assert!((FASCIA_LIGHT_X - 0.22).abs() < 1e-6);
+        assert!((FASCIA_LIGHT_WIDTH - 0.12).abs() < 1e-6);
+        assert!((FASCIA_LIGHT_HEIGHT - 0.07).abs() < 1e-6);
+        assert!((FASCIA_GRILLE_WIDTH - 0.26).abs() < 1e-6);
+        assert!((FASCIA_GRILLE_HEIGHT - 0.06).abs() < 1e-6);
+        assert!((FASCIA_GRILLE_Y - FASCIA_LIGHT_Y).abs() < 1e-6);
+        for end in [-1.0, 1.0] {
+            for center in [
+                Vec2::new(-FASCIA_LIGHT_X, FASCIA_LIGHT_Y),
+                Vec2::new(FASCIA_LIGHT_X, FASCIA_LIGHT_Y),
+                Vec2::new(0.0, FASCIA_GRILLE_Y),
+            ] {
+                let size = if center.x == 0.0 {
+                    Vec2::new(FASCIA_GRILLE_WIDTH, FASCIA_GRILLE_HEIGHT)
+                } else {
+                    Vec2::new(FASCIA_LIGHT_WIDTH, FASCIA_LIGHT_HEIGHT)
+                };
+                let mesh = fascia_surface_mesh(end, center, size);
+                for p in mesh_positions(&mesh) {
+                    let p = Vec3::from_array(*p);
+                    let surface = body_surface_z(p.x, p.y);
+                    assert!((p.z.abs() - (surface + FASCIA_SURFACE_LIFT)).abs() < 1e-5);
+                    assert!(p.z.signum() == end);
+                    assert!(
+                        (0.78..1.01).contains(&p.z.abs()),
+                        "fascia is not on visible end skin"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn drift_latch_locks_first_side_until_handbrake_release() {
         let unlocked = DriftLatch::default();
@@ -1343,49 +2855,6 @@ mod tests {
         assert!((at_60.0 - at_120.0).abs() < 1e-4);
         assert!((at_30.1 - at_60.1).abs() < 2e-3);
         assert!((at_60.1 - at_120.1).abs() < 2e-3);
-    }
-
-    #[test]
-    fn chassis_spans_both_axles_and_reaches_the_wheels() {
-        let chassis_half_length = CHASSIS_LENGTH * 0.5;
-        let chassis_half_width = CHASSIS_WIDTH * 0.5;
-        let wheel_inner_x = WHEEL_X - WHEEL_WIDTH * 0.5;
-
-        assert!(chassis_half_length >= WHEEL_Z);
-        assert!(chassis_half_width >= wheel_inner_x);
-        assert!((CHASSIS_Y - WHEEL_Y).abs() <= CHASSIS_HEIGHT * 0.5);
-    }
-
-    #[test]
-    fn wheel_layout_is_symmetric_and_inside_bumper_footprint() {
-        for &(x, z) in &WHEEL_POSITIONS {
-            assert!(WHEEL_POSITIONS.contains(&(-x, z)));
-            assert!(WHEEL_POSITIONS.contains(&(x, -z)));
-            assert!(x.abs() <= BUMPER_WIDTH * 0.5 + f32::EPSILON);
-            assert!(z.abs() + WHEEL_RADIUS <= bumper_outer_z());
-        }
-
-        // Preserve the driving convention: exactly two front wheels are -Z.
-        assert_eq!(WHEEL_POSITIONS.iter().filter(|(_, z)| *z < 0.0).count(), 2);
-    }
-
-    #[test]
-    fn bumpers_are_seated_close_to_the_ellipsoid_tips() {
-        let bumper_inner_z = BUMPER_Z - BUMPER_DEPTH * 0.5;
-        assert!(bumper_inner_z < BODY_AXES.z);
-        assert!(bumper_outer_z() <= BODY_AXES.z);
-        assert!(BODY_AXES.z - bumper_outer_z() <= 0.1);
-        assert!(BUMPER_WIDTH <= BODY_AXES.x * 2.0);
-        assert!(BODY_AXES.x * 2.0 - BUMPER_WIDTH <= 0.1);
-    }
-
-    #[test]
-    fn composite_shadow_covers_footprint_without_excess_margin() {
-        let car = car_footprint_half_extents();
-        let shadow = shadow_footprint_half_extents();
-        assert!(shadow.0 >= car.0 && shadow.1 >= car.1);
-        assert!(shadow.0 - car.0 <= 0.1);
-        assert!(shadow.1 - car.1 <= 0.1);
     }
 
     #[test]
