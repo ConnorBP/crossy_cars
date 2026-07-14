@@ -46,7 +46,6 @@ const CHICKEN_COUNT: usize = 14;
 /// Keeping this independent of road-condition population tuning makes the
 /// event additive without changing the fresh-round target.
 const CHICKEN_BURST_SPAWN_LIMIT: usize = CHICKEN_COUNT;
-const CHICKEN_BASE_SCORE: u32 = 1;
 
 /// Chicken wander speed as a fraction of `GameConfig::max_speed` (chickens are
 /// much slower than the car). With the default max_speed 12.0 → 2.4 u/s.
@@ -867,6 +866,7 @@ const fn chicken_burst_spawn_count(kind: EventKind) -> usize {
     }
 }
 
+#[cfg(test)]
 const fn direct_chicken_score(base: u32, road_bonus: u32, event_bonus: u32) -> u32 {
     base.saturating_add(road_bonus).saturating_add(event_bonus)
 }
@@ -874,10 +874,12 @@ const fn direct_chicken_score(base: u32, road_bonus: u32, event_bonus: u32) -> u
 /// Direct score awarded by one chicken hit. Combo scoring remains driven by
 /// the single `ChickenHit` message and is deliberately not included here.
 const fn chicken_score_per_hit(modifier: &ActiveModifier, event: &ActiveEvent) -> u32 {
-    direct_chicken_score(
-        CHICKEN_BASE_SCORE,
-        modifier.chicken_score_bonus(),
-        event.chicken_score_bonus(),
+    roady_score_rules::chicken_direct_award(
+        modifier.0.rules_id(),
+        match event.0 {
+            Some(kind) => Some(kind.rules_id()),
+            None => None,
+        },
     )
 }
 

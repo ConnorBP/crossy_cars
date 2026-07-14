@@ -1,3 +1,7 @@
+[workspace]
+members = [".", "crates/roady-score-rules"]
+resolver = "3"
+
 [package]
 name = "car_game_ai"
 version = "0.1.1"
@@ -6,6 +10,7 @@ license = "MIT"
 
 [dependencies]
 bevy = { version = "0.19", features = ["webgl2", "wav"] }
+roady-score-rules = { path = "crates/roady-score-rules" }
 # Used directly for web persistence/browser APIs in `persist.rs`,
 # `settings.rs`, and the leaderboard client. Version MUST match the one Bevy
 # 0.19 pulls transitively (see Cargo.lock) to avoid duplicate crates.

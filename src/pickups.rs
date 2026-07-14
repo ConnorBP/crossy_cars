@@ -100,14 +100,8 @@ const HEALTH_RESTORE: f32 = 35.0;
 /// Health cap (matches `health.rs::HEALTH_MAX`).
 const HEALTH_MAX: f32 = 100.0;
 
-/// TimeBonus pickup: seconds added to `TimeLeft`.
-const TIME_BONUS: f32 = 5.0;
-/// TimeBonus cap — `TimeLeft` is clamped to this so a pile of clocks can't
-/// inflate the round indefinitely (matches the ~99s ceiling).
-const TIME_CAP: f32 = 99.0;
-
 /// MegaCoin pickup: coins added to `Score`.
-const MEGA_COIN_AMOUNT: u32 = 5;
+const MEGA_COIN_AMOUNT: u32 = roady_score_rules::MEGA_COIN_POINTS;
 
 /// Orb mesh radius (icosahedron circumscribed sphere radius).
 const ORB_RADIUS: f32 = 0.45;
@@ -529,7 +523,7 @@ fn collect_pickup(
                     }
                 }
                 PowerKind::Time => {
-                    timeleft.0 = (timeleft.0 + TIME_BONUS).min(TIME_CAP);
+                    timeleft.0 = roady_score_rules::time_after_pickup(timeleft.0);
                     if pickup_flash_enabled(settings.reduced_motion) {
                         spawn_pickup_flash(&mut commands, time_flash_rgb());
                     }

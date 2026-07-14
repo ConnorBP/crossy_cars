@@ -1,0 +1,10 @@
+[package]
+name = "roady-score-rules"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Engine-independent scoring rules for Roady"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

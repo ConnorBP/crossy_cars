@@ -137,6 +137,25 @@ pub enum EventKind {
 }
 
 impl EventKind {
+    /// Engine-independent stable ID from the shared scoring-rules crate.
+    pub(crate) const fn rules_id(self) -> roady_score_rules::EventId {
+        match self {
+            Self::TrafficSurge => roady_score_rules::EventId::TrafficSurge,
+            Self::ChickenBurst => roady_score_rules::EventId::ChickenBurst,
+            Self::ComboFrenzy => roady_score_rules::EventId::ComboFrenzy,
+            Self::CritterBurst => roady_score_rules::EventId::CritterBurst,
+        }
+    }
+
+    const fn from_rules_id(id: roady_score_rules::EventId) -> Self {
+        match id {
+            roady_score_rules::EventId::TrafficSurge => Self::TrafficSurge,
+            roady_score_rules::EventId::ChickenBurst => Self::ChickenBurst,
+            roady_score_rules::EventId::ComboFrenzy => Self::ComboFrenzy,
+            roady_score_rules::EventId::CritterBurst => Self::CritterBurst,
+        }
+    }
+
     /// Stable player-facing banner label.
     pub(crate) const fn display_name(self) -> &'static str {
         match self {
@@ -193,19 +212,15 @@ impl EventKind {
     }
 
     /// Extra direct chicken-score points per hit.
+    #[cfg(test)]
     pub(crate) const fn chicken_score_bonus(self) -> u32 {
-        match self {
-            Self::ChickenBurst => 1,
-            _ => 0,
-        }
+        self.rules_id().chicken_score_bonus()
     }
 
     /// Multiplier applied only to score above a combo's base point.
+    #[cfg(test)]
     pub(crate) const fn combo_bonus_multiplier(self) -> u32 {
-        match self {
-            Self::ComboFrenzy => 2,
-            _ => 1,
-        }
+        self.rules_id().combo_bonus_multiplier()
     }
 }
 
@@ -229,6 +244,7 @@ impl ActiveEvent {
         }
     }
 
+    #[cfg(test)]
     pub(crate) const fn chicken_score_bonus(&self) -> u32 {
         match self.0 {
             Some(kind) => kind.chicken_score_bonus(),
@@ -236,6 +252,7 @@ impl ActiveEvent {
         }
     }
 
+    #[cfg(test)]
     pub(crate) const fn combo_bonus_multiplier(&self) -> u32 {
         match self.0 {
             Some(kind) => kind.combo_bonus_multiplier(),
@@ -265,29 +282,10 @@ impl EventPlan {
     }
 
     const fn for_kind(modifier: ModifierKind) -> Self {
-        match modifier {
-            // Standard has no same-flavor exclusion; rotate this pair so its
-            // rounds also contribute to deterministic event reachability.
-            ModifierKind::Standard => Self {
-                first: EventKind::TrafficSurge,
-                second: EventKind::CritterBurst,
-            },
-            ModifierKind::RushHour => Self {
-                first: EventKind::ChickenBurst,
-                second: EventKind::ComboFrenzy,
-            },
-            ModifierKind::ChickenFrenzy => Self {
-                first: EventKind::CritterBurst,
-                second: EventKind::TrafficSurge,
-            },
-            ModifierKind::Stampede => Self {
-                first: EventKind::ComboFrenzy,
-                second: EventKind::ChickenBurst,
-            },
-            ModifierKind::GlassCannon => Self {
-                first: EventKind::CritterBurst,
-                second: EventKind::TrafficSurge,
-            },
+        let [first, second] = roady_score_rules::reachable_events(modifier.rules_id());
+        Self {
+            first: EventKind::from_rules_id(first),
+            second: EventKind::from_rules_id(second),
         }
     }
 }

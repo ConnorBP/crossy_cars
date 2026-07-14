@@ -1,0 +1,121 @@
+{
+  "rules_version": 1,
+  "rules_id": "roady-rules.v1",
+  "conditions": [
+    {
+      "id": "standard",
+      "storage_index": 0,
+      "chicken_score_bonus": 0,
+      "combo_bonus_multiplier": 1,
+      "reachable_events": [
+        "traffic_surge",
+        "critter_burst"
+      ]
+    },
+    {
+      "id": "rush_hour",
+      "storage_index": 1,
+      "chicken_score_bonus": 0,
+      "combo_bonus_multiplier": 1,
+      "reachable_events": [
+        "chicken_burst",
+        "combo_frenzy"
+      ]
+    },
+    {
+      "id": "chicken_frenzy",
+      "storage_index": 2,
+      "chicken_score_bonus": 1,
+      "combo_bonus_multiplier": 1,
+      "reachable_events": [
+        "critter_burst",
+        "traffic_surge"
+      ]
+    },
+    {
+      "id": "stampede",
+      "storage_index": 3,
+      "chicken_score_bonus": 0,
+      "combo_bonus_multiplier": 1,
+      "reachable_events": [
+        "combo_frenzy",
+        "chicken_burst"
+      ]
+    },
+    {
+      "id": "glass_cannon",
+      "storage_index": 4,
+      "chicken_score_bonus": 0,
+      "combo_bonus_multiplier": 2,
+      "reachable_events": [
+        "critter_burst",
+        "traffic_surge"
+      ]
+    }
+  ],
+  "events": [
+    {
+      "id": "traffic_surge",
+      "chicken_score_bonus": 0,
+      "combo_bonus_multiplier": 1
+    },
+    {
+      "id": "chicken_burst",
+      "chicken_score_bonus": 1,
+      "combo_bonus_multiplier": 1
+    },
+    {
+      "id": "combo_frenzy",
+      "chicken_score_bonus": 0,
+      "combo_bonus_multiplier": 2
+    },
+    {
+      "id": "critter_burst",
+      "chicken_score_bonus": 0,
+      "combo_bonus_multiplier": 1
+    }
+  ],
+  "combo": {
+    "window_seconds": 2.5,
+    "tiers": [
+      {
+        "minimum_count": 0,
+        "multiplier": 1
+      },
+      {
+        "minimum_count": 5,
+        "multiplier": 2
+      },
+      {
+        "minimum_count": 10,
+        "multiplier": 3
+      },
+      {
+        "minimum_count": 15,
+        "multiplier": 4
+      },
+      {
+        "minimum_count": 20,
+        "multiplier": 5
+      }
+    ],
+    "bonus_policy": "base_point_unscaled_bonus_saturating"
+  },
+  "scoring": {
+    "chicken_base_award": 1,
+    "objective_bonus": 10,
+    "coin_score_award": 1,
+    "mega_coin_points": 5,
+    "critter_score_penalty": 2
+  },
+  "time": {
+    "coin_bonus_seconds": 1.5,
+    "coin_cap_seconds": 90.0,
+    "time_pickup_bonus_seconds": 5.0,
+    "time_pickup_cap_seconds": 99.0
+  },
+  "terminal_aggregate": {
+    "policy": "checked_reject_overflow",
+    "overflow_fallback": "saturating_for_non_protocol_display_only"
+  }
+}

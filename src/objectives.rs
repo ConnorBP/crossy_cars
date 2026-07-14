@@ -21,7 +21,7 @@ use crate::touch::{
 };
 
 /// Score added once when the current objective is completed.
-pub const OBJECTIVE_BONUS: u32 = 10;
+pub const OBJECTIVE_BONUS: u32 = roady_score_rules::OBJECTIVE_BONUS;
 
 /// The task assigned to the current round.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -225,7 +225,11 @@ fn apply_reward(
     if current.completed && !current.reward_awarded && completed_kind == Some(current.kind) {
         let mut next = current;
         next.reward_awarded = true;
-        (next, chicken_score.saturating_add(OBJECTIVE_BONUS), true)
+        (
+            next,
+            roady_score_rules::award_objective(chicken_score),
+            true,
+        )
     } else {
         (current, chicken_score, false)
     }

@@ -21,7 +21,7 @@ use crate::game::resources::{RoundActive, Score};
 use crate::game::state::GameState;
 use crate::modifiers::ActiveModifier;
 use crate::palette;
-use crate::run_events::ActiveEvent;
+use crate::run_events::{ActiveEvent, EventKind};
 use crate::settings::Settings;
 
 // ---------------------------------------------------------------------------
@@ -30,7 +30,7 @@ use crate::settings::Settings;
 
 /// Combo window: seconds after the last hit before the combo resets. Each new
 /// hit refreshes this timer.
-const COMBO_WINDOW: f32 = 2.5;
+const COMBO_WINDOW: f32 = roady_score_rules::COMBO_WINDOW_SECONDS;
 
 /// Width of the depleting timer bar (px) at full.
 const BAR_WIDTH: f32 = 120.0;
@@ -144,23 +144,18 @@ impl Combo {
     /// Recompute the multiplier from the consecutive-hit count.
     /// 1x default, 2x at 5, 3x at 10, 4x at 15, capped at 5x (20+).
     fn multiplier_from_count(count: u32) -> u32 {
-        match count {
-            0..=4 => 1,
-            5..=9 => 2,
-            10..=14 => 3,
-            15..=19 => 4,
-            _ => 5,
-        }
+        roady_score_rules::combo_multiplier(count)
     }
 }
 
 /// Bonus owned by this module for one hit. The hit's base point is awarded by
 /// the originating gameplay system and is deliberately never multiplied.
 fn combo_bonus_for_hit(multiplier: u32, modifier: &ActiveModifier, event: &ActiveEvent) -> u32 {
-    multiplier
-        .saturating_sub(1)
-        .saturating_mul(modifier.combo_bonus_multiplier())
-        .saturating_mul(event.combo_bonus_multiplier())
+    roady_score_rules::combo_bonus(
+        multiplier,
+        modifier.0.rules_id(),
+        event.0.map(EventKind::rules_id),
+    )
 }
 
 #[cfg(test)]

@@ -65,7 +65,7 @@ jobs:
 
       - name: Run Rust tests
         timeout-minutes: 30
-        run: cargo test --locked
+        run: cargo test --workspace --locked
 
       - name: Check WebAssembly target
         timeout-minutes: 20

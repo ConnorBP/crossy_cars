@@ -30,12 +30,17 @@ impl ModifierKind {
     /// Stable storage index. Do not reorder these values: persisted condition
     /// bests use this exact Standard-through-Glass-Cannon layout.
     pub const fn index(self) -> usize {
+        self.rules_id().storage_index()
+    }
+
+    /// Engine-independent stable ID from the shared scoring-rules crate.
+    pub(crate) const fn rules_id(self) -> roady_score_rules::ConditionId {
         match self {
-            Self::Standard => 0,
-            Self::RushHour => 1,
-            Self::ChickenFrenzy => 2,
-            Self::Stampede => 3,
-            Self::GlassCannon => 4,
+            Self::Standard => roady_score_rules::ConditionId::Standard,
+            Self::RushHour => roady_score_rules::ConditionId::RushHour,
+            Self::ChickenFrenzy => roady_score_rules::ConditionId::ChickenFrenzy,
+            Self::Stampede => roady_score_rules::ConditionId::Stampede,
+            Self::GlassCannon => roady_score_rules::ConditionId::GlassCannon,
         }
     }
 
@@ -105,19 +110,15 @@ impl ModifierKind {
     }
 
     /// Multiplier applied only to score awarded above a combo's base point.
+    #[cfg(test)]
     pub(crate) const fn combo_bonus_multiplier(self) -> u32 {
-        match self {
-            Self::GlassCannon => 2,
-            _ => 1,
-        }
+        self.rules_id().combo_bonus_multiplier()
     }
 
     /// Extra chicken-score points awarded in addition to normal scoring.
+    #[cfg(test)]
     pub(crate) const fn chicken_score_bonus(self) -> u32 {
-        match self {
-            Self::ChickenFrenzy => 1,
-            _ => 0,
-        }
+        self.rules_id().chicken_score_bonus()
     }
 }
 
@@ -157,10 +158,12 @@ impl ActiveModifier {
         self.0.damage_multiplier()
     }
 
+    #[cfg(test)]
     pub(crate) const fn combo_bonus_multiplier(&self) -> u32 {
         self.0.combo_bonus_multiplier()
     }
 
+    #[cfg(test)]
     pub(crate) const fn chicken_score_bonus(&self) -> u32 {
         self.0.chicken_score_bonus()
     }

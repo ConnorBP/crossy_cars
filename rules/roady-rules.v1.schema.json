@@ -1,0 +1,250 @@
+{
+  "$defs": {
+    "combo": {
+      "additionalProperties": false,
+      "properties": {
+        "bonus_policy": {
+          "const": "base_point_unscaled_bonus_saturating"
+        },
+        "tiers": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "minimum_count": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "multiplier": {
+                "maximum": 5,
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "minimum_count",
+              "multiplier"
+            ],
+            "type": "object"
+          },
+          "maxItems": 5,
+          "minItems": 5,
+          "type": "array"
+        },
+        "window_seconds": {
+          "exclusiveMinimum": 0,
+          "type": "number"
+        }
+      },
+      "required": [
+        "window_seconds",
+        "tiers",
+        "bonus_policy"
+      ],
+      "type": "object"
+    },
+    "condition": {
+      "additionalProperties": false,
+      "properties": {
+        "chicken_score_bonus": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "combo_bonus_multiplier": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "id": {
+          "$ref": "#/$defs/conditionId"
+        },
+        "reachable_events": {
+          "items": {
+            "$ref": "#/$defs/eventId"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "type": "array"
+        },
+        "storage_index": {
+          "maximum": 4,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "storage_index",
+        "chicken_score_bonus",
+        "combo_bonus_multiplier",
+        "reachable_events"
+      ],
+      "type": "object"
+    },
+    "conditionId": {
+      "enum": [
+        "standard",
+        "rush_hour",
+        "chicken_frenzy",
+        "stampede",
+        "glass_cannon"
+      ]
+    },
+    "event": {
+      "additionalProperties": false,
+      "properties": {
+        "chicken_score_bonus": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "combo_bonus_multiplier": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "id": {
+          "$ref": "#/$defs/eventId"
+        }
+      },
+      "required": [
+        "id",
+        "chicken_score_bonus",
+        "combo_bonus_multiplier"
+      ],
+      "type": "object"
+    },
+    "eventId": {
+      "enum": [
+        "traffic_surge",
+        "chicken_burst",
+        "combo_frenzy",
+        "critter_burst"
+      ]
+    },
+    "scoring": {
+      "additionalProperties": false,
+      "properties": {
+        "chicken_base_award": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "coin_score_award": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "critter_score_penalty": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "mega_coin_points": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "objective_bonus": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "chicken_base_award",
+        "objective_bonus",
+        "coin_score_award",
+        "mega_coin_points",
+        "critter_score_penalty"
+      ],
+      "type": "object"
+    },
+    "terminalAggregate": {
+      "additionalProperties": false,
+      "properties": {
+        "overflow_fallback": {
+          "const": "saturating_for_non_protocol_display_only"
+        },
+        "policy": {
+          "const": "checked_reject_overflow"
+        }
+      },
+      "required": [
+        "policy",
+        "overflow_fallback"
+      ],
+      "type": "object"
+    },
+    "time": {
+      "additionalProperties": false,
+      "properties": {
+        "coin_bonus_seconds": {
+          "minimum": 0,
+          "type": "number"
+        },
+        "coin_cap_seconds": {
+          "minimum": 0,
+          "type": "number"
+        },
+        "time_pickup_bonus_seconds": {
+          "minimum": 0,
+          "type": "number"
+        },
+        "time_pickup_cap_seconds": {
+          "minimum": 0,
+          "type": "number"
+        }
+      },
+      "required": [
+        "coin_bonus_seconds",
+        "coin_cap_seconds",
+        "time_pickup_bonus_seconds",
+        "time_pickup_cap_seconds"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://roady.game/rules/roady-rules.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "combo": {
+      "$ref": "#/$defs/combo"
+    },
+    "conditions": {
+      "items": {
+        "$ref": "#/$defs/condition"
+      },
+      "maxItems": 5,
+      "minItems": 5,
+      "type": "array"
+    },
+    "events": {
+      "items": {
+        "$ref": "#/$defs/event"
+      },
+      "maxItems": 4,
+      "minItems": 4,
+      "type": "array"
+    },
+    "rules_id": {
+      "const": "roady-rules.v1"
+    },
+    "rules_version": {
+      "const": 1
+    },
+    "scoring": {
+      "$ref": "#/$defs/scoring"
+    },
+    "terminal_aggregate": {
+      "$ref": "#/$defs/terminalAggregate"
+    },
+    "time": {
+      "$ref": "#/$defs/time"
+    }
+  },
+  "required": [
+    "rules_version",
+    "rules_id",
+    "conditions",
+    "events",
+    "combo",
+    "scoring",
+    "time",
+    "terminal_aggregate"
+  ],
+  "title": "Roady score rules v1",
+  "type": "object"
+}

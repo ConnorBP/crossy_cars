@@ -3511,18 +3511,15 @@ fn reset_grid(
 // Coins (environment now — spawned in blocks, collected on pickup)
 // ---------------------------------------------------------------------------
 
-const COIN_TIME_BONUS: f32 = 1.5;
-const MAX_ROUND_TIME: f32 = 90.0;
+#[cfg(test)]
+const COIN_TIME_BONUS: f32 = roady_score_rules::COIN_TIME_BONUS_SECONDS;
+#[cfg(test)]
+const MAX_ROUND_TIME: f32 = roady_score_rules::COIN_TIME_CAP_SECONDS;
 
 /// Apply one ordinary-coin time bonus after sanitizing the current timer.
 /// Invalid low values start from zero; high and infinite values stay capped.
 fn coin_time_after_collect(current: f32) -> f32 {
-    let current = if current.is_nan() {
-        0.0
-    } else {
-        current.clamp(0.0, MAX_ROUND_TIME)
-    };
-    (current + COIN_TIME_BONUS).min(MAX_ROUND_TIME)
+    roady_score_rules::coin_time_after_collect(current)
 }
 
 fn spin_coins(mut coins: Query<&mut Transform, With<Coin>>, time: Res<Time>) {
@@ -3561,7 +3558,7 @@ fn collect_coins(
         }
         if car_t.translation.distance(coin_t.translation()) < 1.2 {
             commands.entity(e).despawn();
-            score.coins += 1;
+            score.coins += roady_score_rules::COIN_SCORE_AWARD;
             timeleft.0 = coin_time_after_collect(timeleft.0);
             coin_events.write(CoinCollected);
         }
