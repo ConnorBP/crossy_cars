@@ -1,0 +1,2 @@
+# Generated score-rule artifacts are byte-for-byte golden files.
+rules/*.json text eol=lf
