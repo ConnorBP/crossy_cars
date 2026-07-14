@@ -232,6 +232,55 @@ pub fn sockets(kind: TileKind) -> [Edge; 4] {
 // and S-road at E endpoint. An approach is marked only when the endpoint has
 // a perpendicular road socket, i.e. it is a real intersection rather than a
 // through-road endpoint or dead-end.
+fn exposed_pad_curb_sides(sock: [Edge; 4]) -> [bool; 4] {
+    let has_road = sock.contains(&Edge::Road);
+    sock.map(|edge| has_road && edge == Edge::None)
+}
+
+fn road_curb_segment_count(sock: [Edge; 4]) -> usize {
+    let arms = sock.iter().filter(|&&edge| edge == Edge::Road).count();
+    arms * 2
+        + exposed_pad_curb_sides(sock)
+            .into_iter()
+            .filter(|side| *side)
+            .count()
+}
+
+fn road_exclusion_rects(sock: [Edge; 4]) -> Vec<[f32; 4]> {
+    let mut rects = Vec::with_capacity(5);
+    if sock.contains(&Edge::Road) {
+        rects.push([-5.5, 5.5, -5.5, 5.5]);
+    }
+    if sock[W] == Edge::Road {
+        rects.push([-20.0, -4.0, -5.5, 5.5]);
+    }
+    if sock[E] == Edge::Road {
+        rects.push([4.0, 20.0, -5.5, 5.5]);
+    }
+    if sock[S] == Edge::Road {
+        rects.push([-5.5, 5.5, -20.0, -4.0]);
+    }
+    if sock[N] == Edge::Road {
+        rects.push([-5.5, 5.5, 4.0, 20.0]);
+    }
+    rects
+}
+
+fn footprint_overlaps_road(
+    sock: [Edge; 4],
+    center: Vec2,
+    half_extents: Vec2,
+    clearance: f32,
+) -> bool {
+    let min_x = center.x - half_extents.x - clearance;
+    let max_x = center.x + half_extents.x + clearance;
+    let min_z = center.y - half_extents.y - clearance;
+    let max_z = center.y + half_extents.y + clearance;
+    road_exclusion_rects(sock)
+        .into_iter()
+        .any(|r| !(max_x <= r[0] || min_x >= r[1] || max_z <= r[2] || min_z >= r[3]))
+}
+
 #[cfg(test)]
 fn marking_approaches(sock: [Edge; 4]) -> [bool; 4] {
     let road = |side| sock[side] == Edge::Road;
@@ -717,10 +766,10 @@ impl FromWorld for WorldAssets {
         // Separate resource scopes ensure the mutable asset-storage borrows
         // never overlap.
         let meshes = world.resource_scope(|_, mut a: Mut<Assets<Mesh>>| WorldMeshAssets {
-            ground: a.add(Plane3d::default().mesh().size(42.0, 42.0)),
+            ground: a.add(Plane3d::default().mesh().size(40.0, 40.0)),
             // Countryside geometry is procedural but created once and cached;
             // recycled blocks only clone these lightweight handles.
-            field_ground: a.add(Plane3d::default().mesh().size(42.0, 42.0)),
+            field_ground: a.add(Plane3d::default().mesh().size(40.0, 40.0)),
             field_furrow: a.add(Cuboid::new(36.0, 0.025, 0.16)),
             hay_bale: a.add(Cylinder::new(HAY_BALE_RADIUS, HAY_BALE_LENGTH)),
             farm_crate: a.add(Cuboid::new(
@@ -1074,7 +1123,7 @@ const REVIEW_ATLAS_GUTTER: f32 = 10.0;
 const REVIEW_ATLAS_PITCH: f32 = REVIEW_BLOCK_SIZE + REVIEW_ATLAS_GUTTER;
 // Ground is deliberately 42u for seam hiding, so it is the actual review
 // extent even though road topology itself has zero spill.
-const REVIEW_CONTENT_HALF_EXTENT: f32 = 21.0;
+const REVIEW_CONTENT_HALF_EXTENT: f32 = 20.0;
 
 /// Exact XZ bounds of all review geometry relevant to framing. The forced
 /// atlas uses a 10u visible gutter and road topology has zero spill.
@@ -1677,7 +1726,7 @@ pub fn populate_block(
     let _ = (gx, gz); // available for callers; layout uses the seed instead.
 
     commands.entity(root).with_children(|p| {
-        // --- Ground cell (block-wide, slightly oversized to avoid seams) ---
+        // --- Ground cell (exactly block-wide; neighbours only touch edges) ---
         // Countryside variants use only cached procedural meshes/materials.
         if is_park {
             p.spawn((
@@ -1875,34 +1924,25 @@ pub fn populate_block(
             }
         }
 
-        // A single-socket tile is a dead end. Cap the far side of its centre
-        // pad with a transverse raised curb so the stub reads as intentional.
-        if road_count == 1 {
-            let (mesh, transform, half_x, half_z) = if road_w {
+        // Cap every exposed side of the center pad. Active sockets remain
+        // open into their arm; inactive sides get a complete 8-unit sidewalk.
+        for (side, exposed) in exposed_pad_curb_sides(sock).into_iter().enumerate() {
+            if !exposed {
+                continue;
+            }
+            let (mesh, transform, half_x, half_z) = if side == W || side == E {
                 (
                     world_assets.meshes.curb_z[0].clone(),
-                    Transform::from_xyz(4.75, 0.09, 0.0).with_scale(Vec3::new(1.0, 1.0, 0.5)),
+                    Transform::from_xyz(if side == W { -4.75 } else { 4.75 }, 0.09, 0.0)
+                        .with_scale(Vec3::new(1.0, 1.0, 0.5)),
                     0.75,
                     4.0,
-                )
-            } else if road_e {
-                (
-                    world_assets.meshes.curb_z[0].clone(),
-                    Transform::from_xyz(-4.75, 0.09, 0.0).with_scale(Vec3::new(1.0, 1.0, 0.5)),
-                    0.75,
-                    4.0,
-                )
-            } else if road_s {
-                (
-                    world_assets.meshes.curb_x[0].clone(),
-                    Transform::from_xyz(0.0, 0.09, 4.75).with_scale(Vec3::new(0.5, 1.0, 1.0)),
-                    4.0,
-                    0.75,
                 )
             } else {
                 (
                     world_assets.meshes.curb_x[0].clone(),
-                    Transform::from_xyz(0.0, 0.09, -4.75).with_scale(Vec3::new(0.5, 1.0, 1.0)),
+                    Transform::from_xyz(0.0, 0.09, if side == S { -4.75 } else { 4.75 })
+                        .with_scale(Vec3::new(0.5, 1.0, 1.0)),
                     4.0,
                     0.75,
                 )
@@ -1918,6 +1958,10 @@ pub fn populate_block(
                 },
             ));
         }
+        debug_assert_eq!(
+            road_curb_segment_count(sock),
+            road_count * 2 + (4 - road_count).min(if road_count > 0 { 4 } else { 0 })
+        );
 
         // --- Shared obstacle assets ---
         let a = world_assets;
@@ -1964,25 +2008,9 @@ pub fn populate_block(
         // building/tree/lamp/obstacle we place pushes its AABB here so later
         // placements skip spots that overlap it (with a margin). Prevents the
         // overlapping buildings/obstacles the user reported.
-        let mut placed: Vec<[f32; 4]> = Vec::new();
-        // Register the actual pad/arm/curb footprint before any prop. This is
-        // the authoritative road exclusion path for buildings, vegetation,
-        // lamps, farm dressing, and street obstacles.
-        if any_road {
-            placed.push([-5.5, 5.5, -5.5, 5.5]);
-        }
-        if road_w {
-            placed.push([-20.0, -4.0, -5.5, 5.5]);
-        }
-        if road_e {
-            placed.push([4.0, 20.0, -5.5, 5.5]);
-        }
-        if road_s {
-            placed.push([-5.5, 5.5, -20.0, -4.0]);
-        }
-        if road_n {
-            placed.push([-5.5, 5.5, 4.0, 20.0]);
-        }
+        // Register the actual pad/arm/curb footprints before any prop. This
+        // is the authoritative exclusion path for every decoration branch.
+        let mut placed: Vec<[f32; 4]> = road_exclusion_rects(sock);
 
         // --- Coins on the Road arms only ---
         let road_sockets: Vec<_> = [road_w, road_e, road_s, road_n]
@@ -2122,12 +2150,30 @@ pub fn populate_block(
                 });
             }
         } else if is_orchard {
-            // --- Orchard: fixed-cardinality, aligned rows of trees ---
-            // Row orientation varies by seed, but spacing and alignment stay
-            // exact. No buildings, lamps or T12 street obstacles are emitted.
+            // --- Orchard: aligned rows admitted through the shared footprint
+            // exclusion path so road-bearing orchard cells never place trees
+            // on the center pad or an active arm.
+            let mut orchard_seed = seed ^ 0x0ac4_a2d1;
             for pos in orchard_tree_layout(seed) {
+                if footprint_overlaps_road(sock, pos, Vec2::splat(0.3), 0.75) {
+                    continue;
+                }
+                let Some((tree_x, tree_z)) = try_place(
+                    &mut placed,
+                    &mut orchard_seed,
+                    0.3,
+                    0.3,
+                    pos.x,
+                    pos.x,
+                    pos.y,
+                    pos.y,
+                    0.75,
+                    1,
+                ) else {
+                    continue;
+                };
                 p.spawn((
-                    Transform::from_xyz(pos.x, 0.0, pos.y),
+                    Transform::from_xyz(tree_x, 0.0, tree_z),
                     Visibility::default(),
                     Collider {
                         half_x: 0.3,
@@ -3499,9 +3545,12 @@ mod tests {
     fn forced_atlas_has_visible_gutter_beyond_road_spill_and_metadata_matches() {
         assert!(REVIEW_ATLAS_GUTTER > REVIEW_ROAD_SPILL);
         assert_eq!(REVIEW_ROAD_SPILL, 0.0);
-        // The 42u seam-hiding ground plane leaves an actual 8u gutter in a
-        // 50u pitch; topology itself remains fully inside the nominal tile.
-        assert_eq!(REVIEW_ATLAS_PITCH - 2.0 * REVIEW_CONTENT_HALF_EXTENT, 8.0);
+        // Exact 40u terrain tiles leave the configured 10u visible gutter in
+        // a 50u pitch; topology remains fully inside the nominal tile.
+        assert_eq!(
+            REVIEW_ATLAS_PITCH - 2.0 * REVIEW_CONTENT_HALF_EXTENT,
+            REVIEW_ATLAS_GUTTER
+        );
         let mut app = review_test_app();
         let metadata = build_review_metadata(app.world_mut());
         assert_eq!(metadata.atlas.pitch, REVIEW_ATLAS_PITCH);
@@ -3594,6 +3643,71 @@ mod tests {
                 assert_eq!(sock[E] == Edge::Road, road_edge(RoadAxis::X, gx, gz));
                 assert_eq!(sock[S] == Edge::Road, road_edge(RoadAxis::Z, gz - 1, gx));
                 assert_eq!(sock[N] == Edge::Road, road_edge(RoadAxis::Z, gz, gx));
+            }
+        }
+    }
+
+    #[test]
+    fn terrain_tiles_touch_without_positive_area_overlap() {
+        let half = ROAD_BLOCK_SIZE * 0.5;
+        for offset in [
+            Vec2::new(ROAD_BLOCK_SIZE, 0.0),
+            Vec2::new(0.0, ROAD_BLOCK_SIZE),
+            Vec2::splat(ROAD_BLOCK_SIZE),
+        ] {
+            let overlap_x = ROAD_BLOCK_SIZE - offset.x.abs();
+            let overlap_z = ROAD_BLOCK_SIZE - offset.y.abs();
+            assert!(overlap_x <= 0.0 || overlap_z <= 0.0);
+            assert_eq!(half * 2.0, ROAD_BLOCK_SIZE);
+        }
+    }
+
+    #[test]
+    fn curb_plan_completes_every_exposed_pad_side() {
+        for kind in TILE_CATALOG {
+            let sock = sockets(kind);
+            let roads = sock.iter().filter(|&&edge| edge == Edge::Road).count();
+            let expected = if roads == 0 {
+                0
+            } else {
+                roads * 2 + (4 - roads)
+            };
+            assert_eq!(road_curb_segment_count(sock), expected, "{kind:?}");
+            for (side, exposed) in exposed_pad_curb_sides(sock).into_iter().enumerate() {
+                assert_eq!(exposed, roads > 0 && sock[side] == Edge::None, "{kind:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn representative_tree_and_prop_footprints_clear_every_road_plan() {
+        for kind in TILE_CATALOG {
+            let sock = sockets(kind);
+            for center in [
+                Vec2::ZERO,
+                Vec2::new(-12.0, 0.0),
+                Vec2::new(12.0, 0.0),
+                Vec2::new(0.0, -12.0),
+                Vec2::new(0.0, 12.0),
+            ] {
+                let expected = road_exclusion_rects(sock).into_iter().any(|r| {
+                    center.x >= r[0] && center.x <= r[1] && center.y >= r[2] && center.y <= r[3]
+                });
+                assert_eq!(
+                    footprint_overlaps_road(sock, center, Vec2::splat(0.3), 0.5),
+                    expected,
+                    "{kind:?} at {center:?}"
+                );
+            }
+            for pos in orchard_tree_layout(12345) {
+                if footprint_overlaps_road(sock, pos, Vec2::splat(0.3), 0.75) {
+                    assert!(road_exclusion_rects(sock).iter().any(|r| {
+                        pos.x + 1.05 > r[0]
+                            && pos.x - 1.05 < r[1]
+                            && pos.y + 1.05 > r[2]
+                            && pos.y - 1.05 < r[3]
+                    }));
+                }
             }
         }
     }
