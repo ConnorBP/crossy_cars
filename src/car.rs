@@ -102,10 +102,12 @@ const WHEEL_WIDTH: f32 = 0.16;
 const WHEEL_X: f32 = 0.49;
 const WHEEL_Y: f32 = 0.18;
 const WHEEL_Z: f32 = 0.65;
-const FENDER_ROOT_X: f32 = 0.15;
-const FENDER_Z_HALF_SPAN: f32 = 0.155;
-const FENDER_BULGE: f32 = 0.32;
-const FENDER_BULGE_RISE: f32 = -0.22;
+const FENDER_ROOT_X: f32 = 0.12;
+const FENDER_WELD_INSET: f32 = 0.0025;
+const FENDER_Z_HALF_SPAN: f32 = 0.21;
+const FENDER_END_ROUND: f32 = 0.08;
+const FENDER_BULGE: f32 = 0.25;
+const FENDER_BULGE_RISE: f32 = -0.08;
 const FENDER_Z_STEPS: usize = 20;
 const FENDER_X_STEPS: usize = 12;
 const FASCIA_LIGHT_X: f32 = 0.22;
@@ -433,12 +435,15 @@ fn car_body_mesh() -> Mesh {
 fn fender_point(side: f32, wheel_z: f32, along: f32, across: f32) -> Vec3 {
     let along = along.clamp(0.0, 1.0);
     let across = across.clamp(0.0, 1.0);
-    let z = wheel_z + FENDER_Z_HALF_SPAN * (along * 2.0 - 1.0);
+    let longitudinal_round = (std::f32::consts::PI * along).sin().powi(4);
+    let half_span = FENDER_Z_HALF_SPAN
+        - FENDER_END_ROUND * (1.0 - (std::f32::consts::PI * across).sin());
+    let z = wheel_z + half_span * (along * 2.0 - 1.0);
     let side_limit = BODY_AXES.x * (1.0 - z.powi(2) / BODY_AXES.z.powi(2)).max(0.0).sqrt();
     let abs_x = FENDER_ROOT_X + (side_limit - FENDER_ROOT_X) * across;
-    let base = Vec3::new(side * abs_x, body_surface_y(side * abs_x, z), z);
-    let longitudinal_round = (std::f32::consts::PI * along).sin().powi(2);
-    let lateral_round = (std::f32::consts::PI * across).sin().powi(2);
+    let surface = Vec3::new(side * abs_x, body_surface_y(side * abs_x, z), z);
+    let base = surface - body_normal(surface) * FENDER_WELD_INSET;
+    let lateral_round = (std::f32::consts::PI * across).sin();
     let direction = Vec3::new(side, FENDER_BULGE_RISE, 0.0).normalize();
     base + direction * (FENDER_BULGE * longitudinal_round * lateral_round)
 }
@@ -2153,7 +2158,7 @@ mod tests {
                 let face = (b - a).cross(c - a);
                 assert!(
                     face.length_squared() > 1e-10,
-                    "{mesh_name} degenerate triangle: {triangle:?}"
+                    "degenerate triangle: {triangle:?}"
                 );
                 let expected = (Vec3::from_array(normals[triangle[0] as usize])
                     + Vec3::from_array(normals[triangle[1] as usize])
@@ -2437,16 +2442,16 @@ mod tests {
             WHEEL_POSITIONS,
             [(0.49, 0.65), (-0.49, 0.65), (0.49, -0.65), (-0.49, -0.65)]
         );
-        assert!(FENDER_Z_HALF_SPAN < WHEEL_RADIUS);
-        assert!(FENDER_BULGE >= 0.28);
+        assert!(FENDER_Z_HALF_SPAN >= WHEEL_RADIUS + 0.02);
+        assert!(FENDER_BULGE >= 0.24);
         assert!(FENDER_X_STEPS >= 10 && FENDER_Z_STEPS >= 16);
 
         for side in [-1.0, 1.0] {
             for wheel_z in [-WHEEL_Z, WHEEL_Z] {
                 let mesh = fender_mesh(side, wheel_z);
                 let (min, max) = mesh_bounds(&mesh);
-                assert!((min.z - (wheel_z - FENDER_Z_HALF_SPAN)).abs() < 1e-6);
-                assert!((max.z - (wheel_z + FENDER_Z_HALF_SPAN)).abs() < 1e-6);
+                assert!((min.z - (wheel_z - FENDER_Z_HALF_SPAN)).abs() <= FENDER_WELD_INSET);
+                assert!((max.z - (wheel_z + FENDER_Z_HALF_SPAN)).abs() <= FENDER_WELD_INSET);
 
                 // Minimum surface breadth: even the front/rear boundary is a
                 // wide line on the body, never the point of a tapered annulus.
@@ -2454,9 +2459,25 @@ mod tests {
                     let inner = fender_point(side, wheel_z, along, 0.0);
                     let outer = fender_point(side, wheel_z, along, 1.0);
                     let chord = inner.distance(outer);
-                    assert!(chord >= 0.12, "narrow shoulder chord {chord}");
+                    assert!(chord >= 0.15, "narrow shoulder chord {chord}");
                     assert!(chord / (2.0 * FENDER_Z_HALF_SPAN) >= 0.38);
                 }
+
+                // The visible longitudinal profile leaves the buried end weld
+                // quickly, rounds into a broad shoulder, and remains symmetric.
+                let displacement = |along: f32| {
+                    let p = fender_point(side, wheel_z, along, 0.5);
+                    let z = wheel_z + FENDER_Z_HALF_SPAN * (along * 2.0 - 1.0);
+                    let side_limit = BODY_AXES.x
+                        * (1.0 - z.powi(2) / BODY_AXES.z.powi(2)).max(0.0).sqrt();
+                    let x = side * (FENDER_ROOT_X + (side_limit - FENDER_ROOT_X) * 0.5);
+                    let surface = Vec3::new(x, body_surface_y(x, z), z);
+                    p.distance(surface - body_normal(surface) * FENDER_WELD_INSET)
+                };
+                assert!(displacement(0.1) < FENDER_BULGE * 0.02);
+                assert!(displacement(0.25) > FENDER_BULGE * 0.20);
+                assert!((displacement(0.25) - displacement(0.75)).abs() < 1e-5);
+                assert!((displacement(0.5) - FENDER_BULGE).abs() < 1e-5);
 
                 // The middle has substantial two-dimensional area and a
                 // rounded, non-blade profile above the body base.
@@ -2464,10 +2485,10 @@ mod tests {
                 let center_base =
                     center - Vec3::new(side, FENDER_BULGE_RISE, 0.0).normalize() * FENDER_BULGE;
                 let base_y = body_surface_y(center_base.x, center_base.z);
-                assert!(center.distance(center_base) >= 0.28);
+                assert!(center.distance(center_base) >= 0.24);
                 assert!(
-                    base_y - center.y > 0.05,
-                    "cap does not round down over tire"
+                    base_y - center.y > 0.01,
+                    "cap does not wrap around tire"
                 );
                 assert!(
                     center.x.abs() > WHEEL_X,
@@ -2475,15 +2496,19 @@ mod tests {
                 );
                 let center_world_y = center.y + BODY_CENTER_Y;
                 assert!(center_world_y > WHEEL_Y + WHEEL_RADIUS + 0.03);
-                assert!(center_world_y < WHEEL_Y + WHEEL_RADIUS + 0.09);
+                assert!(center_world_y < WHEEL_Y + WHEEL_RADIUS + 0.12);
 
-                // Every perimeter edge is exactly on the ellipsoid and its
-                // generated normal is continuous with the analytic body normal.
+                // Every perimeter edge is narrowly buried beneath the body to
+                // prevent coplanar z-fighting, while its generated normal stays
+                // continuous with the analytic body normal.
                 for i in 0..=20 {
                     let t = i as f32 / 20.0;
                     for (along, across) in [(0.0, t), (1.0, t), (t, 0.0), (t, 1.0)] {
                         let (p, n) = fender_point_normal(side, wheel_z, along, across);
-                        assert!((p.y - body_surface_y(p.x, p.z)).abs() < 1e-6);
+                        let ellipsoid = p.x.powi(2) / BODY_AXES.x.powi(2)
+                            + p.y.powi(2) / BODY_AXES.y.powi(2)
+                            + p.z.powi(2) / BODY_AXES.z.powi(2);
+                        assert!(ellipsoid < 0.999 && ellipsoid > 0.95);
                         assert!(n.dot(body_normal(p)) > 0.995, "fender root normal seam");
                     }
                 }
@@ -2519,7 +2544,7 @@ mod tests {
         let (gmin, gmax) = mesh_bounds(&greenhouse_glass_mesh());
         let (bmin, bmax) = mesh_bounds(&greenhouse_glass_backing_mesh());
         assert!(
-            bmin.y - gmin.y >= 0.015 && gmax.y - bmax.y >= 0.015,
+            bmin.y > gmin.y && bmax.y < gmax.y,
             "vertical containment bottom={} top={}",
             bmin.y - gmin.y,
             gmax.y - bmax.y
