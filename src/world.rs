@@ -188,13 +188,50 @@ struct PicketFencePanel;
 // Wang-tile road network (T19)
 // ---------------------------------------------------------------------------
 
-/// Edge-socket state for one side of a block: either a road runs along that
-/// edge (`Road`) or it doesn't (`None`). The four edges of a block, in the
-/// order used everywhere in this module, are W (−X), E (+X), S (−Z), N (+Z).
+/// Road socket state (`Road`/`None`). Socket arrays retain their established
+/// four-entry W, E, S, N ordering.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Edge {
     Road,
     None,
+}
+
+/// Cardinal cell-edge identity used by lane connectors (`W`/`E`/`S`/`N`).
+/// Split from `Edge` so the socket state and the lane-graph edge identity are
+/// distinct types — `Edge` carries only `Road`/`None`, while `LaneEdge`
+/// carries only the four cardinal sides.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LaneEdge {
+    /// West side of a cell.
+    W,
+    /// East side of a cell.
+    E,
+    /// South side of a cell.
+    S,
+    /// North side of a cell.
+    N,
+}
+
+impl LaneEdge {
+    /// Stable lane-graph edge index in `[W, E, S, N]` order.
+    pub(crate) const fn lane_index(self) -> usize {
+        match self {
+            Self::W => W,
+            Self::E => E,
+            Self::S => S,
+            Self::N => N,
+        }
+    }
+
+    const fn from_lane_index(index: usize) -> Self {
+        match index {
+            W => Self::W,
+            E => Self::E,
+            S => Self::S,
+            N => Self::N,
+            _ => panic!("lane edge index out of range"),
+        }
+    }
 }
 
 /// A Wang-tile kind from the road-network tile set. Each variant fixes the
@@ -397,8 +434,13 @@ pub const TILE_CATALOG: [TileKind; 16] = [
 /// Production block/road dimensions. Block roots are road-junction centres;
 /// cell boundaries therefore lie half a block from each root.
 pub(crate) const ROAD_BLOCK_SIZE: f32 = 40.0;
-#[cfg(test)]
 pub(crate) const ROAD_HALF_WIDTH: f32 = 4.0;
+/// Centre offset of each directional lane from the road centre line.
+const LANE_OFFSET: f32 = ROAD_HALF_WIDTH * 0.5;
+/// Fixed subdivision count used by the lane graph's deterministic arc-length
+/// approximation. This is deliberately independent of frame rate and platform.
+#[allow(dead_code)] // Additive graph API; traffic consumers are introduced separately.
+const LANE_LENGTH_SAMPLES: usize = 32;
 const EDGE_ROAD_DENSITY: f32 = 0.58;
 const SPAWN_BACKBONE_RADIUS: i32 = 2;
 
@@ -421,11 +463,178 @@ pub(crate) struct RoadSegment {
     pub socket: usize,
 }
 
-/// Authoritative deterministic road plan for a coordinate.
+/// Topological movement represented by a directed lane connector.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LaneTurn {
+    Straight,
+    Left,
+    Right,
+    UTurn,
+}
+
+/// A directed lane endpoint on a cell boundary. `tangent` is a unit movement
+/// vector in world XZ coordinates: into the cell for inbound endpoints and out
+/// of the cell for outbound endpoints.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct LaneEndpoint {
+    pub position: Vec2,
+    pub tangent: Vec2,
+}
+
+/// Cubic Bezier centre line for one legal movement through a road cell.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct LaneCurve {
+    pub control_points: [Vec2; 4],
+}
+
+#[allow(dead_code)] // Additive graph API; traffic consumers are introduced separately.
+impl LaneCurve {
+    pub(crate) const fn new(p0: Vec2, p1: Vec2, p2: Vec2, p3: Vec2) -> Self {
+        Self {
+            control_points: [p0, p1, p2, p3],
+        }
+    }
+
+    /// Evaluate the curve at clamped parametric progress `t`.
+    pub(crate) fn eval(self, t: f32) -> Vec2 {
+        let t = if t.is_finite() {
+            t.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let u = 1.0 - t;
+        self.control_points[0] * (u * u * u)
+            + self.control_points[1] * (3.0 * u * u * t)
+            + self.control_points[2] * (3.0 * u * t * t)
+            + self.control_points[3] * (t * t * t)
+    }
+
+    /// Unnormalised first derivative. Kept separate from `tangent` so callers
+    /// that need speed/curvature can inspect the finite cubic derivative.
+    pub(crate) fn derivative(self, t: f32) -> Vec2 {
+        let t = if t.is_finite() {
+            t.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let u = 1.0 - t;
+        (self.control_points[1] - self.control_points[0]) * (3.0 * u * u)
+            + (self.control_points[2] - self.control_points[1]) * (6.0 * u * t)
+            + (self.control_points[3] - self.control_points[2]) * (3.0 * t * t)
+    }
+
+    /// Unit movement direction at `t`. Production curves have no stationary
+    /// points; the fallback nevertheless keeps malformed curves finite.
+    pub(crate) fn tangent(self, t: f32) -> Vec2 {
+        self.derivative(t).normalize_or_zero()
+    }
+
+    /// Deterministic piecewise-linear length using a fixed sample count.
+    pub(crate) fn sampled_length(self) -> f32 {
+        self.sampled_length_with_steps(LANE_LENGTH_SAMPLES)
+    }
+
+    /// Convenience name for the graph's canonical sampled length.
+    pub(crate) fn length(self) -> f32 {
+        self.sampled_length()
+    }
+
+    pub(crate) fn sampled_length_with_steps(self, steps: usize) -> f32 {
+        let steps = steps.max(1);
+        let mut previous = self.eval(0.0);
+        let mut length = 0.0;
+        for step in 1..=steps {
+            let point = self.eval(step as f32 / steps as f32);
+            length += previous.distance(point);
+            previous = point;
+        }
+        length
+    }
+
+    /// Evaluate by approximate distance progress rather than Bezier parameter.
+    /// The same fixed samples used by `sampled_length` make this monotonic and
+    /// reproducible. Values outside `[0, 1]` are clamped.
+    pub(crate) fn progress(self, progress: f32) -> Vec2 {
+        let progress = if progress.is_finite() {
+            progress.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        if progress <= 0.0 {
+            return self.control_points[0];
+        }
+        if progress >= 1.0 {
+            return self.control_points[3];
+        }
+
+        let total = self.sampled_length();
+        if total <= f32::EPSILON {
+            return self.control_points[0];
+        }
+        let target = total * progress;
+        let mut previous = self.eval(0.0);
+        let mut traversed = 0.0;
+        for step in 1..=LANE_LENGTH_SAMPLES {
+            let t = step as f32 / LANE_LENGTH_SAMPLES as f32;
+            let point = self.eval(t);
+            let segment_length = previous.distance(point);
+            if traversed + segment_length >= target {
+                let local = if segment_length > f32::EPSILON {
+                    (target - traversed) / segment_length
+                } else {
+                    0.0
+                };
+                return previous.lerp(point, local);
+            }
+            traversed += segment_length;
+            previous = point;
+        }
+        self.control_points[3]
+    }
+}
+
+/// One directed inbound-to-outbound lane movement. Array slot identity is
+/// stable and sparse: `from.lane_index() * 4 + to.lane_index()`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct LaneConnector {
+    /// Stable sparse-array identity: `from * 4 + to` in W/E/S/N order.
+    pub slot: usize,
+    pub cell: IVec2,
+    pub from: LaneEdge,
+    pub to: LaneEdge,
+    pub turn: LaneTurn,
+    pub curve: LaneCurve,
+}
+
+#[allow(dead_code)] // Additive graph API; traffic consumers are introduced separately.
+impl LaneConnector {
+    pub(crate) const fn slot(self) -> usize {
+        self.slot
+    }
+
+    pub(crate) fn from_endpoint(self) -> LaneEndpoint {
+        LaneEndpoint {
+            position: self.curve.control_points[0],
+            tangent: self.curve.tangent(0.0),
+        }
+    }
+
+    pub(crate) fn to_endpoint(self) -> LaneEndpoint {
+        LaneEndpoint {
+            position: self.curve.control_points[3],
+            tangent: self.curve.tangent(1.0),
+        }
+    }
+}
+
+/// Authoritative deterministic road plan for a coordinate. The lane connector
+/// graph is additive metadata derived solely from `kind`/its active sockets;
+/// the established road segments remain unchanged and authoritative.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct RoadPlan {
     pub kind: TileKind,
     pub segments: [Option<RoadSegment>; 4],
+    pub connectors: [Option<LaneConnector>; 16],
 }
 
 fn edge_hash(axis: RoadAxis, line: i32, segment: i32) -> f32 {
@@ -795,8 +1004,115 @@ fn urban_family_policy(family: DistrictFamily) -> Option<UrbanFamilyPolicy> {
     })
 }
 
+#[cfg(test)]
+const LANE_EDGES: [LaneEdge; 4] = [LaneEdge::W, LaneEdge::E, LaneEdge::S, LaneEdge::N];
+
+/// Unit vector from an edge boundary into its cell.
+const fn lane_inward(edge: LaneEdge) -> Vec2 {
+    match edge {
+        LaneEdge::W => Vec2::X,
+        LaneEdge::E => Vec2::NEG_X,
+        LaneEdge::S => Vec2::Y,
+        LaneEdge::N => Vec2::NEG_Y,
+    }
+}
+
+const fn right_normal(direction: Vec2) -> Vec2 {
+    // XZ projected into Vec2(x,z): clockwise is the right-hand normal.
+    Vec2::new(direction.y, -direction.x)
+}
+
+/// Boundary endpoint for one directed lane. Offsetting to the right of the
+/// movement vector means the two cells sharing a boundary derive bit-exactly
+/// equal positions and tangents for continuing traffic.
+pub(crate) fn lane_endpoint(gx: i32, gz: i32, edge: LaneEdge, inbound: bool) -> LaneEndpoint {
+    let center_x = gx as f32 * ROAD_BLOCK_SIZE;
+    let center_z = gz as f32 * ROAD_BLOCK_SIZE;
+    // Express the cross-cell coordinate with a shared odd half-grid key. Both
+    // cells perform the same integer operation before converting to f32.
+    let half = ROAD_BLOCK_SIZE * 0.5;
+    let boundary = match edge {
+        LaneEdge::W => Vec2::new(((gx as i64 * 2 - 1) as f32) * half, center_z),
+        LaneEdge::E => Vec2::new(((gx as i64 * 2 + 1) as f32) * half, center_z),
+        LaneEdge::S => Vec2::new(center_x, ((gz as i64 * 2 - 1) as f32) * half),
+        LaneEdge::N => Vec2::new(center_x, ((gz as i64 * 2 + 1) as f32) * half),
+    };
+    let tangent = if inbound {
+        lane_inward(edge)
+    } else {
+        -lane_inward(edge)
+    };
+    LaneEndpoint {
+        position: boundary + right_normal(tangent) * LANE_OFFSET,
+        tangent,
+    }
+}
+
+fn lane_turn(from: LaneEdge, to: LaneEdge) -> LaneTurn {
+    if from.lane_index() == to.lane_index() {
+        return LaneTurn::UTurn;
+    }
+    let incoming = lane_inward(from);
+    let outgoing = -lane_inward(to);
+    let cross = incoming.x * outgoing.y - incoming.y * outgoing.x;
+    if cross > 0.0 {
+        LaneTurn::Left
+    } else if cross < 0.0 {
+        LaneTurn::Right
+    } else {
+        LaneTurn::Straight
+    }
+}
+
+fn lane_connector(gx: i32, gz: i32, from: LaneEdge, to: LaneEdge) -> LaneConnector {
+    let start = lane_endpoint(gx, gz, from, true);
+    let end = lane_endpoint(gx, gz, to, false);
+    let turn = lane_turn(from, to);
+    // A 20u handle carries all quarter-turn and U-turn cubics through the
+    // central 8x8 pad without clipping the grass between perpendicular arms.
+    // Straight movements use one-third chord handles, yielding an exact line.
+    let handle = if turn == LaneTurn::Straight {
+        start.position.distance(end.position) / 3.0
+    } else {
+        ROAD_BLOCK_SIZE * 0.5
+    };
+    LaneConnector {
+        slot: from.lane_index() * 4 + to.lane_index(),
+        cell: IVec2::new(gx, gz),
+        from,
+        to,
+        turn,
+        curve: LaneCurve::new(
+            start.position,
+            start.position + start.tangent * handle,
+            end.position - end.tangent * handle,
+            end.position,
+        ),
+    }
+}
+
+fn connectors_for_kind(gx: i32, gz: i32, kind: TileKind) -> [Option<LaneConnector>; 16] {
+    let sock = sockets(kind);
+    std::array::from_fn(|slot| {
+        let from_index = slot / 4;
+        let to_index = slot % 4;
+        (sock[from_index] == Edge::Road && sock[to_index] == Edge::Road).then(|| {
+            lane_connector(
+                gx,
+                gz,
+                LaneEdge::from_lane_index(from_index),
+                LaneEdge::from_lane_index(to_index),
+            )
+        })
+    })
+}
+
 pub(crate) fn road_plan(gx: i32, gz: i32) -> RoadPlan {
     let kind = tile_from_edges(gx, gz);
+    road_plan_for_kind(gx, gz, kind)
+}
+
+fn road_plan_for_kind(gx: i32, gz: i32, kind: TileKind) -> RoadPlan {
     let center = Vec2::new(gx as f32 * ROAD_BLOCK_SIZE, gz as f32 * ROAD_BLOCK_SIZE);
     let half = ROAD_BLOCK_SIZE * 0.5;
     let sock = sockets(kind);
@@ -820,7 +1136,11 @@ pub(crate) fn road_plan(gx: i32, gz: i32) -> RoadPlan {
             socket,
         })
     });
-    RoadPlan { kind, segments }
+    RoadPlan {
+        kind,
+        segments,
+        connectors: connectors_for_kind(gx, gz, kind),
+    }
 }
 
 pub(crate) fn closest_point_on_road_segment(point: Vec2, segment: RoadSegment) -> Vec2 {
@@ -4346,6 +4666,208 @@ fn update_cone_motion(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn connector_pavement_contains(kind: TileKind, cell: IVec2, point: Vec2) -> bool {
+        let center = cell.as_vec2() * ROAD_BLOCK_SIZE;
+        let local = point - center;
+        let epsilon = 1e-4;
+        if local.x.abs() <= ROAD_HALF_WIDTH + epsilon && local.y.abs() <= ROAD_HALF_WIDTH + epsilon
+        {
+            return sockets(kind).contains(&Edge::Road);
+        }
+        let half = ROAD_BLOCK_SIZE * 0.5 + epsilon;
+        let pad = ROAD_HALF_WIDTH - epsilon;
+        let sock = sockets(kind);
+        (sock[W] == Edge::Road
+            && (-half..=-pad).contains(&local.x)
+            && local.y.abs() <= ROAD_HALF_WIDTH + epsilon)
+            || (sock[E] == Edge::Road
+                && (pad..=half).contains(&local.x)
+                && local.y.abs() <= ROAD_HALF_WIDTH + epsilon)
+            || (sock[S] == Edge::Road
+                && (-half..=-pad).contains(&local.y)
+                && local.x.abs() <= ROAD_HALF_WIDTH + epsilon)
+            || (sock[N] == Edge::Road
+                && (pad..=half).contains(&local.y)
+                && local.x.abs() <= ROAD_HALF_WIDTH + epsilon)
+    }
+
+    #[test]
+    fn lane_connector_cardinality_slots_and_inactive_absence_cover_catalog() {
+        for kind in TILE_CATALOG {
+            let plan = road_plan_for_kind(-3, 5, kind);
+            let sock = sockets(kind);
+            let active = sock.iter().filter(|&&state| state == Edge::Road).count();
+            assert_eq!(
+                plan.connectors.iter().flatten().count(),
+                active * active,
+                "{kind:?}"
+            );
+            for slot in 0..16 {
+                let from = slot / 4;
+                let to = slot % 4;
+                let expected = sock[from] == Edge::Road && sock[to] == Edge::Road;
+                assert_eq!(
+                    plan.connectors[slot].is_some(),
+                    expected,
+                    "{kind:?} slot {slot}"
+                );
+                if let Some(connector) = plan.connectors[slot] {
+                    assert_eq!(connector.slot(), slot);
+                    assert_eq!(connector.cell, IVec2::new(-3, 5));
+                    assert_eq!(connector.from, LANE_EDGES[from]);
+                    assert_eq!(connector.to, LANE_EDGES[to]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn adjacent_lane_endpoints_are_exact_across_shared_edges_including_negatives() {
+        for gx in -20..=20 {
+            for gz in -20..=20 {
+                let west_to_east = lane_endpoint(gx, gz, LaneEdge::E, false);
+                let east_inbound = lane_endpoint(gx + 1, gz, LaneEdge::W, true);
+                assert_eq!(west_to_east, east_inbound);
+                let east_to_west = lane_endpoint(gx + 1, gz, LaneEdge::W, false);
+                let west_inbound = lane_endpoint(gx, gz, LaneEdge::E, true);
+                assert_eq!(east_to_west, west_inbound);
+
+                let south_to_north = lane_endpoint(gx, gz, LaneEdge::N, false);
+                let north_inbound = lane_endpoint(gx, gz + 1, LaneEdge::S, true);
+                assert_eq!(south_to_north, north_inbound);
+                let north_to_south = lane_endpoint(gx, gz + 1, LaneEdge::S, false);
+                let south_inbound = lane_endpoint(gx, gz, LaneEdge::N, true);
+                assert_eq!(north_to_south, south_inbound);
+            }
+        }
+    }
+
+    #[test]
+    fn lane_turn_classification_is_directionally_complete() {
+        let expected = [
+            [
+                LaneTurn::UTurn,
+                LaneTurn::Straight,
+                LaneTurn::Right,
+                LaneTurn::Left,
+            ],
+            [
+                LaneTurn::Straight,
+                LaneTurn::UTurn,
+                LaneTurn::Left,
+                LaneTurn::Right,
+            ],
+            [
+                LaneTurn::Left,
+                LaneTurn::Right,
+                LaneTurn::UTurn,
+                LaneTurn::Straight,
+            ],
+            [
+                LaneTurn::Right,
+                LaneTurn::Left,
+                LaneTurn::Straight,
+                LaneTurn::UTurn,
+            ],
+        ];
+        let plan = road_plan_for_kind(0, 0, TileKind::Cross);
+        for from in 0..4 {
+            for to in 0..4 {
+                assert_eq!(
+                    plan.connectors[from * 4 + to].unwrap().turn,
+                    expected[from][to]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_stub_has_its_same_edge_uturn() {
+        for (kind, edge) in [
+            (TileKind::StubW, W),
+            (TileKind::StubE, E),
+            (TileKind::StubS, S),
+            (TileKind::StubN, N),
+        ] {
+            let plan = road_plan_for_kind(2, -4, kind);
+            let connector = plan.connectors[edge * 4 + edge].unwrap();
+            assert_eq!(connector.turn, LaneTurn::UTurn);
+            assert_eq!(plan.connectors.iter().flatten().count(), 1);
+            assert_ne!(
+                connector.from_endpoint().position,
+                connector.to_endpoint().position
+            );
+        }
+    }
+
+    #[test]
+    fn lane_curves_are_finite_endpoint_and_tangent_continuous() {
+        for kind in TILE_CATALOG {
+            for connector in road_plan_for_kind(-7, -11, kind)
+                .connectors
+                .into_iter()
+                .flatten()
+            {
+                let from = lane_endpoint(-7, -11, connector.from, true);
+                let to = lane_endpoint(-7, -11, connector.to, false);
+                assert_eq!(connector.from_endpoint(), from);
+                assert_eq!(connector.to_endpoint(), to);
+                for step in 0..=64 {
+                    let t = step as f32 / 64.0;
+                    assert!(connector.curve.eval(t).is_finite());
+                    assert!(connector.curve.derivative(t).is_finite());
+                    let tangent = connector.curve.tangent(t);
+                    assert!(tangent.is_finite());
+                    assert!(tangent.length_squared() > 0.99);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lane_curve_sampled_length_and_progress_are_deterministic_and_monotonic() {
+        for connector in road_plan_for_kind(1, -2, TileKind::Cross)
+            .connectors
+            .into_iter()
+            .flatten()
+        {
+            let curve = connector.curve;
+            let length = curve.sampled_length();
+            assert_eq!(length, curve.sampled_length());
+            assert!(length.is_finite() && length > 0.0);
+            assert_eq!(curve.progress(0.0), curve.eval(0.0));
+            assert_eq!(curve.progress(1.0), curve.eval(1.0));
+            let mut travelled = 0.0;
+            let mut previous = curve.progress(0.0);
+            for step in 1..=64 {
+                let point = curve.progress(step as f32 / 64.0);
+                let delta = previous.distance(point);
+                assert!(delta.is_finite() && delta > 0.0);
+                travelled += delta;
+                assert!(travelled <= length + 0.15);
+                previous = point;
+            }
+        }
+    }
+
+    #[test]
+    fn sampled_lane_curves_stay_on_center_pad_or_active_road_arms() {
+        for kind in TILE_CATALOG {
+            let plan = road_plan_for_kind(-2, 3, kind);
+            for connector in plan.connectors.into_iter().flatten() {
+                for step in 0..=256 {
+                    let point = connector.curve.eval(step as f32 / 256.0);
+                    assert!(
+                        connector_pavement_contains(kind, connector.cell, point),
+                        "{kind:?} {:?}->{:?} left pavement at {point:?}",
+                        connector.from,
+                        connector.to
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn coin_time_bonus_obeys_boundaries_and_sanitizes_invalid_values() {
