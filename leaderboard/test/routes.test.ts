@@ -309,6 +309,12 @@ describe("fetch-route: SVG leaderboard", () => {
     expect(svg).toContain('role="img" aria-labelledby="leaderboard-title leaderboard-description"');
     expect(svg).toContain("<title id=\"leaderboard-title\">");
     expect(svg).toContain("GENERATED ");
+    expect(svg).toContain("Roady Car Chicken Frenzy leaderboard");
+    expect(svg).toContain(">CHICKEN FRENZY LEADERBOARD</text>");
+    expect(svg).toContain(">CONDITION</text>");
+    expect(svg).toContain(">Chicken Frenzy</text>");
+    expect(svg).not.toContain(">ROAD</text>");
+    expect(svg).not.toContain(">C2</text>");
     expect(svg.indexOf(">EARLY<")).toBeLessThan(svg.indexOf(">LATER<"));
     expect(svg.indexOf(">LATER<")).toBeLessThan(svg.indexOf(">LOW<"));
     expect(svg).not.toContain("HIDDEN");

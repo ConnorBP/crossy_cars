@@ -465,7 +465,7 @@ async function getLeaderboardSvg(
 
   // Use a synthetic, origin-independent cache URL. The cached response has no
   // CORS headers; the current request's allowed Origin is reapplied below.
-  const cacheKey = `v1|leaderboard.svg|${condition ?? "global"}|${limit}`;
+  const cacheKey = `v2|leaderboard.svg|${condition ?? "global"}|${limit}`;
   const cacheUrl = `https://roady-leaderboard.cache/${cacheKey}`;
   const cache = caches.default;
   const cached = await cache.match(new Request(cacheUrl));

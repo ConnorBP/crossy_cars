@@ -7,6 +7,19 @@ export interface SvgLeaderboardEntry {
   condition: number;
 }
 
+const CONDITION_NAMES = [
+  "Standard",
+  "Rush Hour",
+  "Chicken Frenzy",
+  "Stampede",
+  "Glass Cannon",
+] as const;
+
+/** Player-facing name for a stable stored condition ID. */
+export function conditionName(condition: number): string {
+  return CONDITION_NAMES[condition] ?? `Unknown (ID ${condition})`;
+}
+
 /** Escape untrusted text before interpolating it into XML text or attributes. */
 export function escapeXml(value: unknown): string {
   return String(value).replace(/[&<>"']/g, (character) => {
@@ -30,8 +43,9 @@ export function renderLeaderboardSvg(
   const width = 720;
   const rowHeight = 42;
   const height = entries.length === 0 ? 300 : 230 + entries.length * rowHeight;
-  const boardLabel = condition === null ? "GLOBAL" : `CONDITION ${condition}`;
-  const title = `Roady Car ${boardLabel} leaderboard`;
+  const boardName = condition === null ? "Global" : conditionName(condition);
+  const boardLabel = boardName.toUpperCase();
+  const title = `Roady Car ${boardName} leaderboard`;
   const description = entries.length === 0
     ? "No live scores yet."
     : `Top ${entries.length} live score${entries.length === 1 ? "" : "s"}, ordered by score.`;
@@ -45,8 +59,8 @@ export function renderLeaderboardSvg(
     return `${stripe}
       <text x="48" y="${y}" class="rank">${escapeXml(entry.rank.toString().padStart(2, "0"))}</text>
       <text x="128" y="${y}" class="name">${escapeXml(entry.name)}</text>
-      <text x="560" y="${y}" class="score" text-anchor="end">${escapeXml(entry.score)}</text>
-      <text x="668" y="${y}" class="condition" text-anchor="end">C${escapeXml(entry.condition)}</text>`;
+      <text x="520" y="${y}" class="score" text-anchor="end">${escapeXml(entry.score)}</text>
+      <text x="684" y="${y}" class="condition" text-anchor="end">${escapeXml(conditionName(entry.condition))}</text>`;
   }).join("\n");
 
   const content = entries.length === 0
@@ -63,7 +77,8 @@ export function renderLeaderboardSvg(
     .kicker { fill: #d7a928; font-size: 14px; font-weight: 700; letter-spacing: 4px; }
     .heading { fill: #fff3bd; font-size: 30px; font-weight: 900; letter-spacing: 2px; }
     .columns { fill: #a58d4d; font-size: 12px; font-weight: 700; letter-spacing: 2px; }
-    .rank, .condition { fill: #d7a928; font-size: 18px; font-weight: 800; }
+    .rank { fill: #d7a928; font-size: 18px; font-weight: 800; }
+    .condition { fill: #d7a928; font-size: 14px; font-weight: 800; }
     .name { fill: #fff3bd; font-size: 19px; font-weight: 800; letter-spacing: 2px; }
     .score { fill: #ffffff; font-size: 19px; font-weight: 900; }
     .empty { fill: #fff3bd; font-size: 19px; font-weight: 800; letter-spacing: 2px; }
@@ -76,8 +91,8 @@ export function renderLeaderboardSvg(
   <text x="360" y="82" class="heading" text-anchor="middle">${escapeXml(boardLabel)} LEADERBOARD</text>
   <text x="48" y="132" class="columns">RANK</text>
   <text x="128" y="132" class="columns">DRIVER</text>
-  <text x="560" y="132" class="columns" text-anchor="end">SCORE</text>
-  <text x="668" y="132" class="columns" text-anchor="end">ROAD</text>
+  <text x="520" y="132" class="columns" text-anchor="end">SCORE</text>
+  <text x="684" y="132" class="columns" text-anchor="end">CONDITION</text>
   ${content}
   <text x="360" y="${timestampY}" class="timestamp" text-anchor="middle">GENERATED ${escapeXml(generated)}</text>
 </svg>`;
