@@ -527,6 +527,143 @@ fn district_for(gx: i32, gz: i32) -> District {
     }
 }
 
+// ---------------------------------------------------------------------------
+// District family (stable 15-family sub-classification)
+// ---------------------------------------------------------------------------
+
+/// A stable, metadata-only thematic identity within a `District`.
+/// Explicit `u8` discriminants are part of the review/export contract.
+#[repr(u8)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize)]
+pub enum DistrictFamily {
+    DenseTowerCourt = 0,
+    DenseMidrisePerimeter = 1,
+    DenseSteppedPodium = 2,
+    LowMainStreet = 3,
+    LowHomesYards = 4,
+    LowServiceParking = 5,
+    ParkGrove = 6,
+    ParkMeadow = 7,
+    FieldFurrowHay = 8,
+    FieldCrossRowsCrates = 9,
+    OrchardLongRows = 10,
+    OrchardSplitRows = 11,
+    WaterGardenOval = 12,
+    WaterReedMarsh = 13,
+    WaterFarmReservoir = 14,
+}
+
+/// Stable ID and review-atlas order for every district family.
+pub const FAMILY_CATALOG: [DistrictFamily; 15] = [
+    DistrictFamily::DenseTowerCourt,
+    DistrictFamily::DenseMidrisePerimeter,
+    DistrictFamily::DenseSteppedPodium,
+    DistrictFamily::LowMainStreet,
+    DistrictFamily::LowHomesYards,
+    DistrictFamily::LowServiceParking,
+    DistrictFamily::ParkGrove,
+    DistrictFamily::ParkMeadow,
+    DistrictFamily::FieldFurrowHay,
+    DistrictFamily::FieldCrossRowsCrates,
+    DistrictFamily::OrchardLongRows,
+    DistrictFamily::OrchardSplitRows,
+    DistrictFamily::WaterGardenOval,
+    DistrictFamily::WaterReedMarsh,
+    DistrictFamily::WaterFarmReservoir,
+];
+
+#[cfg(test)]
+pub fn family_name(family: DistrictFamily) -> &'static str {
+    use DistrictFamily::*;
+    match family {
+        DenseTowerCourt => "DenseTowerCourt",
+        DenseMidrisePerimeter => "DenseMidrisePerimeter",
+        DenseSteppedPodium => "DenseSteppedPodium",
+        LowMainStreet => "LowMainStreet",
+        LowHomesYards => "LowHomesYards",
+        LowServiceParking => "LowServiceParking",
+        ParkGrove => "ParkGrove",
+        ParkMeadow => "ParkMeadow",
+        FieldFurrowHay => "FieldFurrowHay",
+        FieldCrossRowsCrates => "FieldCrossRowsCrates",
+        OrchardLongRows => "OrchardLongRows",
+        OrchardSplitRows => "OrchardSplitRows",
+        WaterGardenOval => "WaterGardenOval",
+        WaterReedMarsh => "WaterReedMarsh",
+        WaterFarmReservoir => "WaterFarmReservoir",
+    }
+}
+
+/// Identity map from each family to its authoritative parent district.
+pub fn family_district(family: DistrictFamily) -> District {
+    use DistrictFamily::*;
+    match family {
+        DenseTowerCourt | DenseMidrisePerimeter | DenseSteppedPodium => District::DenseUrban,
+        LowMainStreet | LowHomesYards | LowServiceParking => District::LowRise,
+        ParkGrove | ParkMeadow => District::Park,
+        FieldFurrowHay | FieldCrossRowsCrates => District::Field,
+        OrchardLongRows | OrchardSplitRows => District::Orchard,
+        WaterGardenOval | WaterReedMarsh | WaterFarmReservoir => District::WaterPark,
+    }
+}
+
+/// Existing renderer fallback for a future family-aware presentation layer.
+/// In particular all Water identities deliberately use the Park branch.
+#[cfg(test)]
+fn family_presentation(family: DistrictFamily) -> DistrictPresentation {
+    district_presentation(family_district(family))
+}
+
+const FAMILY_SUB_DOMAIN: u32 = 0x4f4a_1b42;
+
+fn family_from_bucket(district: District, bucket: u32) -> DistrictFamily {
+    let bucket = bucket % 10_000;
+    match district {
+        District::DenseUrban => match bucket {
+            0..=3_333 => DistrictFamily::DenseTowerCourt,
+            3_334..=6_666 => DistrictFamily::DenseMidrisePerimeter,
+            _ => DistrictFamily::DenseSteppedPodium,
+        },
+        District::LowRise => match bucket {
+            0..=3_333 => DistrictFamily::LowMainStreet,
+            3_334..=6_666 => DistrictFamily::LowHomesYards,
+            _ => DistrictFamily::LowServiceParking,
+        },
+        District::Park => {
+            if bucket <= 4_999 {
+                DistrictFamily::ParkGrove
+            } else {
+                DistrictFamily::ParkMeadow
+            }
+        }
+        District::Field => {
+            if bucket <= 4_999 {
+                DistrictFamily::FieldFurrowHay
+            } else {
+                DistrictFamily::FieldCrossRowsCrates
+            }
+        }
+        District::Orchard => {
+            if bucket <= 4_999 {
+                DistrictFamily::OrchardLongRows
+            } else {
+                DistrictFamily::OrchardSplitRows
+            }
+        }
+        District::WaterPark => match bucket {
+            0..=3_333 => DistrictFamily::WaterGardenOval,
+            3_334..=6_666 => DistrictFamily::WaterReedMarsh,
+            _ => DistrictFamily::WaterFarmReservoir,
+        },
+    }
+}
+
+/// Select a family using the supplied authoritative district. Family hashing
+/// is domain-separated from both district selection and road-edge topology.
+fn district_family_for(gx: i32, gz: i32, district: District) -> DistrictFamily {
+    family_from_bucket(district, district_hash(gx, gz, FAMILY_SUB_DOMAIN) % 10_000)
+}
+
 pub(crate) fn road_plan(gx: i32, gz: i32) -> RoadPlan {
     let kind = tile_from_edges(gx, gz);
     let center = Vec2::new(gx as f32 * ROAD_BLOCK_SIZE, gz as f32 * ROAD_BLOCK_SIZE);
@@ -678,6 +815,9 @@ pub struct Block {
     /// Authoritative generated visual district. Population and review export
     /// read this stored value instead of recomputing it from coordinates.
     pub district: District,
+    /// Authoritative generated district family. Review export reads this
+    /// stored metadata identity instead of recomputing it from coordinates.
+    pub family: DistrictFamily,
 }
 
 /// Shared fixed-dimension meshes and materials used by streamed blocks.
@@ -976,7 +1116,7 @@ struct ReviewTile {
 enum ReviewTileSource {
     Production,
     Atlas,
-    DistrictAtlas,
+    FamilyAtlas,
 }
 
 /// Minimal, gameplay-free production-world review plugin. It deliberately
@@ -1071,6 +1211,7 @@ fn spawn_grid_window(
     for (gx, gz) in desired_grid_coords((0, 0), cfg.count) {
         let kind = tile_from_edges(gx, gz);
         let district = district_for(gx, gz);
+        let family = district_family_for(gx, gz, district);
         let root = commands
             .spawn((
                 Transform::from_xyz(gx as f32 * block, 0.0, gz as f32 * block),
@@ -1080,6 +1221,7 @@ fn spawn_grid_window(
                     gz,
                     kind,
                     district,
+                    family,
                 },
             ))
             .id();
@@ -1114,8 +1256,8 @@ fn seed_for(gx: i32, gz: i32) -> u32 {
 const REVIEW_WINDOW_COUNT: i32 = 11;
 const REVIEW_BLOCK_SIZE: f32 = 40.0;
 const REVIEW_ATLAS_COLUMNS: usize = 10;
-const REVIEW_ATLAS_Z: f32 = 330.0;
-const REVIEW_DISTRICT_ATLAS_Z: f32 = 260.0;
+const REVIEW_ATLAS_Z: f32 = 450.0;
+const REVIEW_FAMILY_ATLAS_Z: f32 = 330.0;
 /// Roads centered on an edge extend this far beyond a nominal tile boundary.
 const REVIEW_ROAD_SPILL: f32 = 0.0;
 /// Empty space between complete, non-spilling atlas tiles.
@@ -1140,11 +1282,17 @@ pub(crate) fn world_review_bounds() -> (Vec2, Vec2) {
         REVIEW_ATLAS_Z - REVIEW_CONTENT_HALF_EXTENT,
     );
     let atlas_rows = TILE_CATALOG.len().div_ceil(REVIEW_ATLAS_COLUMNS);
+    let family_rows = FAMILY_CATALOG.len().div_ceil(REVIEW_ATLAS_COLUMNS);
     let atlas_max = Vec2::new(
         atlas_half_columns * REVIEW_ATLAS_PITCH + REVIEW_CONTENT_HALF_EXTENT,
-        REVIEW_ATLAS_Z
+        (REVIEW_ATLAS_Z
             + (atlas_rows.saturating_sub(1)) as f32 * REVIEW_ATLAS_PITCH
-            + REVIEW_CONTENT_HALF_EXTENT,
+            + REVIEW_CONTENT_HALF_EXTENT)
+            .max(
+                REVIEW_FAMILY_ATLAS_Z
+                    + (family_rows.saturating_sub(1)) as f32 * REVIEW_ATLAS_PITCH
+                    + REVIEW_CONTENT_HALF_EXTENT,
+            ),
     );
     (production_min.min(atlas_min), production_max.max(atlas_max))
 }
@@ -1171,6 +1319,7 @@ struct ReviewBlockMetadata {
     gz: i32,
     kind: &'static str,
     district: District,
+    family: DistrictFamily,
     sockets: [&'static str; 4],
     world_x: f32,
     world_z: f32,
@@ -1203,6 +1352,7 @@ struct ReviewMetadata {
     production_window_count: i32,
     topology_version: u32,
     district_version: u32,
+    family_version: u32,
     socket_order: [&'static str; 4],
     scene_bounds: ReviewBoundsMetadata,
     atlas: ReviewAtlasMetadata,
@@ -1267,37 +1417,9 @@ fn spawn_review_world(
             gz,
             tile_from_edges(gx, gz),
             district_for(gx, gz),
+            None,
             ReviewTileSource::Production,
             None,
-        );
-    }
-    for (index, district) in [
-        District::DenseUrban,
-        District::LowRise,
-        District::Park,
-        District::Field,
-        District::Orchard,
-        District::WaterPark,
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        spawn_review_tile(
-            &mut commands,
-            &mut meshes,
-            &textures,
-            &world_assets,
-            Vec3::new(
-                (index as f32 - 2.5) * REVIEW_ATLAS_PITCH,
-                0.0,
-                REVIEW_DISTRICT_ATLAS_Z,
-            ),
-            index as i32,
-            -2,
-            TileKind::Empty,
-            district,
-            ReviewTileSource::DistrictAtlas,
-            Some(index),
         );
     }
     for (index, &kind) in TILE_CATALOG.iter().enumerate() {
@@ -1317,7 +1439,30 @@ fn spawn_review_world(
             row as i32,
             kind,
             District::DenseUrban,
+            Some(DistrictFamily::DenseTowerCourt),
             ReviewTileSource::Atlas,
+            Some(index),
+        );
+    }
+    for (index, &family) in FAMILY_CATALOG.iter().enumerate() {
+        let column = index % REVIEW_ATLAS_COLUMNS;
+        let row = index / REVIEW_ATLAS_COLUMNS;
+        spawn_review_tile(
+            &mut commands,
+            &mut meshes,
+            &textures,
+            &world_assets,
+            Vec3::new(
+                (column as f32 - 4.5) * REVIEW_ATLAS_PITCH,
+                0.0,
+                REVIEW_FAMILY_ATLAS_Z + row as f32 * REVIEW_ATLAS_PITCH,
+            ),
+            column as i32,
+            row as i32,
+            TileKind::Empty,
+            family_district(family),
+            Some(family),
+            ReviewTileSource::FamilyAtlas,
             Some(index),
         );
     }
@@ -1334,9 +1479,11 @@ fn spawn_review_tile(
     gz: i32,
     kind: TileKind,
     district: District,
+    forced_family: Option<DistrictFamily>,
     source: ReviewTileSource,
     catalog_index: Option<usize>,
 ) {
+    let family = forced_family.unwrap_or_else(|| district_family_for(gx, gz, district));
     let root = commands
         .spawn((
             Transform::from_translation(position),
@@ -1346,6 +1493,7 @@ fn spawn_review_tile(
                 gz,
                 kind,
                 district,
+                family,
             },
             ReviewTile {
                 source,
@@ -1397,6 +1545,7 @@ fn build_review_metadata(world: &mut World) -> ReviewMetadata {
                 block.gz,
                 block.kind,
                 block.district,
+                block.family,
                 *tile,
                 transform.translation,
             )
@@ -1423,20 +1572,21 @@ fn build_review_metadata(world: &mut World) -> ReviewMetadata {
         (roads, markings)
     };
     let mut blocks = Vec::with_capacity(tiles.len());
-    for (entity, gx, gz, kind, district, tile, translation) in tiles {
+    for (entity, gx, gz, kind, district, family, tile, translation) in tiles {
         let mut counts = ReviewCounts::default();
         count_review_descendants(world, entity, &road_meshes, &marking_meshes, &mut counts);
         blocks.push(ReviewBlockMetadata {
             source: match tile.source {
                 ReviewTileSource::Production => "production",
                 ReviewTileSource::Atlas => "atlas",
-                ReviewTileSource::DistrictAtlas => "district_atlas",
+                ReviewTileSource::FamilyAtlas => "family_atlas",
             },
             catalog_index: tile.catalog_index,
             gx,
             gz,
             kind: tile_kind_name(kind),
             district,
+            family,
             sockets: socket_names(kind),
             world_x: translation.x,
             world_z: translation.z,
@@ -1445,7 +1595,12 @@ fn build_review_metadata(world: &mut World) -> ReviewMetadata {
     }
     blocks.sort_by_key(|block| {
         (
-            if block.source == "production" { 0 } else { 1 },
+            match block.source {
+                "production" => 0,
+                "atlas" => 1,
+                "family_atlas" => 2,
+                _ => 3,
+            },
             block.catalog_index.unwrap_or(0),
             block.gx,
             block.gz,
@@ -1453,13 +1608,14 @@ fn build_review_metadata(world: &mut World) -> ReviewMetadata {
     });
     let (bounds_min, bounds_max) = world_review_bounds();
     ReviewMetadata {
-        schema: "roady-world-review-v2",
+        schema: "roady-world-review-v3",
         ready: true,
         seed: REVIEW_SEED,
         block_size: REVIEW_BLOCK_SIZE,
         production_window_count: REVIEW_WINDOW_COUNT,
         topology_version: 1,
         district_version: 1,
+        family_version: 1,
         socket_order: ["west", "east", "south", "north"],
         scene_bounds: ReviewBoundsMetadata {
             min_x: bounds_min.x,
@@ -2795,6 +2951,7 @@ fn spawn_block_at(
 ) {
     let kind = tile_from_edges(gx, gz);
     let district = district_for(gx, gz);
+    let family = district_family_for(gx, gz, district);
     let root = commands
         .spawn((
             Transform::from_xyz(gx as f32 * block, 0.0, gz as f32 * block),
@@ -2804,6 +2961,7 @@ fn spawn_block_at(
                 gz,
                 kind,
                 district,
+                family,
             },
         ))
         .id();
@@ -3233,6 +3391,97 @@ mod tests {
     }
 
     #[test]
+    fn family_ids_catalog_and_district_compatibility_are_stable() {
+        for (index, family) in FAMILY_CATALOG.into_iter().enumerate() {
+            assert_eq!(family as usize, index);
+            assert!(!family_name(family).is_empty());
+            assert_eq!(
+                family_district(family),
+                family_district(FAMILY_CATALOG[index])
+            );
+        }
+        for family in [
+            DistrictFamily::WaterGardenOval,
+            DistrictFamily::WaterReedMarsh,
+            DistrictFamily::WaterFarmReservoir,
+        ] {
+            assert_eq!(family_district(family), District::WaterPark);
+            assert_eq!(family_presentation(family), DistrictPresentation::Park);
+        }
+    }
+
+    #[test]
+    fn family_bucket_boundaries_are_exact() {
+        let three = [
+            (0, DistrictFamily::DenseTowerCourt),
+            (3_333, DistrictFamily::DenseTowerCourt),
+            (3_334, DistrictFamily::DenseMidrisePerimeter),
+            (6_666, DistrictFamily::DenseMidrisePerimeter),
+            (6_667, DistrictFamily::DenseSteppedPodium),
+            (9_999, DistrictFamily::DenseSteppedPodium),
+        ];
+        for (bucket, expected) in three {
+            assert_eq!(family_from_bucket(District::DenseUrban, bucket), expected);
+        }
+        assert_eq!(
+            family_from_bucket(District::Park, 4_999),
+            DistrictFamily::ParkGrove
+        );
+        assert_eq!(
+            family_from_bucket(District::Park, 5_000),
+            DistrictFamily::ParkMeadow
+        );
+    }
+
+    #[test]
+    fn family_selection_is_deterministic_reachable_and_balanced() {
+        let mut counts = [0usize; 15];
+        for district in [
+            District::DenseUrban,
+            District::LowRise,
+            District::Park,
+            District::Field,
+            District::Orchard,
+            District::WaterPark,
+        ] {
+            for gx in -250..250 {
+                for gz in -250..250 {
+                    let family = district_family_for(gx, gz, district);
+                    assert_eq!(family, district_family_for(gx, gz, district));
+                    assert_eq!(family_district(family), district);
+                    counts[family as usize] += 1;
+                }
+            }
+        }
+        assert!(counts.into_iter().all(|count| count > 0));
+        for district in [District::DenseUrban, District::LowRise, District::WaterPark] {
+            let group: Vec<_> = FAMILY_CATALOG
+                .into_iter()
+                .filter(|f| family_district(*f) == district)
+                .collect();
+            let total: usize = group.iter().map(|f| counts[*f as usize]).sum();
+            for family in group {
+                let observed = counts[family as usize] as f32 / total as f32;
+                assert!(
+                    (observed - 1.0 / 3.0).abs() <= 0.015,
+                    "{family:?}: {observed}"
+                );
+            }
+        }
+        for district in [District::Park, District::Field, District::Orchard] {
+            let group: Vec<_> = FAMILY_CATALOG
+                .into_iter()
+                .filter(|f| family_district(*f) == district)
+                .collect();
+            let total: usize = group.iter().map(|f| counts[*f as usize]).sum();
+            for family in group {
+                let observed = counts[family as usize] as f32 / total as f32;
+                assert!((observed - 0.5).abs() <= 0.015, "{family:?}: {observed}");
+            }
+        }
+    }
+
+    #[test]
     fn district_bucket_boundaries_are_exact() {
         let cases = [
             (0, District::DenseUrban),
@@ -3365,14 +3614,17 @@ mod tests {
     fn block_retains_authoritative_kind_and_district() {
         let kind = road_tile_kind(-3, 7);
         let district = District::WaterPark;
+        let family = district_family_for(-3, 7, district);
         let block = Block {
             gx: -3,
             gz: 7,
             kind,
             district,
+            family,
         };
         assert_eq!(block.kind, kind);
         assert_eq!(block.district, district);
+        assert_eq!(block.family, family);
     }
 
     #[test]
@@ -3443,13 +3695,16 @@ mod tests {
         let second = build_review_metadata(app.world_mut());
         assert_eq!(first, second);
         assert!(first.ready);
-        assert_eq!(first.schema, "roady-world-review-v2");
+        assert_eq!(first.schema, "roady-world-review-v3");
         assert_eq!(first.seed, REVIEW_SEED);
         assert_eq!(first.topology_version, 1);
         assert_eq!(first.district_version, 1);
+        assert_eq!(first.family_version, 1);
         assert_eq!(
             first.blocks.len(),
-            (REVIEW_WINDOW_COUNT * REVIEW_WINDOW_COUNT) as usize + TILE_CATALOG.len() + 6
+            (REVIEW_WINDOW_COUNT * REVIEW_WINDOW_COUNT) as usize
+                + TILE_CATALOG.len()
+                + FAMILY_CATALOG.len()
         );
         assert_eq!(
             first
@@ -3469,6 +3724,19 @@ mod tests {
             block.catalog_index == Some(index)
                 && block.kind == tile_kind_name(TILE_CATALOG[index])
                 && block.district == District::DenseUrban
+                && block.family == DistrictFamily::DenseTowerCourt
+        }));
+        let family_atlas: Vec<_> = first
+            .blocks
+            .iter()
+            .filter(|block| block.source == "family_atlas")
+            .collect();
+        assert_eq!(family_atlas.len(), FAMILY_CATALOG.len());
+        assert!(family_atlas.iter().enumerate().all(|(index, block)| {
+            block.catalog_index == Some(index)
+                && block.kind == "Empty"
+                && block.family == FAMILY_CATALOG[index]
+                && block.district == family_district(block.family)
         }));
         assert!(first.blocks.iter().all(|block| block.counts.mesh3d > 0));
         assert!(first.blocks.iter().all(|block| matches!(
@@ -3542,6 +3810,50 @@ mod tests {
     }
 
     #[test]
+    fn review_metadata_uses_stored_family_without_recomputation() {
+        let mut app = review_test_app();
+        let target = {
+            let world = app.world_mut();
+            let mut query = world.query::<(Entity, &Block, &ReviewTile)>();
+            query
+                .iter(world)
+                .find(|(_, _, tile)| tile.source == ReviewTileSource::Production)
+                .map(|(entity, block, _)| (entity, block.gx, block.gz, block.district))
+                .unwrap()
+        };
+        let generated = district_family_for(target.1, target.2, target.3);
+        let stored = FAMILY_CATALOG
+            .into_iter()
+            .find(|family| family_district(*family) == target.3 && *family != generated)
+            .unwrap();
+        app.world_mut().get_mut::<Block>(target.0).unwrap().family = stored;
+        let metadata = build_review_metadata(app.world_mut());
+        let block = metadata
+            .blocks
+            .iter()
+            .find(|block| {
+                block.source == "production" && block.gx == target.1 && block.gz == target.2
+            })
+            .unwrap();
+        assert_eq!(block.family, stored);
+        assert_ne!(block.family, generated);
+    }
+
+    #[test]
+    fn review_regions_are_disjoint() {
+        let production_max_z =
+            (REVIEW_WINDOW_COUNT / 2) as f32 * REVIEW_BLOCK_SIZE + REVIEW_CONTENT_HALF_EXTENT;
+        let family_min_z = REVIEW_FAMILY_ATLAS_Z - REVIEW_CONTENT_HALF_EXTENT;
+        let family_rows = FAMILY_CATALOG.len().div_ceil(REVIEW_ATLAS_COLUMNS);
+        let family_max_z = REVIEW_FAMILY_ATLAS_Z
+            + (family_rows - 1) as f32 * REVIEW_ATLAS_PITCH
+            + REVIEW_CONTENT_HALF_EXTENT;
+        let topology_min_z = REVIEW_ATLAS_Z - REVIEW_CONTENT_HALF_EXTENT;
+        assert!(production_max_z < family_min_z);
+        assert!(family_max_z < topology_min_z);
+    }
+
+    #[test]
     fn forced_atlas_has_visible_gutter_beyond_road_spill_and_metadata_matches() {
         assert!(REVIEW_ATLAS_GUTTER > REVIEW_ROAD_SPILL);
         assert_eq!(REVIEW_ROAD_SPILL, 0.0);
@@ -3605,6 +3917,7 @@ mod tests {
                         gz,
                         kind,
                         district,
+                        family: district_family_for(gx, gz, district),
                     };
                     assert_eq!(sockets(block.kind), expected);
                 }
