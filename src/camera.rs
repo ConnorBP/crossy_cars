@@ -8,6 +8,7 @@ use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::post_process::bloom::Bloom;
 
 use crate::car::{Car, DrivingSet};
+use crate::game::SpawnSet;
 use crate::game::events::ObstacleHit;
 use crate::game::resources::{GameConfig, RoundActive};
 use crate::game::state::GameState;
@@ -159,7 +160,7 @@ impl Plugin for CameraPlugin {
             .add_systems(Startup, spawn_camera)
             .add_systems(
                 OnEnter(GameState::Playing),
-                reset_camera_framing_for_fresh_round,
+                reset_camera_framing_for_fresh_round.before(SpawnSet),
             )
             .add_systems(
                 Update,
