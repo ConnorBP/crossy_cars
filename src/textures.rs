@@ -1,16 +1,14 @@
 //! Procedural textures generated entirely in code (no asset files).
 //!
 //! `TexturesPlugin` runs a `Startup` system that builds RGBA pixel data for
-//! grass, road, sidewalk, and car paint, wraps each in a repeating `Image`,
-//! and stores ready-to-use `StandardMaterial` handles in the `TextureAssets`
-//! resource so other systems can apply them with a simple `clone()`.
+//! grass, road, sidewalk, foliage, hay, and car paint, wraps each image in a
+//! repeating sampler, and stores ready-to-use `StandardMaterial` handles in
+//! the `TextureAssets` resource so other systems only clone cached handles.
 //!
-//! T15: realistic PBR metallic car paint (high metallic + low roughness +
-//! fine orange-peel/metal-flake normal map for shimmer under IBL + bloom),
-//! richer grass (multi-tone green + yellow/brown patches + mowing stripes),
-//! richer asphalt (gravel grain), and improved sidewalk concrete. All color
-//! textures tile seamlessly (Repeat sampler + wrapping noise indices). All
-//! normal maps are linear `Rgba8Unorm` (lighting breaks if stored sRGB).
+//! Color textures use WebGL2-safe `Rgba8UnormSrgb`; normal maps use linear
+//! `Rgba8Unorm` (lighting breaks if vectors are stored sRGB). Procedural color
+//! coordinates wrap explicitly and every sampler repeats, so all patterns tile
+//! exactly without external assets.
 
 use bevy::asset::RenderAssetUsages;
 use bevy::image::{Image, ImageAddressMode, ImageSampler, ImageSamplerDescriptor};
@@ -25,23 +23,41 @@ const TEX_SIZE: u32 = 64;
 /// a subtle surface perturbation that tiles).
 const NORMAL_SIZE: u32 = 64;
 
+pub const FOLIAGE_VARIANTS: usize = 3;
+pub const HAY_VARIANTS: usize = 2;
+
+// A 64px tile contains only two long slabs across. Rows are staggered by half
+// a slab, and all dimensions divide TEX_SIZE to preserve the exact period.
+const SIDEWALK_SLAB_WIDTH: u32 = 32;
+const SIDEWALK_SLAB_HEIGHT: u32 = 16;
+
 // Base sRGB values matching crate::palette constants (see palette.rs).
 const GRASS_SRGB: [f32; 3] = [0.30, 0.60, 0.30]; // palette::GRASS_LIGHT
 const ASPHALT_SRGB: [f32; 3] = [0.13, 0.13, 0.14]; // palette::ASPHALT
 const CONCRETE_SRGB: [f32; 3] = [0.72, 0.71, 0.68]; // palette::CONCRETE
 
 /// Ready-to-use textured `StandardMaterial` handles, inserted as a resource.
+/// Organic variant arrays are public integration API, hence their public
+/// length constants.
 ///
 /// Field names (for orchestrator wiring):
 /// - `grass`      → grass ground plane
 /// - `road`       → asphalt road strip
 /// - `sidewalk`   → concrete sidewalk curbs
+/// - `foliage`    → three deterministic leaf palettes/species
+/// - `hay`        → `[field_straw, bale_straw]`
 /// - `car_paint`  → car body paint
 #[derive(Resource)]
 pub struct TextureAssets {
     pub grass: Handle<StandardMaterial>,
     pub road: Handle<StandardMaterial>,
     pub sidewalk: Handle<StandardMaterial>,
+    // These caches are consumed by the foliage/field integration separately;
+    // keeping them here guarantees streaming code never allocates per block.
+    #[allow(dead_code)]
+    pub foliage: [Handle<StandardMaterial>; FOLIAGE_VARIANTS],
+    #[allow(dead_code)]
+    pub hay: [Handle<StandardMaterial>; HAY_VARIANTS],
     pub car_paint: Handle<StandardMaterial>,
 }
 
@@ -58,7 +74,7 @@ impl Plugin for TexturesPlugin {
 impl FromWorld for TextureAssets {
     fn from_world(world: &mut World) -> Self {
         world.resource_scope::<Assets<Image>, _>(|world, mut images| {
-            let (grass, road, sidewalk, car_paint) = {
+            let (grass, road, sidewalk, foliage, hay, car_paint) = {
                 let mut materials = world.resource_mut::<Assets<StandardMaterial>>();
 
                 // --- Procedural normal maps ---
@@ -70,9 +86,8 @@ impl FromWorld for TextureAssets {
                 // Sidewalk gets a bumpy normal for concrete texture.
                 let sidewalk_normal = images.add(concrete_normal_map());
 
-                // GRASS — multi-tone green + subtle yellow/brown patches + faint
-                // mowing stripes; tile 16×. T15: richer natural variation, fully
-                // rough (matte) with a blade-bump normal map for natural scatter.
+                // GRASS — subtle deterministic mottle, mowing bands, and blade
+                // strokes; tile 16x with a matte blade-bump normal map.
                 let grass = materials.add(StandardMaterial {
                     base_color: Color::WHITE,
                     base_color_texture: Some(images.add(grass_texture())),
@@ -96,17 +111,44 @@ impl FromWorld for TextureAssets {
                     ..default()
                 });
 
-                // SIDEWALK — concrete with a subtle checker + noise + expansion-joint
-                // lines; tile 6×. T15: minor enrichment (joint lines + slightly
-                // stronger noise), rough concrete with a bumpy normal map.
+                // SIDEWALK — long staggered concrete slabs, restrained slab-tone
+                // variation, expansion joints, and a rough concrete normal map.
                 let sidewalk = materials.add(StandardMaterial {
                     base_color: Color::WHITE,
                     base_color_texture: Some(images.add(sidewalk_texture())),
                     normal_map_texture: Some(sidewalk_normal),
                     perceptual_roughness: 0.88,
                     metallic: 0.0,
-                    uv_transform: Affine2::from_scale(Vec2::splat(6.0)),
+                    // Fewer repeats make the larger, staggered slabs legible.
+                    uv_transform: Affine2::from_scale(Vec2::splat(3.0)),
                     ..default()
+                });
+
+                // Three cached species/palette variants. Textures add leaf-sized
+                // highlights and veins without transparent cutouts (they are used
+                // by closed foliage meshes).
+                let foliage = std::array::from_fn(|variant| {
+                    materials.add(StandardMaterial {
+                        base_color: Color::WHITE,
+                        base_color_texture: Some(images.add(foliage_texture(variant))),
+                        perceptual_roughness: 0.9,
+                        metallic: 0.0,
+                        uv_transform: Affine2::from_scale(Vec2::splat(2.0)),
+                        ..default()
+                    })
+                });
+
+                // Cached field/bale straw variants. Both carry directional fibres;
+                // their different band direction and palette suit the two uses.
+                let hay = std::array::from_fn(|variant| {
+                    materials.add(StandardMaterial {
+                        base_color: Color::WHITE,
+                        base_color_texture: Some(images.add(hay_texture(variant))),
+                        perceptual_roughness: 0.96,
+                        metallic: 0.0,
+                        uv_transform: Affine2::from_scale(Vec2::splat(3.0)),
+                        ..default()
+                    })
                 });
 
                 // Real red metallic paint. The rounded body supplies smooth
@@ -122,13 +164,15 @@ impl FromWorld for TextureAssets {
                     ..default()
                 });
 
-                (grass, road, sidewalk, car_paint)
+                (grass, road, sidewalk, foliage, hay, car_paint)
             };
 
             TextureAssets {
                 grass,
                 road,
                 sidewalk,
+                foliage,
+                hay,
                 car_paint,
             }
         })
@@ -224,41 +268,43 @@ where
 // Per-texture pixel builders
 // ---------------------------------------------------------------------------
 
-/// Grass: multi-tone green base with finer noise, subtle yellow/brown
-/// patches, and a faint mowing-stripe banding for a richer natural look.
-/// Tiles seamlessly (wrapping noise indices + stripe period divides TEX_SIZE).
+/// Grass: restrained tileable mottle plus tiny deterministic blade strokes.
+/// The blade cells and every band divide 64, and `grass_pixel` wraps incoming
+/// coordinates before hashing so callers see an exact 64px period.
 fn grass_texture() -> Image {
+    make_image(grass_pixel)
+}
+
+fn grass_pixel(x: u32, y: u32) -> [u8; 4] {
+    let x = x % TEX_SIZE;
+    let y = y % TEX_SIZE;
     let b = srgb_base(GRASS_SRGB);
-    // Stripe period must divide TEX_SIZE (64) so the texture tiles seamlessly.
-    // 8px stripes → 8 bands across the texture, faint enough to read as mowing.
-    const STRIPE_PERIOD: u32 = 8;
-    make_image(move |x, y| {
-        // Two octaves of noise: low-frequency for patches, high for fine grain.
-        let fine = signed_noise(x * 2, y * 2) * 10 / 128;
-        let coarse = signed_noise2(x / 3, y / 3) * 28 / 128;
 
-        // Yellow/brown dry patches: where a third noise channel is high,
-        // shift toward yellow-brown (more red, less green/blue).
-        let dry = signed_noise(x / 5 + 17, y / 5 + 31) * 30 / 128; // -30..30ish
-        let dry_amt = ((dry + 30).clamp(0, 60) as f32) / 60.0; // 0..1 bias toward dry
+    // Eight-by-eight clumps produce broad, quiet mottle rather than obvious
+    // per-texel static. Fine grain prevents the patches looking airbrushed.
+    let mottle = signed_noise2(x / 8, y / 8) * 13 / 128;
+    let fine = signed_noise(x, y) * 7 / 128;
+    let stripe = if (y / 16) % 2 == 0 { 3 } else { -3 };
 
-        // Faint mowing stripe: alternate bands along Y by a few brightness
-        // units. Kept subtle so it reads as mowing, not a checkerboard.
-        let stripe = if ((y / STRIPE_PERIOD) % 2) == 0 {
-            6
-        } else {
-            -6
-        };
+    // One short blade per 4x4 cell. The hash picks its origin and lean; testing
+    // the preceding row draws a subtle two-pixel stroke instead of bright dots.
+    let cell_x = x / 4;
+    let cell_y = y / 4;
+    let blade_hash = noise2(cell_x, cell_y);
+    let origin_x = blade_hash & 3;
+    let origin_y = (blade_hash >> 2) & 3;
+    let local_x = x & 3;
+    let local_y = y & 3;
+    let blade = local_y == origin_y && local_x == origin_x
+        || local_y == (origin_y + 1) % 4 && local_x == (origin_x + ((blade_hash >> 4) & 1)) % 4;
+    let blade_light = if blade { 11 } else { 0 };
 
-        // Apply variation. Green channel gets the most variation; red/blue
-        // get less so the hue stays green-dominant. Dry patches push
-        // red up and green/blue down (toward yellow-brown).
-        let r = b[0] + fine / 2 + coarse / 2 + (dry_amt * 22.0) as i32 + stripe / 2;
-        let g = b[1] + fine + coarse - (dry_amt * 18.0) as i32 + stripe;
-        let bl = b[2] + fine / 2 + coarse / 2 - (dry_amt * 14.0) as i32 + stripe / 3;
-
-        [clamp_byte(r), clamp_byte(g), clamp_byte(bl), 255]
-    })
+    [
+        clamp_byte(b[0] + mottle / 2 + fine / 2 + stripe / 2 + blade_light / 3),
+        clamp_byte(b[1] + mottle + fine + stripe + blade_light),
+        clamp_byte(b[2] + mottle / 3 + fine / 2 + stripe / 3 + blade_light / 4),
+        255,
+    ]
 }
 
 /// Road: dark asphalt with richer multi-frequency gravel/noise and more
@@ -290,26 +336,123 @@ fn road_texture() -> Image {
     })
 }
 
-/// Sidewalk: concrete with a subtle 4×4 checker pattern, per-pixel noise,
-/// and faint expansion-joint lines along the cell borders for a minor
-/// enrichment over the plain checker.
+/// Sidewalk: long 32x16 concrete slabs with staggered vertical seams. It has
+/// one quarter as many columns as the old 4x4 checker and avoids alternating
+/// every slab's brightness, substantially reducing visible repetition.
 fn sidewalk_texture() -> Image {
+    make_image(sidewalk_pixel)
+}
+
+fn sidewalk_is_joint(x: u32, y: u32) -> bool {
+    let x = x % TEX_SIZE;
+    let y = y % TEX_SIZE;
+    let row = y / SIDEWALK_SLAB_HEIGHT;
+    let stagger = if row % 2 == 0 {
+        0
+    } else {
+        SIDEWALK_SLAB_WIDTH / 2
+    };
+    y % SIDEWALK_SLAB_HEIGHT == 0 || (x + stagger) % SIDEWALK_SLAB_WIDTH == 0
+}
+
+fn sidewalk_pixel(x: u32, y: u32) -> [u8; 4] {
+    let x = x % TEX_SIZE;
+    let y = y % TEX_SIZE;
     let b = srgb_base(CONCRETE_SRGB);
-    let cell = TEX_SIZE / 4; // 16px cells → 4×4 checker on 64px texture
-    make_image(move |x, y| {
-        let checker = ((x / cell) + (y / cell)) % 2;
-        let cell_off = if checker == 0 { 10 } else { -10 };
-        let v = signed_noise(x, y) * 10 / 128;
+    let row = y / SIDEWALK_SLAB_HEIGHT;
+    let stagger = if row % 2 == 0 {
+        0
+    } else {
+        SIDEWALK_SLAB_WIDTH / 2
+    };
+    // Modulo aliases the two pieces of the odd-row slab that crosses the
+    // texture boundary, so its tone remains continuous across U repeat.
+    let slabs_per_row = TEX_SIZE / SIDEWALK_SLAB_WIDTH;
+    let slab_x = ((x + stagger) / SIDEWALK_SLAB_WIDTH) % slabs_per_row;
+    let slab_tone = signed_noise2(slab_x, row) * 7 / 128;
+    let grain = signed_noise(x, y) * 8 / 128;
+    let brushed = if (x + 2 * y) % 11 == 0 { 2 } else { 0 };
+    let joint = if sidewalk_is_joint(x, y) { -17 } else { 0 };
+    let value = slab_tone + grain + brushed + joint;
 
-        // Faint expansion-joint darkening at cell borders (1px grooves).
-        let on_joint = x % cell == 0 || y % cell == 0;
-        let joint = if on_joint { -18 } else { 0 };
+    [
+        clamp_byte(b[0] + value),
+        clamp_byte(b[1] + value),
+        clamp_byte(b[2] + value),
+        255,
+    ]
+}
 
-        let r = clamp_byte(b[0] + cell_off + v + joint);
-        let g = clamp_byte(b[1] + cell_off + v + joint);
-        let bl = clamp_byte(b[2] + cell_off + v + joint);
-        [r, g, bl, 255]
-    })
+/// Dense, opaque leaf surfaces for the three cached foliage variants. Palette,
+/// clump scale, vein direction, and highlights differ by variant while every
+/// coordinate is reduced into the 64px tile before hashing.
+fn foliage_texture(variant: usize) -> Image {
+    assert!(variant < FOLIAGE_VARIANTS);
+    make_image(move |x, y| foliage_pixel(variant, x, y))
+}
+
+fn foliage_pixel(variant: usize, x: u32, y: u32) -> [u8; 4] {
+    let x = x % TEX_SIZE;
+    let y = y % TEX_SIZE;
+    let bases = [[45, 108, 39], [57, 123, 48], [35, 91, 53]];
+    let b = bases[variant];
+    let scale = [8, 4, 8][variant];
+    let clump = signed_noise2(x / scale, y / scale) * [18, 14, 20][variant] / 128;
+    let grain = signed_noise(x + variant as u32 * 19, y) * 7 / 128;
+
+    // Broken diagonal veins and sparse warm leaf tips avoid a stamped grid.
+    let vein = match variant {
+        0 => (x + 2 * y) % 13 == 0,
+        1 => (2 * x + y) % 11 == 0,
+        _ => (x + TEX_SIZE - y) % 17 == 0,
+    };
+    let vein_light = if vein { 10 } else { 0 };
+    let tip = if noise2(x + 41, y + variant as u32 * 23) & 0x7f == 0 {
+        15
+    } else {
+        0
+    };
+
+    [
+        clamp_byte(b[0] + clump / 2 + grain / 3 + vein_light / 3 + tip),
+        clamp_byte(b[1] + clump + grain + vein_light + tip / 2),
+        clamp_byte(b[2] + clump / 3 + grain / 2 + vein_light / 4),
+        255,
+    ]
+}
+
+/// Directional straw suitable for broad fields (0) and wrapped bales (1).
+/// Fibres are narrow broken lines; 16px bands add structure without obvious
+/// high-frequency repetition.
+fn hay_texture(variant: usize) -> Image {
+    assert!(variant < HAY_VARIANTS);
+    make_image(move |x, y| hay_pixel(variant, x, y))
+}
+
+fn hay_pixel(variant: usize, x: u32, y: u32) -> [u8; 4] {
+    let x = x % TEX_SIZE;
+    let y = y % TEX_SIZE;
+    let bases = [[184, 139, 43], [211, 166, 57]];
+    let b = bases[variant];
+    let along = if variant == 0 { x } else { y };
+    let across = if variant == 0 { y } else { x };
+    let band = if (across / 16) % 2 == 0 { 7 } else { -7 };
+    let grain = signed_noise(x, y) * 8 / 128;
+
+    // Broken 1px fibres, offset per row/column. A second sparse dark strand
+    // gives bales and fields depth while remaining fully opaque and matte.
+    let phase = noise2(across / 2, variant as u32 * 29) & 15;
+    let fibre = across % 4 == (phase & 3) && (along + phase) % 16 < 11;
+    let dark_fibre = across % 9 == (phase % 9) && (along + phase * 3) % 32 < 17;
+    let fibre_light = if fibre { 18 } else { 0 };
+    let fibre_dark = if dark_fibre { -12 } else { 0 };
+
+    [
+        clamp_byte(b[0] + band + grain + fibre_light + fibre_dark),
+        clamp_byte(b[1] + band + grain + fibre_light * 2 / 3 + fibre_dark),
+        clamp_byte(b[2] + band / 2 + grain / 2 + fibre_light / 5 + fibre_dark / 2),
+        255,
+    ]
 }
 
 // ---------------------------------------------------------------------------
@@ -431,4 +574,147 @@ fn concrete_normal_map() -> Image {
         },
         0.6,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pixels(image: &Image) -> &[u8] {
+        image.data.as_deref().expect("procedural image has data")
+    }
+
+    fn assert_repeat_srgb(image: &Image) {
+        assert_eq!(image.texture_descriptor.size.width, TEX_SIZE);
+        assert_eq!(image.texture_descriptor.size.height, TEX_SIZE);
+        assert_eq!(
+            image.texture_descriptor.format,
+            TextureFormat::Rgba8UnormSrgb
+        );
+        assert_eq!(pixels(image).len(), (TEX_SIZE * TEX_SIZE * 4) as usize);
+        assert!(pixels(image).chunks_exact(4).all(|pixel| pixel[3] == 255));
+        let ImageSampler::Descriptor(sampler) = &image.sampler else {
+            panic!("procedural texture must have an explicit sampler")
+        };
+        assert_eq!(sampler.address_mode_u, ImageAddressMode::Repeat);
+        assert_eq!(sampler.address_mode_v, ImageAddressMode::Repeat);
+    }
+
+    #[test]
+    fn organic_texture_generation_is_deterministic() {
+        assert_eq!(pixels(&grass_texture()), pixels(&grass_texture()));
+        for variant in 0..FOLIAGE_VARIANTS {
+            assert_eq!(
+                pixels(&foliage_texture(variant)),
+                pixels(&foliage_texture(variant))
+            );
+        }
+        for variant in 0..HAY_VARIANTS {
+            assert_eq!(pixels(&hay_texture(variant)), pixels(&hay_texture(variant)));
+        }
+    }
+
+    #[test]
+    fn new_color_textures_are_webgl2_repeat_rgba8_srgb() {
+        assert_repeat_srgb(&grass_texture());
+        assert_repeat_srgb(&sidewalk_texture());
+        for variant in 0..FOLIAGE_VARIANTS {
+            assert_repeat_srgb(&foliage_texture(variant));
+        }
+        for variant in 0..HAY_VARIANTS {
+            assert_repeat_srgb(&hay_texture(variant));
+        }
+    }
+
+    #[test]
+    fn cached_organic_variants_are_visibly_distinct() {
+        let foliage = std::array::from_fn::<_, FOLIAGE_VARIANTS, _>(|i| foliage_texture(i));
+        for a in 0..FOLIAGE_VARIANTS {
+            for b in (a + 1)..FOLIAGE_VARIANTS {
+                assert_ne!(pixels(&foliage[a]), pixels(&foliage[b]));
+            }
+        }
+        assert_ne!(pixels(&hay_texture(0)), pixels(&hay_texture(1)));
+    }
+
+    #[test]
+    fn procedural_pixel_functions_have_exact_tile_periods() {
+        for y in 0..TEX_SIZE {
+            for x in 0..TEX_SIZE {
+                let grass = grass_pixel(x, y);
+                assert_eq!(grass, grass_pixel(x + TEX_SIZE, y));
+                assert_eq!(grass, grass_pixel(x, y + TEX_SIZE));
+
+                let sidewalk = sidewalk_pixel(x, y);
+                assert_eq!(sidewalk, sidewalk_pixel(x + TEX_SIZE, y));
+                assert_eq!(sidewalk, sidewalk_pixel(x, y + TEX_SIZE));
+
+                for variant in 0..FOLIAGE_VARIANTS {
+                    let leaf = foliage_pixel(variant, x, y);
+                    assert_eq!(leaf, foliage_pixel(variant, x + TEX_SIZE, y));
+                    assert_eq!(leaf, foliage_pixel(variant, x, y + TEX_SIZE));
+                }
+                for variant in 0..HAY_VARIANTS {
+                    let straw = hay_pixel(variant, x, y);
+                    assert_eq!(straw, hay_pixel(variant, x + TEX_SIZE, y));
+                    assert_eq!(straw, hay_pixel(variant, x, y + TEX_SIZE));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn texture_resource_caches_five_distinct_organic_materials() {
+        let mut app = App::new();
+        app.init_resource::<Assets<Image>>()
+            .init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<TextureAssets>();
+
+        let textures = app.world().resource::<TextureAssets>();
+        let handles = textures
+            .foliage
+            .iter()
+            .chain(textures.hay.iter())
+            .collect::<Vec<_>>();
+        for a in 0..handles.len() {
+            for b in (a + 1)..handles.len() {
+                assert_ne!(handles[a].id(), handles[b].id());
+            }
+        }
+
+        let materials = app.world().resource::<Assets<StandardMaterial>>();
+        let image_ids = handles
+            .iter()
+            .map(|handle| {
+                materials
+                    .get(*handle)
+                    .and_then(|material| material.base_color_texture.as_ref())
+                    .expect("cached organic material has a color texture")
+                    .id()
+            })
+            .collect::<Vec<_>>();
+        for a in 0..image_ids.len() {
+            for b in (a + 1)..image_ids.len() {
+                assert_ne!(image_ids[a], image_ids[b]);
+            }
+        }
+    }
+
+    #[test]
+    fn sidewalk_uses_long_staggered_slab_period() {
+        assert!(SIDEWALK_SLAB_WIDTH > 16);
+        assert!(SIDEWALK_SLAB_HEIGHT >= 16);
+        assert_eq!(TEX_SIZE % SIDEWALK_SLAB_WIDTH, 0);
+        assert_eq!(TEX_SIZE % SIDEWALK_SLAB_HEIGHT, 0);
+
+        // Every horizontal slab boundary is a seam. Vertical seams alternate
+        // by half a slab, avoiding the old small 4x4 checker/grid repetition.
+        assert!(sidewalk_is_joint(7, 0));
+        assert!(sidewalk_is_joint(0, 7));
+        assert!(!sidewalk_is_joint(0, SIDEWALK_SLAB_HEIGHT + 7));
+        assert!(sidewalk_is_joint(
+            SIDEWALK_SLAB_WIDTH / 2,
+            SIDEWALK_SLAB_HEIGHT + 7
+        ));
+    }
 }
