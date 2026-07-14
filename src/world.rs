@@ -13,7 +13,8 @@
 //! is WEIGHTED toward through-roads/intersections (Cross / RoadNS / RoadEW)
 //! so the road network stays connected and drivable, with occasional parks,
 //! fields, orchards, bigger blocks, T-intersections, corners and missing roads
-//! for variety. Countryside kinds are visual all-None socket aliases only.
+//! for variety. District presentation is generated independently from road
+//! topology, so the all-None socket pattern is always the canonical `Empty`.
 //! The tile choice is deterministic per `(gx, gz, seed)` (folded into the
 //! block's LCG seed via `seed_for`), so a recycled block reproduces the same
 //! layout it had the first time it was spawned at those coordinates.
@@ -156,17 +157,8 @@ pub enum Edge {
 /// least one `TileKind` whose sockets match (see `TILE_CATALOG` / `tile_from_edges`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize)]
 pub enum TileKind {
-    /// All edges None — a full block of buildings.
+    /// All edges None.
     Empty,
-    /// All edges None — a park (grass + trees, no buildings). Visual variant
-    /// of `Empty` chosen for variety when no roads touch the block.
-    Park,
-    /// All edges None — a cultivated field with furrows and a small bounded
-    /// set of farm props. It never changes the road socket graph.
-    Field,
-    /// All edges None — an orchard whose trees are placed in aligned rows.
-    /// It never changes the road socket graph.
-    Orchard,
     /// Through-road running S↔N (W=None, E=None, S=Road, N=Road).
     RoadNS,
     /// Through-road running W↔E (W=Road, E=Road, S=None, N=None).
@@ -215,9 +207,6 @@ pub fn sockets(kind: TileKind) -> [Edge; 4] {
     use TileKind::*;
     match kind {
         Empty => [None, None, None, None],
-        Park => [None, None, None, None],
-        Field => [None, None, None, None],
-        Orchard => [None, None, None, None],
         RoadNS => [None, None, Road, Road],
         RoadEW => [Road, Road, None, None],
         Cross => [Road, Road, Road, Road],
@@ -287,11 +276,8 @@ fn window_row_heights(height: f32) -> Vec<f32> {
 /// Stable review/catalog order for every production tile kind. This complete
 /// set includes the four single-edge stubs, so every socket combination has a
 /// match. The world-review atlas and JSON intentionally share this ordering.
-pub const TILE_CATALOG: [TileKind; 19] = [
+pub const TILE_CATALOG: [TileKind; 16] = [
     TileKind::Empty,
-    TileKind::Park,
-    TileKind::Field,
-    TileKind::Orchard,
     TileKind::RoadNS,
     TileKind::RoadEW,
     TileKind::Cross,
@@ -403,14 +389,8 @@ fn tile_from_edges(gx: i32, gz: i32) -> TileKind {
     let e = road_edge(RoadAxis::X, gx, gz);
     let s = road_edge(RoadAxis::Z, gz - 1, gx);
     let n = road_edge(RoadAxis::Z, gz, gx);
-    // All-None blocks get one of four deterministic VISUAL variants. Their
-    // sockets are identical, so this selection cannot change a shared edge.
-    if !w && !e && !s && !n {
-        return all_none_variant(gx, gz);
-    }
-    // Find the tile whose sockets match (W,E,S,N) exactly. There is exactly
-    // one for every non-all-None combo (the set is complete + each non-empty
-    // combo has a unique tile).
+    // Find the canonical tile whose sockets match (W,E,S,N) exactly. There is
+    // exactly one kind for each of the sixteen socket combinations.
     TILE_CATALOG
         .iter()
         .copied()
@@ -425,12 +405,54 @@ fn tile_from_edges(gx: i32, gz: i32) -> TileKind {
         .unwrap_or(TileKind::Cross)
 }
 
-/// Stable, well-mixed coordinate hash for visual variation. This is kept
-/// separate from road-line hashing so adding/changing countryside visuals can
-/// never perturb the socket graph.
-fn visual_coordinate_hash(gx: i32, gz: i32) -> u32 {
+/// Visual district, generated independently of the road topology.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize)]
+pub enum District {
+    DenseUrban,
+    LowRise,
+    Park,
+    Field,
+    Orchard,
+    WaterPark,
+}
+
+/// The existing renderer has four presentation branches. District remains
+/// authoritative even where two district values intentionally share visuals.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum DistrictPresentation {
+    Urban,
+    Park,
+    Field,
+    Orchard,
+}
+
+fn district_presentation(district: District) -> DistrictPresentation {
+    match district {
+        District::DenseUrban | District::LowRise => DistrictPresentation::Urban,
+        District::Park | District::WaterPark => DistrictPresentation::Park,
+        District::Field => DistrictPresentation::Field,
+        District::Orchard => DistrictPresentation::Orchard,
+    }
+}
+
+/// Convert a uniform 0..10,000 bucket to the exact district weights
+/// 30/28/14/12/10/6. Boundaries are a stable generation contract.
+fn district_from_bucket(bucket: u32) -> District {
+    match bucket % 10_000 {
+        0..=2_999 => District::DenseUrban,
+        3_000..=5_799 => District::LowRise,
+        5_800..=7_199 => District::Park,
+        7_200..=8_399 => District::Field,
+        8_400..=9_399 => District::Orchard,
+        _ => District::WaterPark,
+    }
+}
+
+/// Domain-separated coordinate hash. District salts are deliberately
+/// unrelated to road-edge hashing, so district changes cannot alter sockets.
+fn district_hash(gx: i32, gz: i32, domain: u32) -> u32 {
     let mut h =
-        (gx as u32).wrapping_mul(0x9e37_79b1) ^ (gz as u32).wrapping_mul(0x85eb_ca77) ^ 0xc2b2_ae3d;
+        (gx as u32).wrapping_mul(0x9e37_79b1) ^ (gz as u32).wrapping_mul(0x85eb_ca77) ^ domain;
     h ^= h >> 16;
     h = h.wrapping_mul(0x7feb_352d);
     h ^= h >> 15;
@@ -438,12 +460,21 @@ fn visual_coordinate_hash(gx: i32, gz: i32) -> u32 {
     h ^ (h >> 16)
 }
 
-fn all_none_variant(gx: i32, gz: i32) -> TileKind {
-    match visual_coordinate_hash(gx, gz) & 3 {
-        0 => TileKind::Empty,
-        1 => TileKind::Park,
-        2 => TileKind::Field,
-        _ => TileKind::Orchard,
+/// Generate coherent 4x4 macro-cell districts. Each block inherits its macro
+/// district 75% of the time and receives an independently salted local draw
+/// 25% of the time, retaining both visible patches and local variation.
+fn district_for(gx: i32, gz: i32) -> District {
+    const MACRO_DOMAIN: u32 = 0xd157_1c71;
+    const INHERIT_DOMAIN: u32 = 0xa11c_e075;
+    const LOCAL_DOMAIN: u32 = 0x10ca_1d15;
+    let macro_x = gx.div_euclid(4);
+    let macro_z = gz.div_euclid(4);
+    let macro_district =
+        district_from_bucket(district_hash(macro_x, macro_z, MACRO_DOMAIN) % 10_000);
+    if district_hash(gx, gz, INHERIT_DOMAIN) % 10_000 < 7_500 {
+        macro_district
+    } else {
+        district_from_bucket(district_hash(gx, gz, LOCAL_DOMAIN) % 10_000)
     }
 }
 
@@ -595,6 +626,9 @@ pub struct Block {
     /// Authoritative generated kind. Runtime and review metadata read this
     /// instead of re-deriving topology from coordinates.
     pub kind: TileKind,
+    /// Authoritative generated visual district. Population and review export
+    /// read this stored value instead of recomputing it from coordinates.
+    pub district: District,
 }
 
 /// Shared fixed-dimension meshes and materials used by streamed blocks.
@@ -893,6 +927,7 @@ struct ReviewTile {
 enum ReviewTileSource {
     Production,
     Atlas,
+    DistrictAtlas,
 }
 
 /// Minimal, gameplay-free production-world review plugin. It deliberately
@@ -986,11 +1021,17 @@ fn spawn_grid_window(
     let block = cfg.block;
     for (gx, gz) in desired_grid_coords((0, 0), cfg.count) {
         let kind = tile_from_edges(gx, gz);
+        let district = district_for(gx, gz);
         let root = commands
             .spawn((
                 Transform::from_xyz(gx as f32 * block, 0.0, gz as f32 * block),
                 Visibility::default(),
-                Block { gx, gz, kind },
+                Block {
+                    gx,
+                    gz,
+                    kind,
+                    district,
+                },
             ))
             .id();
         populate_block(
@@ -1003,6 +1044,7 @@ fn spawn_grid_window(
             gz,
             seed_for(gx, gz),
             kind,
+            district,
         );
     }
 }
@@ -1020,10 +1062,11 @@ fn seed_for(gx: i32, gz: i32) -> u32 {
 // W0 deterministic production-world review scene and metadata
 // ---------------------------------------------------------------------------
 
-const REVIEW_WINDOW_COUNT: i32 = 5;
+const REVIEW_WINDOW_COUNT: i32 = 11;
 const REVIEW_BLOCK_SIZE: f32 = 40.0;
 const REVIEW_ATLAS_COLUMNS: usize = 10;
-const REVIEW_ATLAS_Z: f32 = 160.0;
+const REVIEW_ATLAS_Z: f32 = 330.0;
+const REVIEW_DISTRICT_ATLAS_Z: f32 = 260.0;
 /// Roads centered on an edge extend this far beyond a nominal tile boundary.
 const REVIEW_ROAD_SPILL: f32 = 0.0;
 /// Empty space between complete, non-spilling atlas tiles.
@@ -1034,13 +1077,13 @@ const REVIEW_ATLAS_PITCH: f32 = REVIEW_BLOCK_SIZE + REVIEW_ATLAS_GUTTER;
 const REVIEW_CONTENT_HALF_EXTENT: f32 = 21.0;
 
 /// Exact XZ bounds of all review geometry relevant to framing. The forced
-/// atlas uses a 10u visible gutter after accounting for each tile's 4u road
-/// spill, so incompatible edge sockets can never visually touch.
+/// atlas uses a 10u visible gutter and road topology has zero spill.
 pub(crate) fn world_review_bounds() -> (Vec2, Vec2) {
-    // The 5x5 production roots are centered from -80 through +80. The 42u
+    // The odd production window is symmetric around origin. The 42u
     // seam-hiding ground is the widest geometry and roads have zero spill.
-    let production_min = Vec2::splat(-80.0 - REVIEW_CONTENT_HALF_EXTENT);
-    let production_max = Vec2::splat(80.0 + REVIEW_CONTENT_HALF_EXTENT);
+    let production_root_extent = (REVIEW_WINDOW_COUNT / 2) as f32 * REVIEW_BLOCK_SIZE;
+    let production_min = Vec2::splat(-production_root_extent - REVIEW_CONTENT_HALF_EXTENT);
+    let production_max = Vec2::splat(production_root_extent + REVIEW_CONTENT_HALF_EXTENT);
     let atlas_half_columns = (REVIEW_ATLAS_COLUMNS as f32 - 1.0) * 0.5;
     // Ground planes are 42u wide, but road spill reaches 24u from the root.
     let atlas_min = Vec2::new(
@@ -1078,6 +1121,7 @@ struct ReviewBlockMetadata {
     gx: i32,
     gz: i32,
     kind: &'static str,
+    district: District,
     sockets: [&'static str; 4],
     world_x: f32,
     world_z: f32,
@@ -1109,6 +1153,7 @@ struct ReviewMetadata {
     block_size: f32,
     production_window_count: i32,
     topology_version: u32,
+    district_version: u32,
     socket_order: [&'static str; 4],
     scene_bounds: ReviewBoundsMetadata,
     atlas: ReviewAtlasMetadata,
@@ -1119,9 +1164,6 @@ fn tile_kind_name(kind: TileKind) -> &'static str {
     use TileKind::*;
     match kind {
         Empty => "Empty",
-        Park => "Park",
-        Field => "Field",
-        Orchard => "Orchard",
         RoadNS => "RoadNS",
         RoadEW => "RoadEW",
         Cross => "Cross",
@@ -1175,8 +1217,38 @@ fn spawn_review_world(
             gx,
             gz,
             tile_from_edges(gx, gz),
+            district_for(gx, gz),
             ReviewTileSource::Production,
             None,
+        );
+    }
+    for (index, district) in [
+        District::DenseUrban,
+        District::LowRise,
+        District::Park,
+        District::Field,
+        District::Orchard,
+        District::WaterPark,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        spawn_review_tile(
+            &mut commands,
+            &mut meshes,
+            &textures,
+            &world_assets,
+            Vec3::new(
+                (index as f32 - 2.5) * REVIEW_ATLAS_PITCH,
+                0.0,
+                REVIEW_DISTRICT_ATLAS_Z,
+            ),
+            index as i32,
+            -2,
+            TileKind::Empty,
+            district,
+            ReviewTileSource::DistrictAtlas,
+            Some(index),
         );
     }
     for (index, &kind) in TILE_CATALOG.iter().enumerate() {
@@ -1195,6 +1267,7 @@ fn spawn_review_world(
             column as i32,
             row as i32,
             kind,
+            District::DenseUrban,
             ReviewTileSource::Atlas,
             Some(index),
         );
@@ -1211,6 +1284,7 @@ fn spawn_review_tile(
     gx: i32,
     gz: i32,
     kind: TileKind,
+    district: District,
     source: ReviewTileSource,
     catalog_index: Option<usize>,
 ) {
@@ -1218,7 +1292,12 @@ fn spawn_review_tile(
         .spawn((
             Transform::from_translation(position),
             Visibility::default(),
-            Block { gx, gz, kind },
+            Block {
+                gx,
+                gz,
+                kind,
+                district,
+            },
             ReviewTile {
                 source,
                 catalog_index,
@@ -1236,6 +1315,7 @@ fn spawn_review_tile(
         gz,
         seed,
         kind,
+        district,
     );
 }
 
@@ -1267,6 +1347,7 @@ fn build_review_metadata(world: &mut World) -> ReviewMetadata {
                 block.gx,
                 block.gz,
                 block.kind,
+                block.district,
                 *tile,
                 transform.translation,
             )
@@ -1293,18 +1374,20 @@ fn build_review_metadata(world: &mut World) -> ReviewMetadata {
         (roads, markings)
     };
     let mut blocks = Vec::with_capacity(tiles.len());
-    for (entity, gx, gz, kind, tile, translation) in tiles {
+    for (entity, gx, gz, kind, district, tile, translation) in tiles {
         let mut counts = ReviewCounts::default();
         count_review_descendants(world, entity, &road_meshes, &marking_meshes, &mut counts);
         blocks.push(ReviewBlockMetadata {
             source: match tile.source {
                 ReviewTileSource::Production => "production",
                 ReviewTileSource::Atlas => "atlas",
+                ReviewTileSource::DistrictAtlas => "district_atlas",
             },
             catalog_index: tile.catalog_index,
             gx,
             gz,
             kind: tile_kind_name(kind),
+            district,
             sockets: socket_names(kind),
             world_x: translation.x,
             world_z: translation.z,
@@ -1321,12 +1404,13 @@ fn build_review_metadata(world: &mut World) -> ReviewMetadata {
     });
     let (bounds_min, bounds_max) = world_review_bounds();
     ReviewMetadata {
-        schema: "roady-world-review-v1",
+        schema: "roady-world-review-v2",
         ready: true,
         seed: REVIEW_SEED,
         block_size: REVIEW_BLOCK_SIZE,
         production_window_count: REVIEW_WINDOW_COUNT,
         topology_version: 1,
+        district_version: 1,
         socket_order: ["west", "east", "south", "north"],
         scene_bounds: ReviewBoundsMetadata {
             min_x: bounds_min.x,
@@ -1559,6 +1643,7 @@ pub fn populate_block(
     gz: i32,
     seed: u32,
     kind: TileKind,
+    district: District,
 ) {
     let block = 40.0_f32; // matches GridConfig default; decorations are laid
     // out relative to this.
@@ -1570,9 +1655,10 @@ pub fn populate_block(
     let road_s = sock[S] == Edge::Road;
     let road_n = sock[N] == Edge::Road;
     let any_road = road_w || road_e || road_s || road_n;
-    let is_park = kind == TileKind::Park;
-    let is_field = kind == TileKind::Field;
-    let is_orchard = kind == TileKind::Orchard;
+    let presentation = district_presentation(district);
+    let is_park = presentation == DistrictPresentation::Park;
+    let is_field = presentation == DistrictPresentation::Field;
+    let is_orchard = presentation == DistrictPresentation::Orchard;
 
     // Block-local interior bounds: keep a 6.0u margin from any Road edge (so
     // obstacles never straddle a road), while None edges can use the full
@@ -1925,9 +2011,9 @@ pub fn populate_block(
         }
 
         // --- Interior decorations ---
-        // Park, Field and Orchard are dedicated non-urban branches: none can
-        // reach the buildings/lamps/T12 branch below. Empty and road-bearing
-        // tiles retain the existing urban decoration behavior. Interior
+        // Park, Field and Orchard presentations are dedicated non-urban
+        // branches: none can reach the buildings/lamps/T12 branch below.
+        // DenseUrban and LowRise retain the existing urban behavior. Interior
         // bounds are shrunk away from Road edges; None edges use the block.
         if is_park {
             // --- Park: more trees, no buildings/lamps/obstacles ---
@@ -1998,10 +2084,9 @@ pub fn populate_block(
                     0.0,
                     1,
                 ) else {
-                    // Slots are intentionally much farther apart than the
-                    // largest conservative footprint, so this is unreachable
-                    // unless that layout invariant is changed.
-                    debug_assert!(false, "field prop layout produced overlapping footprints");
+                    // A road-bearing field can reject a rural slot through the
+                    // shared road footprint path. Skipping it keeps all props
+                    // clear of topology without changing the district.
                     continue;
                 };
                 p.spawn((
@@ -2522,7 +2607,7 @@ const ORCHARD_LIMIT: f32 = 16.0;
 fn orchard_tree_layout(seed: u32) -> [Vec2; ORCHARD_TREE_COUNT] {
     const ACROSS: [f32; ORCHARD_ROWS] = [-10.0, 0.0, 10.0];
     const ALONG: [f32; ORCHARD_TREES_PER_ROW] = [-13.5, -4.5, 4.5, 13.5];
-    let rows_run_x = visual_coordinate_hash(seed as i32, (seed >> 16) as i32) & 1 == 0;
+    let rows_run_x = district_hash(seed as i32, (seed >> 16) as i32, 0x0cc4_4d5d) & 1 == 0;
     std::array::from_fn(|i| {
         let row = i / ORCHARD_TREES_PER_ROW;
         let tree = i % ORCHARD_TREES_PER_ROW;
@@ -2663,11 +2748,17 @@ fn spawn_block_at(
     gz: i32,
 ) {
     let kind = tile_from_edges(gx, gz);
+    let district = district_for(gx, gz);
     let root = commands
         .spawn((
             Transform::from_xyz(gx as f32 * block, 0.0, gz as f32 * block),
             Visibility::default(),
-            Block { gx, gz, kind },
+            Block {
+                gx,
+                gz,
+                kind,
+                district,
+            },
         ))
         .id();
     populate_block(
@@ -2680,6 +2771,7 @@ fn spawn_block_at(
         gz,
         seed_for(gx, gz),
         kind,
+        district,
     );
 }
 
@@ -3095,24 +3187,162 @@ mod tests {
     }
 
     #[test]
-    fn block_retains_authoritative_kind() {
+    fn district_bucket_boundaries_are_exact() {
+        let cases = [
+            (0, District::DenseUrban),
+            (2_999, District::DenseUrban),
+            (3_000, District::LowRise),
+            (5_799, District::LowRise),
+            (5_800, District::Park),
+            (7_199, District::Park),
+            (7_200, District::Field),
+            (8_399, District::Field),
+            (8_400, District::Orchard),
+            (9_399, District::Orchard),
+            (9_400, District::WaterPark),
+            (9_999, District::WaterPark),
+            (10_000, District::DenseUrban),
+        ];
+        for (bucket, expected) in cases {
+            assert_eq!(district_from_bucket(bucket), expected);
+        }
+    }
+
+    #[test]
+    fn district_is_deterministic_at_negative_coordinates() {
+        for gx in -100..=0 {
+            for gz in -100..=0 {
+                assert_eq!(district_for(gx, gz), district_for(gx, gz));
+                assert_eq!(gx.div_euclid(4), (gx - gx.rem_euclid(4)) / 4);
+                assert_eq!(gz.div_euclid(4), (gz - gz.rem_euclid(4)) / 4);
+            }
+        }
+    }
+
+    #[test]
+    fn district_large_sample_matches_weights() {
+        let mut counts = [0usize; 6];
+        let side = 500;
+        for gx in -side..side {
+            for gz in -side..side {
+                let index = match district_for(gx, gz) {
+                    District::DenseUrban => 0,
+                    District::LowRise => 1,
+                    District::Park => 2,
+                    District::Field => 3,
+                    District::Orchard => 4,
+                    District::WaterPark => 5,
+                };
+                counts[index] += 1;
+            }
+        }
+        let total = (side * 2 * side * 2) as f32;
+        for (count, expected) in counts.into_iter().zip([0.30, 0.28, 0.14, 0.12, 0.10, 0.06]) {
+            let observed = count as f32 / total;
+            assert!(
+                (observed - expected).abs() <= 0.02,
+                "{observed} vs {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn districts_form_patches_but_keep_local_variation() {
+        let mut matching_neighbors = 0usize;
+        let mut neighbor_pairs = 0usize;
+        let mut varied_macros = 0usize;
+        for macro_x in -40..40 {
+            for macro_z in -40..40 {
+                let mut values = BTreeSet::new();
+                for local_x in 0..4 {
+                    for local_z in 0..4 {
+                        let gx = macro_x * 4 + local_x;
+                        let gz = macro_z * 4 + local_z;
+                        let district = district_for(gx, gz);
+                        values.insert(format!("{district:?}"));
+                        if local_x < 3 {
+                            neighbor_pairs += 1;
+                            matching_neighbors += usize::from(district == district_for(gx + 1, gz));
+                        }
+                        if local_z < 3 {
+                            neighbor_pairs += 1;
+                            matching_neighbors += usize::from(district == district_for(gx, gz + 1));
+                        }
+                    }
+                }
+                varied_macros += usize::from(values.len() > 1);
+            }
+        }
+        let neighbor_rate = matching_neighbors as f32 / neighbor_pairs as f32;
+        let independent_baseline = 0.30_f32.powi(2)
+            + 0.28_f32.powi(2)
+            + 0.14_f32.powi(2)
+            + 0.12_f32.powi(2)
+            + 0.10_f32.powi(2)
+            + 0.06_f32.powi(2);
+        assert!(neighbor_rate > independent_baseline + 0.20);
+        assert!(
+            varied_macros > 100,
+            "districts had no meaningful local variation"
+        );
+    }
+
+    #[test]
+    fn presentation_mapping_is_minimal() {
+        assert_eq!(
+            district_presentation(District::DenseUrban),
+            DistrictPresentation::Urban
+        );
+        assert_eq!(
+            district_presentation(District::LowRise),
+            DistrictPresentation::Urban
+        );
+        assert_eq!(
+            district_presentation(District::Park),
+            DistrictPresentation::Park
+        );
+        assert_eq!(
+            district_presentation(District::WaterPark),
+            DistrictPresentation::Park
+        );
+        assert_eq!(
+            district_presentation(District::Field),
+            DistrictPresentation::Field
+        );
+        assert_eq!(
+            district_presentation(District::Orchard),
+            DistrictPresentation::Orchard
+        );
+    }
+
+    #[test]
+    fn block_retains_authoritative_kind_and_district() {
         let kind = road_tile_kind(-3, 7);
+        let district = District::WaterPark;
         let block = Block {
             gx: -3,
             gz: 7,
             kind,
+            district,
         };
         assert_eq!(block.kind, kind);
+        assert_eq!(block.district, district);
     }
 
     #[test]
     fn review_catalog_is_exhaustive_unique_and_socket_stable() {
-        assert_eq!(TILE_CATALOG.len(), 19);
+        assert_eq!(TILE_CATALOG.len(), 16);
+        assert_eq!(TILE_CATALOG[0], TileKind::Empty);
         let names: BTreeSet<_> = TILE_CATALOG
             .iter()
             .map(|&kind| tile_kind_name(kind))
             .collect();
+        let patterns: BTreeSet<_> = TILE_CATALOG
+            .iter()
+            .map(|&kind| sockets(kind).map(|edge| edge == Edge::Road))
+            .collect();
         assert_eq!(names.len(), TILE_CATALOG.len());
+        assert_eq!(patterns.len(), 16);
         for &kind in &TILE_CATALOG {
             assert_eq!(socket_names(kind).len(), 4);
             assert!(
@@ -3167,17 +3397,21 @@ mod tests {
         let second = build_review_metadata(app.world_mut());
         assert_eq!(first, second);
         assert!(first.ready);
-        assert_eq!(first.schema, "roady-world-review-v1");
+        assert_eq!(first.schema, "roady-world-review-v2");
         assert_eq!(first.seed, REVIEW_SEED);
         assert_eq!(first.topology_version, 1);
-        assert_eq!(first.blocks.len(), 25 + TILE_CATALOG.len());
+        assert_eq!(first.district_version, 1);
+        assert_eq!(
+            first.blocks.len(),
+            (REVIEW_WINDOW_COUNT * REVIEW_WINDOW_COUNT) as usize + TILE_CATALOG.len() + 6
+        );
         assert_eq!(
             first
                 .blocks
                 .iter()
                 .filter(|block| block.source == "production")
                 .count(),
-            25
+            (REVIEW_WINDOW_COUNT * REVIEW_WINDOW_COUNT) as usize
         );
         let atlas: Vec<_> = first
             .blocks
@@ -3186,9 +3420,20 @@ mod tests {
             .collect();
         assert_eq!(atlas.len(), TILE_CATALOG.len());
         assert!(atlas.iter().enumerate().all(|(index, block)| {
-            block.catalog_index == Some(index) && block.kind == tile_kind_name(TILE_CATALOG[index])
+            block.catalog_index == Some(index)
+                && block.kind == tile_kind_name(TILE_CATALOG[index])
+                && block.district == District::DenseUrban
         }));
         assert!(first.blocks.iter().all(|block| block.counts.mesh3d > 0));
+        assert!(first.blocks.iter().all(|block| matches!(
+            block.district,
+            District::DenseUrban
+                | District::LowRise
+                | District::Park
+                | District::Field
+                | District::Orchard
+                | District::WaterPark
+        )));
         assert!(first.blocks.iter().any(|block| block.counts.roads > 0));
         assert!(first.blocks.iter().any(|block| block.counts.curbs > 0));
         assert!(first.blocks.iter().any(|block| block.counts.markings > 0));
@@ -3216,6 +3461,38 @@ mod tests {
                 "trees",
             ])
         );
+    }
+
+    #[test]
+    fn review_metadata_uses_stored_district_without_recomputation() {
+        let mut app = review_test_app();
+        let target = {
+            let world = app.world_mut();
+            let mut query = world.query::<(Entity, &Block, &ReviewTile)>();
+            query
+                .iter(world)
+                .find(|(_, _, tile)| tile.source == ReviewTileSource::Production)
+                .map(|(entity, block, _)| (entity, block.gx, block.gz))
+                .unwrap()
+        };
+        let generated = district_for(target.1, target.2);
+        let stored = if generated == District::WaterPark {
+            District::DenseUrban
+        } else {
+            District::WaterPark
+        };
+        app.world_mut().get_mut::<Block>(target.0).unwrap().district = stored;
+
+        let metadata = build_review_metadata(app.world_mut());
+        let block = metadata
+            .blocks
+            .iter()
+            .find(|block| {
+                block.source == "production" && block.gx == target.1 && block.gz == target.2
+            })
+            .unwrap();
+        assert_eq!(block.district, stored);
+        assert_ne!(block.district, generated);
     }
 
     #[test]
@@ -3248,41 +3525,42 @@ mod tests {
     }
 
     #[test]
-    fn all_none_visual_variants_have_only_none_sockets() {
-        for kind in [
-            TileKind::Empty,
-            TileKind::Park,
-            TileKind::Field,
-            TileKind::Orchard,
-        ] {
-            assert_eq!(sockets(kind), [Edge::None; 4], "{kind:?}");
-        }
-    }
-
-    /// Every visual variant is selected at reachable all-None coordinates,
-    /// and selection is stable across repeated generation/recycling calls.
-    #[test]
-    fn all_none_visual_variants_are_deterministic_and_reachable() {
-        let mut reached = [false; 4];
+    fn all_none_topology_is_always_canonical_empty() {
+        assert_eq!(sockets(TileKind::Empty), [Edge::None; 4]);
         for gx in -200..=200 {
             for gz in -200..=200 {
-                if sockets(tile_from_edges(gx, gz)) != [Edge::None; 4] {
-                    continue;
-                }
-                let first = tile_from_edges(gx, gz);
-                assert_eq!(first, tile_from_edges(gx, gz));
-                assert_eq!(first, all_none_variant(gx, gz));
-                assert_eq!(sockets(first), [Edge::None; 4]);
-                match first {
-                    TileKind::Empty => reached[0] = true,
-                    TileKind::Park => reached[1] = true,
-                    TileKind::Field => reached[2] = true,
-                    TileKind::Orchard => reached[3] = true,
-                    other => panic!("all-None coordinate selected {other:?}"),
+                let kind = tile_from_edges(gx, gz);
+                if sockets(kind) == [Edge::None; 4] {
+                    assert_eq!(kind, TileKind::Empty);
                 }
             }
         }
-        assert_eq!(reached, [true; 4], "not all visual variants were reachable");
+    }
+
+    #[test]
+    fn district_cannot_change_topology_sockets() {
+        for gx in -100..=100 {
+            for gz in -100..=100 {
+                let kind = tile_from_edges(gx, gz);
+                let expected = sockets(kind);
+                for district in [
+                    District::DenseUrban,
+                    District::LowRise,
+                    District::Park,
+                    District::Field,
+                    District::Orchard,
+                    District::WaterPark,
+                ] {
+                    let block = Block {
+                        gx,
+                        gz,
+                        kind,
+                        district,
+                    };
+                    assert_eq!(sockets(block.kind), expected);
+                }
+            }
+        }
     }
 
     #[test]
@@ -3321,7 +3599,7 @@ mod tests {
     }
 
     #[test]
-    fn all_19_tile_road_plans_have_pad_plus_one_arm_per_socket() {
+    fn all_16_tile_road_plans_have_pad_plus_one_arm_per_socket() {
         for &kind in &TILE_CATALOG {
             let arm_count = sockets(kind)
                 .into_iter()
@@ -3425,9 +3703,6 @@ mod tests {
 
         let cases = [
             (Empty, [false; 4]),
-            (Park, [false; 4]),
-            (Field, [false; 4]),
-            (Orchard, [false; 4]),
             (RoadNS, [false; 4]),
             (RoadEW, [false; 4]),
             (Cross, [true; 4]),

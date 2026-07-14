@@ -157,10 +157,12 @@ def main() -> int:
         raw = page.evaluate("window.__ROADY_WORLD_REVIEW__")
         metadata = json.loads(raw)
         if (
-            metadata.get("schema") != "roady-world-review-v1"
+            metadata.get("schema") != "roady-world-review-v2"
             or not metadata.get("ready")
             or metadata.get("topology_version") != 1
+            or metadata.get("district_version") != 1
             or metadata.get("atlas", {}).get("road_spill") != 0
+            or any("district" not in block for block in metadata.get("blocks", []))
         ):
             raise RuntimeError("unexpected or incomplete Roady world-review metadata")
 
