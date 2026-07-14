@@ -117,7 +117,6 @@ const DRIFT_STEER_DEADZONE: f32 = 0.05;
 // Pure player-car geometry shared by spawning and footprint tests. Keeping the
 // wheel/chassis/fascia dimensions together makes it difficult for a cosmetic
 // tweak to separate the running gear from the body again.
-const CAR_RADIUS: f32 = 0.9;
 const BODY_AXES: Vec3 = Vec3::new(0.5, 0.25, 1.0);
 const BODY_CENTER_Y: f32 = 0.35;
 const CHASSIS_WIDTH: f32 = 0.82;
@@ -144,7 +143,6 @@ const WHEEL_POSITIONS: [(f32, f32); 4] = [
     (-WHEEL_X, -WHEEL_Z),
 ];
 
-#[cfg(test)]
 const fn max_f32(a: f32, b: f32) -> f32 {
     if a > b { a } else { b }
 }
@@ -155,7 +153,6 @@ const fn bumper_outer_z() -> f32 {
 }
 
 /// Half-extents of everything that contacts or overhangs the ground plane.
-#[cfg(test)]
 const fn car_footprint_half_extents() -> (f32, f32) {
     (
         max_f32(BODY_AXES.x, WHEEL_X + WHEEL_WIDTH * 0.5),
@@ -1046,38 +1043,48 @@ fn collision_outcome(mut contacts: Vec<SolidContact>) -> CollisionOutcome {
     }
 }
 
-/// Circle-vs-AABB contact from immutable world-space positions.
-fn solid_contact_geometry(player: Vec2, obstacle: Vec2, half_extents: Vec2) -> Option<(Vec2, f32)> {
-    let delta = player - obstacle;
-    let closest = delta.clamp(-half_extents, half_extents);
-    let outside = delta - closest;
-    let dist2 = outside.length_squared();
-    if dist2 >= CAR_RADIUS * CAR_RADIUS {
+/// Oriented visible car footprint against a world-axis-aligned obstacle.
+/// SAT checks the two world axes and the car's local side/forward axes, then
+/// returns the minimum translation that pushes the car away from the box.
+fn oriented_contact_geometry(
+    player: Vec2,
+    heading: f32,
+    obstacle: Vec2,
+    obstacle_half: Vec2,
+) -> Option<(Vec2, f32)> {
+    if !player.is_finite()
+        || !obstacle.is_finite()
+        || !obstacle_half.is_finite()
+        || !heading.is_finite()
+    {
         return None;
     }
-
-    if dist2 > 1e-6 {
-        let dist = dist2.sqrt();
-        return Some((outside / dist, CAR_RADIUS - dist));
+    let (half_width, half_length) = car_footprint_half_extents();
+    let side = Vec2::new(heading.cos(), -heading.sin());
+    let forward = Vec2::new(-heading.sin(), -heading.cos());
+    let delta = player - obstacle;
+    let mut best: Option<(Vec2, f32)> = None;
+    for axis in [Vec2::X, Vec2::Y, side, forward] {
+        let car_radius = half_width * side.dot(axis).abs() + half_length * forward.dot(axis).abs();
+        let box_radius = obstacle_half.x * axis.x.abs() + obstacle_half.y * axis.y.abs();
+        let signed_distance = delta.dot(axis);
+        let overlap = car_radius + box_radius - signed_distance.abs();
+        // Strict tangency remains non-contact, matching the old predicate.
+        if overlap <= 1e-6 {
+            return None;
+        }
+        let normal = if signed_distance >= 0.0 { axis } else { -axis };
+        if best.is_none_or(|(_, best_overlap)| overlap < best_overlap) {
+            best = Some((normal, overlap));
+        }
     }
-
-    // Center inside the box: eject along the least-penetrated axis. Exact
-    // corner ties consistently choose Z.
-    let pen_x = half_extents.x - delta.x.abs();
-    let pen_z = half_extents.y - delta.y.abs();
-    if pen_x < pen_z {
-        let sign = if delta.x >= 0.0 { 1.0 } else { -1.0 };
-        Some((Vec2::new(sign, 0.0), pen_x + CAR_RADIUS))
-    } else {
-        let sign = if delta.y >= 0.0 { 1.0 } else { -1.0 };
-        Some((Vec2::new(0.0, sign), pen_z + CAR_RADIUS))
-    }
+    best
 }
 
 /// Ground-level physics + obstacle collisions, run right after `move_car`:
 /// - hop the car up onto any raised curb it drives over (smoothed Y lerp);
 /// - push the car out of any solid static obstacle or traffic car via
-///   circle-vs-AABB and kill speed into it, emitting an `ObstacleHit` message
+///   oriented-footprint-vs-AABB and kill speed into it, emitting an `ObstacleHit` message
 ///   whose impact is the player speed for static objects and relative speed
 ///   for traffic.
 pub fn physics_collisions(
@@ -1101,9 +1108,14 @@ pub fn physics_collisions(
     let mut target_y = 0.0_f32;
     for (curb, ct) in &curbs {
         let cpos = ct.translation();
-        let dx = tf.translation.x - cpos.x;
-        let dz = tf.translation.z - cpos.z;
-        if dx.abs() <= curb.half_x && dz.abs() <= curb.half_z {
+        if oriented_contact_geometry(
+            Vec2::new(tf.translation.x, tf.translation.z),
+            car.heading,
+            Vec2::new(cpos.x, cpos.z),
+            Vec2::new(curb.half_x, curb.half_z),
+        )
+        .is_some()
+        {
             target_y = target_y.max(curb.height);
         }
     }
@@ -1127,8 +1139,9 @@ pub fn physics_collisions(
         }
         let opos = ot.translation();
         let obstacle_pos = Vec2::new(opos.x, opos.z);
-        let Some((normal, penetration)) = solid_contact_geometry(
+        let Some((normal, penetration)) = oriented_contact_geometry(
             player_pos,
+            car.heading,
             obstacle_pos,
             Vec2::new(collider.half_x, collider.half_z),
         ) else {
@@ -1203,24 +1216,20 @@ fn cone_collisions(
             continue;
         }
         let cpos = ct.translation();
-        let dx = car_t.translation.x - cpos.x;
-        let dz = car_t.translation.z - cpos.z;
-        let closest_x = dx.clamp(-collider.half_x, collider.half_x);
-        let closest_z = dz.clamp(-collider.half_z, collider.half_z);
-        let px = dx - closest_x;
-        let pz = dz - closest_z;
-        let dist2 = px * px + pz * pz;
-        if dist2 < CAR_RADIUS * CAR_RADIUS {
-            // Contact normal pointing from the car toward the cone (the
-            // direction the cone flies away). For a head-on hit this is the
-            // car's forward direction; for a side clip it points outward.
-            let normal = if dist2 > 1e-6 {
-                let dist = dist2.sqrt();
-                Vec2::new(-px / dist, -pz / dist)
-            } else {
-                // Centers coincide: launch along the car's travel direction.
-                player_velocity(travel_angle, 1.0).normalize_or_zero()
-            };
+        let car_pos = Vec2::new(car_t.translation.x, car_t.translation.z);
+        let cone_pos = Vec2::new(cpos.x, cpos.z);
+        if let Some((away_from_cone, _)) = oriented_contact_geometry(
+            car_pos,
+            car.heading,
+            cone_pos,
+            Vec2::new(collider.half_x, collider.half_z),
+        ) {
+            // SAT normal points from cone toward car; launch the cone in the
+            // opposite direction. Coincident centers fall back to travel.
+            let mut normal = -away_from_cone;
+            if (car_pos - cone_pos).length_squared() <= 1e-6 {
+                normal = player_velocity(travel_angle, 1.0).normalize_or_zero();
+            }
             // Launch the cone (bounded, deterministic) on its existing entity.
             motion.vel = cone_launch_velocity(player_vel, normal);
             motion.spin_axis = cone_spin_axis(normal);
@@ -1597,6 +1606,104 @@ mod tests {
             10.0,
         );
         assert!(reverse >= -10.0 && reverse < -9.9);
+    }
+
+    #[test]
+    fn oriented_footprint_matches_visible_side_nose_and_rotation() {
+        let footprint = Vec2::from(car_footprint_half_extents());
+        let box_half = Vec2::splat(0.5);
+        // Strict tangency is not overlap.
+        assert!(
+            oriented_contact_geometry(
+                Vec2::new(box_half.x + footprint.x, 0.0),
+                0.0,
+                Vec2::ZERO,
+                box_half,
+            )
+            .is_none()
+        );
+        assert!(
+            oriented_contact_geometry(
+                Vec2::new(0.0, box_half.y + footprint.y),
+                0.0,
+                Vec2::ZERO,
+                box_half,
+            )
+            .is_none()
+        );
+        // A quarter turn swaps width and length in world axes.
+        assert!(
+            oriented_contact_geometry(
+                Vec2::new(box_half.x + footprint.y, 0.0),
+                FRAC_PI_2,
+                Vec2::ZERO,
+                box_half,
+            )
+            .is_none()
+        );
+        assert!(
+            oriented_contact_geometry(
+                Vec2::new(0.0, box_half.y + footprint.x),
+                FRAC_PI_2,
+                Vec2::ZERO,
+                box_half,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn oriented_footprint_shallow_overlap_pushes_to_exact_separation() {
+        let footprint = Vec2::from(car_footprint_half_extents());
+        let box_half = Vec2::splat(0.5);
+        let player = Vec2::new(box_half.x + footprint.x - 0.1, 0.0);
+        let (normal, penetration) = oriented_contact_geometry(player, 0.0, Vec2::ZERO, box_half)
+            .expect("shallow side overlap");
+        assert_eq!(normal, Vec2::X);
+        assert!((penetration - 0.1).abs() < 1e-5);
+        assert!(
+            oriented_contact_geometry(player + normal * penetration, 0.0, Vec2::ZERO, box_half,)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn diagonal_and_centered_oriented_contacts_are_finite_and_deterministic() {
+        let diagonal = oriented_contact_geometry(
+            Vec2::new(0.9, 0.9),
+            std::f32::consts::FRAC_PI_4,
+            Vec2::ZERO,
+            Vec2::splat(0.5),
+        )
+        .expect("diagonal footprint overlap");
+        assert!(diagonal.0.is_finite() && diagonal.1.is_finite() && diagonal.1 > 0.0);
+
+        let centered_a = oriented_contact_geometry(Vec2::ZERO, 0.0, Vec2::ZERO, Vec2::splat(0.5))
+            .expect("centered overlap");
+        let centered_b = oriented_contact_geometry(Vec2::ZERO, 0.0, Vec2::ZERO, Vec2::splat(0.5))
+            .expect("repeat centered overlap");
+        assert_eq!(centered_a, centered_b);
+        assert!(centered_a.0.is_finite() && centered_a.1.is_finite());
+    }
+
+    #[test]
+    fn cone_launch_normal_points_from_car_toward_cone() {
+        let car = Vec2::ZERO;
+        for cone in [Vec2::new(0.6, 0.0), Vec2::new(0.0, -1.0)] {
+            let (away_from_cone, _) = oriented_contact_geometry(car, 0.0, cone, Vec2::splat(0.15))
+                .expect("cone overlaps visible footprint");
+            let launch_normal = -away_from_cone;
+            assert!(launch_normal.dot((cone - car).normalize()) > 0.99);
+        }
+    }
+
+    #[test]
+    fn old_circle_side_threshold_no_longer_causes_air_gap() {
+        // Old radius 0.9 collided here; visible half-width 0.56 does not.
+        assert!(
+            oriented_contact_geometry(Vec2::new(1.2, 0.0), 0.0, Vec2::ZERO, Vec2::splat(0.5),)
+                .is_none()
+        );
     }
 
     #[test]

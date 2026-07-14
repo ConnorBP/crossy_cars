@@ -56,7 +56,7 @@ const CHICKEN_SPEED_RATIO: f32 = 0.2;
 /// oscillating vertical + sway offset.
 const WADDLE_SPEED: f32 = 8.0;
 
-/// Car-to-chicken hit distance (XZ plane). ~1.0 matches the car's ~0.9 radius.
+/// Forgiving car-to-chicken interaction distance in the XZ plane.
 const HIT_RADIUS: f32 = 1.0;
 
 /// Chickens farther than this from the car are recycled (despawned + respawned

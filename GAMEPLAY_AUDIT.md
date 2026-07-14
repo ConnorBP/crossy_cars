@@ -117,7 +117,7 @@ All values verified against source; citations are `file::CONSTANT` or `file::fun
 | Coast rate | 2.0 (`COAST_RESPONSE_RATE`) | `car.rs::next_speed` |
 | Brake rate | 4.0 (`BRAKE_RESPONSE_RATE`); brake dominates throttle | `car.rs::next_speed` |
 | Brake time 12→0 | ~1.5–2.0 s | test `braking_is_progressive_but_stops_in_a_reasonable_time` |
-| Car radius | 0.9 u | `car.rs::CAR_RADIUS` |
+| Car solid footprint | 1.12 x 2.00 u, oriented with heading | `car.rs::car_footprint_half_extents` |
 | SpeedBoost | 4 s; +20 u/s² accel; cap 19.2 u/s (1.6× max); non-stackable (refreshes) | `pickups.rs` |
 
 ### Populations & spawns
