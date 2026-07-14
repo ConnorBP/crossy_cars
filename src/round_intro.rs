@@ -1,6 +1,8 @@
 use bevy::prelude::*;
 use bevy::text::{FontSize, TextLayout};
 
+use crate::car::Car;
+use crate::chickens::{ChickenAssets, spawn_chicken_visual};
 use crate::countdown::Countdown;
 use crate::game::SpawnSet;
 use crate::game::resources::RoundActive;
@@ -10,8 +12,8 @@ use crate::objectives::{
 };
 use crate::settings::Settings;
 
-const HOLD_SECS: f32 = 1.2;
-const END_SECS: f32 = 2.1;
+const HOLD_SECS: f32 = 1.0;
+const END_SECS: f32 = PLUS_ONE_IMPACT_SECS;
 const TOUCH_BAND_HEIGHT: f32 = 44.0;
 
 #[derive(Resource, Default)]
@@ -24,6 +26,71 @@ struct RoundIntroRoot;
 
 #[derive(Component)]
 struct MissionAnnouncementText;
+
+#[derive(Component)]
+struct DemoChicken {
+    start: Vec3,
+    target: Vec3,
+}
+
+#[derive(Component)]
+struct DemoPlusOne;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PlusOneVisual {
+    alpha: f32,
+    visible: bool,
+}
+
+const PLUS_ONE_FADE_START: f32 = 2.1;
+const PLUS_ONE_FADE_END: f32 = 2.70;
+const PLUS_ONE_POP_TOP: f32 = 72.0;
+const PLUS_ONE_RISE_TOP: f32 = 64.0;
+const PLUS_ONE_FONT: f32 = 38.0;
+const PLUS_ONE_IMPACT_SECS: f32 = 1.35;
+
+fn plus_one_visual(elapsed: f32, reduced_motion: bool) -> PlusOneVisual {
+    if elapsed < PLUS_ONE_IMPACT_SECS {
+        return PlusOneVisual {
+            alpha: 0.0,
+            visible: false,
+        };
+    }
+    if reduced_motion {
+        return PlusOneVisual {
+            alpha: 1.0,
+            visible: elapsed < PLUS_ONE_FADE_END,
+        };
+    }
+    if elapsed < PLUS_ONE_IMPACT_SECS {
+        return PlusOneVisual {
+            alpha: 0.0,
+            visible: false,
+        };
+    }
+    let alpha = if elapsed < PLUS_ONE_FADE_START {
+        1.0
+    } else if elapsed < PLUS_ONE_FADE_END {
+        1.0 - (elapsed - PLUS_ONE_FADE_START) / (PLUS_ONE_FADE_END - PLUS_ONE_FADE_START)
+    } else {
+        0.0
+    }
+    .clamp(0.0, 1.0);
+    PlusOneVisual {
+        alpha,
+        visible: elapsed < PLUS_ONE_FADE_END,
+    }
+}
+
+fn plus_one_top(elapsed: f32, reduced_motion: bool) -> f32 {
+    if reduced_motion || elapsed <= PLUS_ONE_IMPACT_SECS {
+        return PLUS_ONE_POP_TOP;
+    }
+    let t = ((elapsed - PLUS_ONE_IMPACT_SECS) / (PLUS_ONE_FADE_END - PLUS_ONE_IMPACT_SECS))
+        .clamp(0.0, 1.0);
+    let eased = t * t * (3.0 - 2.0 * t);
+    PLUS_ONE_POP_TOP - (PLUS_ONE_POP_TOP - PLUS_ONE_RISE_TOP) * eased
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct MissionVisual {
@@ -93,6 +160,8 @@ fn setup_round_intro(
     round_active: Res<RoundActive>,
     objective: Res<ActiveObjective>,
     windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
+    assets: Res<ChickenAssets>,
+    car: Query<&Transform, With<Car>>,
     mut state: ResMut<RoundIntroState>,
 ) {
     if round_active.0 {
@@ -103,6 +172,38 @@ fn setup_round_intro(
         .map(|window| (window.width(), window.height()))
         .unwrap_or((960.0, 480.0));
     state.active = true;
+    let car_t = car.single().ok().copied().unwrap_or_default();
+    let start = car_t.translation + Vec3::new(2.4, 0.0, -2.8);
+    let target = car_t.translation + Vec3::new(0.45, 0.0, -0.75);
+    let demo = spawn_chicken_visual(
+        &mut commands,
+        &assets,
+        Transform::from_translation(start).with_rotation(Quat::from_rotation_y(-0.6)),
+    );
+    commands
+        .entity(demo)
+        .insert((DemoChicken { start, target }, RoundIntroRoot));
+    commands.spawn((
+        Node {
+            position_type: PositionType::Absolute,
+            left: px(0.0),
+            top: Val::Percent(PLUS_ONE_POP_TOP),
+            width: Val::Percent(100.0),
+            justify_content: JustifyContent::Center,
+            ..default()
+        },
+        Text::new("DEMO +1 BASE SCORE"),
+        TextFont {
+            font_size: FontSize::Px(PLUS_ONE_FONT),
+            ..default()
+        },
+        TextColor(Color::srgba(1.0, 0.72, 0.18, 0.0)),
+        TextLayout::justify(Justify::Center),
+        Visibility::Hidden,
+        GlobalZIndex(81),
+        DemoPlusOne,
+        RoundIntroRoot,
+    ));
     commands
         .spawn((
             mission_panel_node(width, height),
@@ -128,15 +229,37 @@ fn update_round_intro(
     settings: Res<Settings>,
     mut state: ResMut<RoundIntroState>,
     roots: Query<Entity, With<RoundIntroRoot>>,
-    mut mission_hud: Query<&mut Visibility, With<ObjectiveHudRoot>>,
+    mut demo_chickens: Query<(&DemoChicken, &mut Transform), Without<Car>>,
+    plus_ones: Query<Entity, With<DemoPlusOne>>,
+    mut plus_one_visuals: Query<
+        (&mut Visibility, &mut Node, &mut TextColor),
+        (
+            With<DemoPlusOne>,
+            Without<MissionAnnouncementText>,
+            Without<ObjectiveHudRoot>,
+        ),
+    >,
+    mut mission_hud: Query<&mut Visibility, (With<ObjectiveHudRoot>, Without<DemoPlusOne>)>,
     mut panels: Query<&mut BackgroundColor, With<RoundIntroRoot>>,
-    mut texts: Query<&mut TextColor, With<MissionAnnouncementText>>,
+    mut texts: Query<&mut TextColor, (With<MissionAnnouncementText>, Without<DemoPlusOne>)>,
 ) {
     if !state.active {
         return;
     }
     let elapsed = (3.0 - countdown.t).max(0.0);
     let visual = mission_visual(elapsed, settings.reduced_motion);
+    for (demo, mut transform) in &mut demo_chickens {
+        if elapsed >= PLUS_ONE_IMPACT_SECS {
+            transform.translation = demo.target;
+            transform.scale = Vec3::ZERO;
+        } else if settings.reduced_motion {
+            transform.translation = demo.target + Vec3::new(0.9, 0.0, 0.0);
+        } else {
+            let t = ((elapsed - 0.35) / 1.0).clamp(0.0, 1.0);
+            let eased = t * t * (3.0 - 2.0 * t);
+            transform.translation = demo.start.lerp(demo.target, eased);
+        }
+    }
     for mut visibility in &mut mission_hud {
         *visibility = if visual.visible {
             Visibility::Hidden
@@ -150,10 +273,30 @@ fn update_round_intro(
     for mut color in &mut texts {
         color.0 = color.0.with_alpha(visual.alpha);
     }
-    if !visual.visible {
-        for entity in &roots {
+    let p1_visual = plus_one_visual(elapsed, settings.reduced_motion);
+    for (mut visibility, mut node, mut color) in &mut plus_one_visuals {
+        *visibility = if p1_visual.visible {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        node.top = Val::Percent(plus_one_top(elapsed, settings.reduced_motion));
+        color.0 = color.0.with_alpha(p1_visual.alpha);
+    }
+    if elapsed >= PLUS_ONE_FADE_END {
+        for entity in &plus_ones {
             commands.entity(entity).despawn();
         }
+    }
+    if !visual.visible {
+        for entity in &roots {
+            if plus_ones.get(entity).is_err() {
+                commands.entity(entity).despawn();
+            }
+        }
+        state.active = elapsed < PLUS_ONE_FADE_END;
+    }
+    if elapsed >= PLUS_ONE_FADE_END {
         state.active = false;
     }
 }
@@ -176,7 +319,104 @@ fn cleanup_round_intro(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::objectives::ObjectiveKind;
+    use crate::chickens::Chicken;
+    use crate::combos::Combo;
+    use crate::game::events::{ChickenHit, CoinCollected};
+    use crate::game::resources::{Score, TimeLeft};
+    use crate::health::Health;
+    use crate::objectives::{ObjectiveCompleted, ObjectiveKind};
+
+    #[test]
+    fn real_intro_is_presentation_only_and_cleanup_is_complete() {
+        let mut app = App::new();
+        app.init_resource::<Assets<Mesh>>()
+            .init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<ChickenAssets>()
+            .insert_resource(RoundActive(false))
+            .insert_resource(ActiveObjective::new(ObjectiveKind::HitChickens {
+                target: 1,
+            }))
+            .insert_resource(Settings::default())
+            .insert_resource({
+                let mut countdown = Countdown::default();
+                countdown.t = 3.0;
+                countdown
+            })
+            .insert_resource(Score {
+                chickens: 7,
+                coins: 3,
+            })
+            .insert_resource(Combo::default())
+            .insert_resource(TimeLeft(42.0))
+            .insert_resource(Health(73.0))
+            .init_resource::<RoundIntroState>()
+            .add_message::<ChickenHit>()
+            .add_message::<CoinCollected>()
+            .add_message::<ObjectiveCompleted>()
+            .add_systems(Startup, setup_round_intro)
+            .add_systems(Update, update_round_intro);
+        app.world_mut()
+            .spawn((Window::default(), bevy::window::PrimaryWindow));
+        app.world_mut().spawn((
+            Car {
+                speed: 0.0,
+                heading: 0.0,
+                drift: 0.0,
+            },
+            Transform::default(),
+        ));
+
+        app.update();
+        let world = app.world_mut();
+        let mut demos = world.query::<(&DemoChicken, Option<&Chicken>)>();
+        let demo_rows: Vec<_> = demos.iter(world).collect();
+        assert_eq!(demo_rows.len(), 1);
+        assert!(
+            demo_rows[0].1.is_none(),
+            "demo must not enter real Chicken queries"
+        );
+
+        world.resource_mut::<Countdown>().t = 0.7;
+        app.update();
+        assert_eq!(app.world().resource::<Score>().chickens, 7);
+        assert_eq!(app.world().resource::<Score>().coins, 3);
+        assert_eq!(app.world().resource::<Combo>().multiplier, 1);
+        assert_eq!(app.world().resource::<Combo>().timer, 0.0);
+        assert_eq!(app.world().resource::<TimeLeft>().0, 42.0);
+        assert_eq!(app.world().resource::<Health>().0, 73.0);
+        assert_eq!(app.world().resource::<ActiveObjective>().progress, 0);
+        assert_eq!(app.world().resource::<Messages<ChickenHit>>().len(), 0);
+        assert_eq!(app.world().resource::<Messages<CoinCollected>>().len(), 0);
+        assert_eq!(
+            app.world().resource::<Messages<ObjectiveCompleted>>().len(),
+            0
+        );
+
+        app.add_systems(PostUpdate, cleanup_round_intro);
+        app.update();
+        let world = app.world_mut();
+        assert_eq!(
+            world
+                .query_filtered::<Entity, With<RoundIntroRoot>>()
+                .iter(world)
+                .count(),
+            0
+        );
+        assert_eq!(
+            world
+                .query_filtered::<Entity, With<DemoChicken>>()
+                .iter(world)
+                .count(),
+            0
+        );
+        assert_eq!(
+            world
+                .query_filtered::<Entity, With<DemoPlusOne>>()
+                .iter(world)
+                .count(),
+            0
+        );
+    }
 
     #[test]
     fn mission_visual_has_exact_hold_fade_and_reduced_motion_boundaries() {
@@ -188,7 +428,8 @@ mod tests {
             }
         );
         assert_eq!(mission_visual(HOLD_SECS, false).alpha, 1.0);
-        assert!((mission_visual(1.65, false).alpha - 0.5).abs() < 1e-5);
+        let midpoint = (HOLD_SECS + END_SECS) * 0.5;
+        assert!((mission_visual(midpoint, false).alpha - 0.5).abs() < 1e-5);
         assert_eq!(
             mission_visual(END_SECS, false),
             MissionVisual {
@@ -236,5 +477,79 @@ mod tests {
             assert!(top >= 16.0);
             assert!(top + panel_height <= height - TOUCH_BAND_HEIGHT);
         }
+    }
+
+    #[test]
+    fn plus_one_visual_fades_between_2_1_and_2_45_normal() {
+        assert_eq!(
+            plus_one_visual(1.5, false),
+            PlusOneVisual {
+                alpha: 1.0,
+                visible: true
+            }
+        );
+        assert_eq!(
+            plus_one_visual(PLUS_ONE_FADE_START, false),
+            PlusOneVisual {
+                alpha: 1.0,
+                visible: true
+            }
+        );
+        let mid = (PLUS_ONE_FADE_START + PLUS_ONE_FADE_END) / 2.0;
+        assert!((plus_one_visual(mid, false).alpha - 0.5).abs() < 1e-5);
+        assert!(plus_one_visual(mid, false).visible);
+        assert_eq!(
+            plus_one_visual(PLUS_ONE_FADE_END, false),
+            PlusOneVisual {
+                alpha: 0.0,
+                visible: false
+            }
+        );
+        assert_eq!(
+            plus_one_visual(2.8, false),
+            PlusOneVisual {
+                alpha: 0.0,
+                visible: false
+            }
+        );
+    }
+
+    #[test]
+    fn plus_one_visual_reduced_motion_stays_full_alpha_then_disappears() {
+        assert_eq!(
+            plus_one_visual(1.5, true),
+            PlusOneVisual {
+                alpha: 1.0,
+                visible: true
+            }
+        );
+        assert_eq!(
+            plus_one_visual(PLUS_ONE_FADE_START, true),
+            PlusOneVisual {
+                alpha: 1.0,
+                visible: true
+            }
+        );
+        assert_eq!(
+            plus_one_visual(PLUS_ONE_FADE_END - 0.001, true),
+            PlusOneVisual {
+                alpha: 1.0,
+                visible: true
+            }
+        );
+        assert_eq!(
+            plus_one_visual(PLUS_ONE_FADE_END, true),
+            PlusOneVisual {
+                alpha: 1.0,
+                visible: false
+            }
+        );
+        assert_eq!(
+            plus_one_visual(2.8, true),
+            PlusOneVisual {
+                alpha: 1.0,
+                visible: false
+            }
+        );
     }
 }

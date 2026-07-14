@@ -25,7 +25,7 @@
 use bevy::prelude::*;
 use std::f32::consts::TAU;
 
-use crate::car::Car;
+use crate::car::{Car, InputFrozen};
 use crate::game::SpawnSet;
 use crate::game::events::ChickenHit;
 use crate::game::resources::{GameConfig, Score};
@@ -440,20 +440,13 @@ fn spawn_chicken_burst(
 /// Because the body group has no scale, the head (its child) is positioned in
 /// unscaled local units — the ellipsoid scale lives on the body **mesh** child
 /// only, so the head isn't squished.
-fn spawn_one_rich_chicken(
+pub(crate) fn spawn_chicken_visual(
     commands: &mut Commands,
     assets: &ChickenAssets,
-    pos: Vec3,
-    dir: Vec3,
-    timer: f32,
-    bob: f32,
+    transform: Transform,
 ) -> Entity {
     commands
-        .spawn((
-            Transform::from_translation(pos),
-            Visibility::default(),
-            Chicken { dir, timer, bob },
-        ))
+        .spawn((transform, Visibility::default()))
         .with_children(|root| {
             // --- Bob-animated body group (head + body mesh nest under it) ---
             root.spawn((
@@ -517,6 +510,19 @@ fn spawn_one_rich_chicken(
             ));
         })
         .id()
+}
+
+fn spawn_one_rich_chicken(
+    commands: &mut Commands,
+    assets: &ChickenAssets,
+    pos: Vec3,
+    dir: Vec3,
+    timer: f32,
+    bob: f32,
+) -> Entity {
+    let entity = spawn_chicken_visual(commands, assets, Transform::from_translation(pos));
+    commands.entity(entity).insert(Chicken { dir, timer, bob });
+    entity
 }
 
 // ---------------------------------------------------------------------------
@@ -622,8 +628,12 @@ fn hit_chickens(
     mut score: ResMut<Score>,
     mut chicken_hits: MessageWriter<ChickenHit>,
     settings: Res<Settings>,
+    input_frozen: Res<InputFrozen>,
     mut seed: Local<u32>,
 ) {
+    if input_frozen.0 {
+        return;
+    }
     ensure_seeded(&mut seed, 0x5678_9ABC);
     let Ok(car_t) = car.single() else {
         return;
