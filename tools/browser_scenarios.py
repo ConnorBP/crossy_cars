@@ -24,6 +24,7 @@ import time
 import traceback
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlsplit
 
 
 DEFAULT_URL = "http://localhost:8080"
@@ -42,6 +43,18 @@ MUTED_SCHEMA = "v2:100:1:0:"
 # persistence instead of being reset by the init script.
 QA_SESSION_MARKER = "__roady_car_browser_qa_initialized"
 SCREENSHOT_POLICIES = {"all", "failure"}
+
+
+def ignorable_request_failure(method: str, url: str, failure: str | None) -> bool:
+    """Ignore only intentional aborts for optional remote requests."""
+    if failure != "net::ERR_ABORTED":
+        return False
+    if "/v1/leaderboard" in url:
+        return True
+    try:
+        return method == "POST" and urlsplit(url).path == "/cdn-cgi/rum"
+    except ValueError:
+        return False
 
 
 def parse_screenshot_policy(value: str | None) -> str:
@@ -427,7 +440,7 @@ def run_scenario(args: argparse.Namespace, summary: dict[str, Any]) -> None:
                 )
 
             def on_request_failed(request: Any) -> None:
-                if request.failure == "net::ERR_ABORTED" and "/v1/leaderboard" in request.url:
+                if ignorable_request_failure(request.method, request.url, request.failure):
                     return
                 summary["network_failures"].append(
                     {

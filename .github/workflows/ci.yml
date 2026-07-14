@@ -140,6 +140,7 @@ jobs:
                   else:
                       raise AssertionError(f"accepted invalid policy {invalid!r}")
           PY
+          python tools/test_browser_request_failures.py
 
       - name: Cache Playwright Chromium
         uses: actions/cache@v4

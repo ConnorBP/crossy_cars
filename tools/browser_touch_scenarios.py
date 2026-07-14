@@ -23,12 +23,14 @@ try:  # Direct script execution puts tools/ on sys.path.
     from browser_scenarios import (
         FailureScreenshotRecorder,
         discard_pre_cleanup_screenshot,
+        ignorable_request_failure,
         promote_pre_cleanup_screenshot,
     )
 except ImportError:  # Package-style imports used by helper self-tests.
     from .browser_scenarios import (
         FailureScreenshotRecorder,
         discard_pre_cleanup_screenshot,
+        ignorable_request_failure,
         promote_pre_cleanup_screenshot,
     )
 
@@ -186,7 +188,7 @@ def main() -> int:
             page.on(
                 "requestfailed",
                 lambda request: None
-                if request.failure == "net::ERR_ABORTED" and "/v1/leaderboard" in request.url
+                if ignorable_request_failure(request.method, request.url, request.failure)
                 else summary["network_failures"].append(
                     {"url": request.url, "failure": request.failure}
                 ),

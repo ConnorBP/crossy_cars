@@ -54,12 +54,14 @@ try:  # Direct script execution puts tools/ on sys.path.
     from browser_scenarios import (
         FailureScreenshotRecorder,
         discard_pre_cleanup_screenshot,
+        ignorable_request_failure,
         promote_pre_cleanup_screenshot,
     )
 except ImportError:  # Package-style imports used by helper self-tests.
     from .browser_scenarios import (
         FailureScreenshotRecorder,
         discard_pre_cleanup_screenshot,
+        ignorable_request_failure,
         promote_pre_cleanup_screenshot,
     )
 
@@ -264,7 +266,7 @@ def attach_error_listeners(page: Any, summary: dict[str, Any], started_at: float
         )
 
     def on_request_failed(request: Any) -> None:
-        if request.failure == "net::ERR_ABORTED" and "/v1/leaderboard" in request.url:
+        if ignorable_request_failure(request.method, request.url, request.failure):
             return
         summary["network_failures"].append(
             {
