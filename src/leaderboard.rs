@@ -1243,18 +1243,66 @@ enum BoardPlacement {
     Paused,
 }
 
+/// What [`begin_board_fetch`] should do given the current board state and
+/// platform. Extracted as a pure function so the "always refresh cached
+/// unless already fetching" policy is unit-testable without a network.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BoardFetchAction {
+    /// Native or unconfigured: mark the board unavailable, retain any cache.
+    Unavailable,
+    /// A fetch is already in flight; do not start a redundant one.
+    KeepInFlight,
+    /// Start a fresh fetch, retaining cached entries for "Refreshing" display.
+    RefreshFromCache,
+}
+
+fn board_fetch_action(status: &BoardStatus, enabled: bool, is_web: bool) -> BoardFetchAction {
+    if !enabled || !is_web {
+        BoardFetchAction::Unavailable
+    } else if *status == BoardStatus::Fetching {
+        BoardFetchAction::KeepInFlight
+    } else {
+        BoardFetchAction::RefreshFromCache
+    }
+}
+
 fn begin_board_fetch(board: &mut LeaderboardBoard) {
+    match board_fetch_action(
+        &board.status,
+        leaderboard_enabled(),
+        cfg!(target_arch = "wasm32"),
+    ) {
+        BoardFetchAction::Unavailable => {
+            // Native or unconfigured: retain any successful in-memory cache
+            // while clearly marking live reads unavailable.
+            board.status = BoardStatus::Unavailable;
+        }
+        BoardFetchAction::KeepInFlight => {}
+        BoardFetchAction::RefreshFromCache => {
+            // Always refresh on lifecycle entry rather than silently reusing a
+            // short-lived session cache. Cached entries are retained and shown
+            // as "Refreshing - cached" while the fetch is in flight; rapid
+            // Menu/Playing/Pause transitions that arrive before the fetch
+            // completes leave the in-flight request running (guarded by
+            // epoch).
+            board.entries = board.cached_entries.clone();
+            board.status = BoardStatus::Fetching;
+            board.fetch_epoch = board.fetch_epoch.wrapping_add(1).max(1);
+            clear_board_result();
+            start_board_fetch(board.fetch_epoch);
+        }
+    }
+}
+
+/// Force a fresh board fetch after a successful score submission. Unlike
+/// [`begin_board_fetch`], this starts a new request even when one is already
+/// in flight, because the in-flight fetch predates the submitted score and
+/// would return stale rankings.
+fn refresh_board_after_submit(board: &mut LeaderboardBoard) {
     if !leaderboard_enabled() || !cfg!(target_arch = "wasm32") {
-        // Native or unconfigured: retain any successful in-memory cache while
-        // clearly marking live reads unavailable.
         board.status = BoardStatus::Unavailable;
-    } else if !board.cached_entries.is_empty() {
-        // A successful board remains valid for this short arcade session.
-        // Reusing it avoids aborting in-flight fetches during rapid
-        // Menu/Playing/Pause transitions; a later app load refreshes it.
+    } else {
         board.entries = board.cached_entries.clone();
-        board.status = BoardStatus::Fetched;
-    } else if board.status != BoardStatus::Fetching {
         board.status = BoardStatus::Fetching;
         board.fetch_epoch = board.fetch_epoch.wrapping_add(1).max(1);
         clear_board_result();
@@ -1785,10 +1833,12 @@ fn on_gameover_exit(
     clear_submit_result();
 }
 
+#[allow(clippy::too_many_arguments)]
 fn update_gameover_submission(
     mut commands: Commands,
     windows: Query<&Window, With<PrimaryWindow>>,
     mut submission: ResMut<LeaderboardSubmission>,
+    mut board: ResMut<LeaderboardBoard>,
     touch_active: Res<TouchControlsActive>,
     touch_grid_q: Query<(Entity, &LeaderboardTouchGrid)>,
     mut root_q: Query<&mut Node, With<LeaderboardGameOverRoot>>,
@@ -1818,6 +1868,10 @@ fn update_gameover_submission(
                 Ok(ranks) => {
                     submission.ranks = Some(ranks);
                     submission.state = transition_on_success(submission.state);
+                    // Refresh the shared board so the new ranking appears on
+                    // the next Menu/Pause visit. A fresh fetch is forced even
+                    // if one is in flight, because it predates this score.
+                    refresh_board_after_submit(&mut board);
                 }
                 Err(msg) => {
                     submission.error = Some(msg);
@@ -2993,5 +3047,134 @@ mod tests {
     fn game_over_reason_maps_to_backend_strings() {
         assert_eq!(game_over_reason_str(GameOverReason::TimeUp), "time_up");
         assert_eq!(game_over_reason_str(GameOverReason::Wrecked), "wrecked");
+    }
+
+    // ── Board fetch policy ───────────────────────────────────────────────
+
+    #[test]
+    fn board_fetch_action_always_refreshes_cached_unless_fetching() {
+        // With cached entries and Fetched status → refresh, not silent reuse.
+        assert_eq!(
+            board_fetch_action(&BoardStatus::Fetched, true, true),
+            BoardFetchAction::RefreshFromCache
+        );
+        // Without cache, Idle status → still refresh.
+        assert_eq!(
+            board_fetch_action(&BoardStatus::Idle, true, true),
+            BoardFetchAction::RefreshFromCache
+        );
+        // Error status with cache → still refresh.
+        assert_eq!(
+            board_fetch_action(&BoardStatus::Error("offline".to_string()), true, true),
+            BoardFetchAction::RefreshFromCache
+        );
+        // Already fetching → keep the in-flight request (no redundant fetch).
+        assert_eq!(
+            board_fetch_action(&BoardStatus::Fetching, true, true),
+            BoardFetchAction::KeepInFlight
+        );
+        // Native or unconfigured → unavailable.
+        assert_eq!(
+            board_fetch_action(&BoardStatus::Fetched, true, false),
+            BoardFetchAction::Unavailable
+        );
+        assert_eq!(
+            board_fetch_action(&BoardStatus::Fetched, false, true),
+            BoardFetchAction::Unavailable
+        );
+    }
+
+    #[test]
+    fn refresh_after_submit_overrides_in_flight_fetch() {
+        // board_fetch_action keeps an in-flight fetch, but a successful
+        // submission must force a new one (the in-flight request predates the
+        // submitted score and would return stale rankings). On native (test
+        // host) the board is marked unavailable; the force-refresh path is
+        // web-only.
+        let entries = vec![BoardEntry {
+            rank: 1,
+            name: "AAA".to_string(),
+            score: 100,
+        }];
+        let mut board = LeaderboardBoard {
+            status: BoardStatus::Fetching,
+            entries: entries.clone(),
+            cached_entries: entries,
+            fetch_epoch: 3,
+        };
+        refresh_board_after_submit(&mut board);
+        assert_eq!(board.status, BoardStatus::Unavailable);
+        assert_eq!(board.fetch_epoch, 3); // unchanged on native
+        assert!(!board.cached_entries.is_empty()); // cache retained
+    }
+
+    // ── Cached-round and in-flight display ───────────────────────────────
+
+    #[test]
+    fn fetching_with_cache_shows_refreshing_cached_label() {
+        let entries = vec![
+            BoardEntry {
+                rank: 1,
+                name: "AAA".to_string(),
+                score: 100,
+            },
+            BoardEntry {
+                rank: 2,
+                name: "BBB".to_string(),
+                score: 90,
+            },
+        ];
+        let board = LeaderboardBoard {
+            status: BoardStatus::Fetching,
+            entries: entries.clone(),
+            cached_entries: entries,
+            fetch_epoch: 0,
+        };
+        let text = format_board_text(&board);
+        assert!(text.starts_with("Refreshing - cached\n"));
+        assert!(text.contains("#1 AAA 100"));
+        assert!(text.contains("#2 BBB 90"));
+
+        let compact = format_pause_board_text(&board);
+        assert!(compact.starts_with("Refreshing - cached\n"));
+    }
+
+    #[test]
+    fn fetching_without_cache_shows_loading() {
+        let board = LeaderboardBoard {
+            status: BoardStatus::Fetching,
+            entries: Vec::new(),
+            cached_entries: Vec::new(),
+            fetch_epoch: 0,
+        };
+        assert_eq!(format_board_text(&board), "Loading...");
+        // Pause falls through to format_board_text when cache is empty.
+        assert_eq!(format_pause_board_text(&board), "Loading...");
+    }
+
+    #[test]
+    fn in_flight_fetch_preserves_cached_display_across_transitions() {
+        // Simulate a board mid-fetch (in-flight) with cached entries from a
+        // prior successful fetch. During rapid Menu/Playing/Pause transitions
+        // the display shows "Refreshing - cached" while the epoch-guarded
+        // result arrives, and begin_board_fetch keeps the in-flight request.
+        let entries = vec![BoardEntry {
+            rank: 1,
+            name: "OLD".to_string(),
+            score: 50,
+        }];
+        let board = LeaderboardBoard {
+            status: BoardStatus::Fetching,
+            entries: entries.clone(),
+            cached_entries: entries,
+            fetch_epoch: 7,
+        };
+        assert_eq!(
+            board_fetch_action(&board.status, true, true),
+            BoardFetchAction::KeepInFlight
+        );
+        assert_eq!(board.fetch_epoch, 7); // epoch unchanged by action
+        assert!(format_board_text(&board).contains("Refreshing - cached"));
+        assert!(format_pause_board_text(&board).contains("Refreshing - cached"));
     }
 }
