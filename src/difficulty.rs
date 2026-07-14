@@ -45,7 +45,8 @@ use crate::touch::{
     TOUCH_LEVEL_HEIGHT, TOUCH_LEVEL_RIGHT, TOUCH_LEVEL_TOP, TOUCH_LEVEL_WIDTH, TouchControlsActive,
 };
 use crate::world::{
-    Collider, LaneConnector, LaneCurve, LaneEdge, LaneTurn, road_plan, world_to_road_cell,
+    Collider, LaneConnector, LaneCurve, LaneEdge, LaneTurn, ROAD_BLOCK_SIZE, road_plan,
+    world_to_road_cell,
 };
 
 // ===========================================================================
@@ -83,6 +84,21 @@ const CURVE_LENGTH_SAMPLES: usize = 32;
 const MAX_CONNECTOR_TRANSITIONS_PER_FRAME: usize = 8;
 const TRAFFIC_HALF_WIDTH: f32 = 0.5;
 const TRAFFIC_HALF_LENGTH: f32 = 1.0;
+/// Empty body-to-body space maintained along a route.
+const MIN_BUMPER_GAP: f32 = 1.5;
+/// Normal speed changes are deliberately bounded. The distance safety clamp
+/// below remains authoritative for an already-unsafe imported state.
+const TRAFFIC_ACCELERATION: f32 = 2.5;
+const TRAFFIC_DECELERATION: f32 = 6.0;
+/// Half-width of the sampled central junction area. Parallel directional
+/// lanes remain nonconflicting while crossing/merging paths are detected.
+const JUNCTION_HALF_EXTENT: f32 = 7.0;
+const CONFLICT_PATH_CLEARANCE: f32 = 1.35;
+const JUNCTION_APPROACH_DISTANCE: f32 = 18.0;
+/// Keep an ungranted front bumper visibly before the conflict boundary. Exact
+/// contact with the stop line is not treated as already owning the junction.
+const JUNCTION_STOP_MARGIN: f32 = 0.05;
+const JUNCTION_SAMPLES: usize = 32;
 
 /// Base traffic speed at level 0 (u/s). The player's `max_speed` is 12.0, so
 /// traffic is always slower and must be dodged, not outrun-forward forever.
@@ -282,6 +298,9 @@ impl FromWorld for TrafficAssets {
 /// XZ curve-tangent velocity consumed directly by collision impact handling.
 #[derive(Component)]
 pub struct Traffic {
+    /// Monotonic spawn identity. Unlike `Entity`, this is assigned by this
+    /// module's deterministic spawn stream and is never query-order derived.
+    id: u64,
     pub(crate) speed: f32,
     pub(crate) speed_roll: f32,
     pub(crate) velocity: Vec2,
@@ -393,11 +412,267 @@ fn reset_difficulty(mut difficulty: ResMut<Difficulty>, round_active: Res<RoundA
 // Traffic — spawn / move / recycle / cleanup
 // ===========================================================================
 
-/// Rebuild speed, advance over the pure lane graph, retire only malformed or
-/// safely distant routes, trim offscreen surplus, then make a bounded attempt
-/// to top up the target. No following/headway or intersection reservation is
-/// performed in stage 1; spawn-time overlap prevention is the only traffic to
-/// traffic coordination.
+#[derive(Clone, Copy, Debug)]
+struct TrafficSnapshot {
+    id: u64,
+    connector: LaneConnector,
+    distance: f32,
+    speed: f32,
+    cruise_speed: f32,
+    route_rng: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct TrafficPlan {
+    id: u64,
+    speed: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct JunctionCandidate {
+    snapshot_index: usize,
+    inside: bool,
+    distance_to_entry: f32,
+    eta: f32,
+}
+
+fn same_connector(a: LaneConnector, b: LaneConnector) -> bool {
+    a.cell == b.cell && a.slot == b.slot
+}
+
+fn junction_center(connector: LaneConnector) -> Vec2 {
+    connector.cell.as_vec2() * ROAD_BLOCK_SIZE
+}
+
+fn in_junction(connector: LaneConnector, position: Vec2) -> bool {
+    (position - junction_center(connector)).abs().max_element() <= JUNCTION_HALF_EXTENT
+}
+
+/// Conservative sampled entry/exit distances for the central conflict area.
+/// U-turns at road stubs normally never enter it and therefore remain free to
+/// reverse rather than waiting forever for a reservation they do not need.
+fn junction_interval(connector: LaneConnector) -> Option<(f32, f32)> {
+    let mut previous = connector.curve.eval(0.0);
+    let mut traversed = 0.0;
+    let mut entry = None;
+    let mut exit = 0.0;
+    for step in 1..=JUNCTION_SAMPLES {
+        let point = connector.curve.eval(step as f32 / JUNCTION_SAMPLES as f32);
+        let next_distance = traversed + previous.distance(point);
+        if in_junction(connector, previous) || in_junction(connector, point) {
+            entry.get_or_insert(traversed);
+            exit = next_distance;
+        }
+        traversed = next_distance;
+        previous = point;
+    }
+    entry.map(|entry| (entry, exit))
+}
+
+fn orientation(a: Vec2, b: Vec2, c: Vec2) -> f32 {
+    (b - a).perp_dot(c - a)
+}
+
+fn segments_cross(a0: Vec2, a1: Vec2, b0: Vec2, b1: Vec2) -> bool {
+    const EPSILON: f32 = 1e-4;
+    let ab0 = orientation(a0, a1, b0);
+    let ab1 = orientation(a0, a1, b1);
+    let ba0 = orientation(b0, b1, a0);
+    let ba1 = orientation(b0, b1, a1);
+    ((ab0 > EPSILON && ab1 < -EPSILON) || (ab0 < -EPSILON && ab1 > EPSILON))
+        && ((ba0 > EPSILON && ba1 < -EPSILON) || (ba0 < -EPSILON && ba1 > EPSILON))
+}
+
+/// Sampled geometric conflict policy. Movements in different cells never
+/// contend. Within a cell, central path crossings and paths that merge within
+/// a car-width contend; separated parallel movements can proceed together.
+fn connectors_conflict(a: LaneConnector, b: LaneConnector) -> bool {
+    if a.cell != b.cell {
+        return false;
+    }
+    if same_connector(a, b) {
+        return true;
+    }
+    let center = junction_center(a);
+    let mut a0 = a.curve.eval(0.0);
+    for ai in 1..=JUNCTION_SAMPLES {
+        let a1 = a.curve.eval(ai as f32 / JUNCTION_SAMPLES as f32);
+        let a_central = ((a0 + a1) * 0.5 - center).abs().max_element()
+            <= JUNCTION_HALF_EXTENT + CONFLICT_PATH_CLEARANCE;
+        if a_central {
+            let mut b0 = b.curve.eval(0.0);
+            for bi in 1..=JUNCTION_SAMPLES {
+                let b1 = b.curve.eval(bi as f32 / JUNCTION_SAMPLES as f32);
+                let b_central = ((b0 + b1) * 0.5 - center).abs().max_element()
+                    <= JUNCTION_HALF_EXTENT + CONFLICT_PATH_CLEARANCE;
+                if b_central
+                    && (segments_cross(a0, a1, b0, b1)
+                        || a0.distance(b0) <= CONFLICT_PATH_CLEARANCE
+                        || a0.distance(b1) <= CONFLICT_PATH_CLEARANCE
+                        || a1.distance(b0) <= CONFLICT_PATH_CLEARANCE
+                        || a1.distance(b1) <= CONFLICT_PATH_CLEARANCE)
+                {
+                    return true;
+                }
+                b0 = b1;
+            }
+        }
+        a0 = a1;
+    }
+    false
+}
+
+fn approach(value: f32, target: f32, max_delta: f32) -> f32 {
+    if value < target {
+        (value + max_delta).min(target)
+    } else {
+        (value - max_delta).max(target)
+    }
+}
+
+/// Immutable snapshot -> deterministic plans. The returned vector is sorted
+/// by stable traffic ID, so both planning and application ignore ECS order.
+fn plan_traffic(snapshots: &[TrafficSnapshot], delta_seconds: f32) -> Vec<TrafficPlan> {
+    let dt = if delta_seconds.is_finite() {
+        delta_seconds.max(0.0)
+    } else {
+        0.0
+    };
+    let mut candidates = Vec::with_capacity(MAX_TRAFFIC);
+    for (index, snapshot) in snapshots.iter().enumerate() {
+        let Some((entry, exit)) = junction_interval(snapshot.connector) else {
+            continue;
+        };
+        // Occupancy is body-aware: acquire when the front bumper reaches
+        // the central area and retain until the rear bumper has cleared it.
+        let stop_line = (entry - TRAFFIC_HALF_LENGTH).max(0.0);
+        if snapshot.distance > exit + TRAFFIC_HALF_LENGTH {
+            continue;
+        }
+        let inside = snapshot.distance > stop_line + JUNCTION_STOP_MARGIN;
+        let distance_to_entry = (stop_line - snapshot.distance).max(0.0);
+        if inside || distance_to_entry <= JUNCTION_APPROACH_DISTANCE {
+            candidates.push(JunctionCandidate {
+                snapshot_index: index,
+                inside,
+                distance_to_entry,
+                eta: distance_to_entry / snapshot.speed.max(0.1),
+            });
+        }
+    }
+    candidates.sort_by(|a, b| {
+        b.inside
+            .cmp(&a.inside)
+            .then_with(|| a.eta.total_cmp(&b.eta))
+            .then_with(|| a.distance_to_entry.total_cmp(&b.distance_to_entry))
+            .then_with(|| {
+                snapshots[a.snapshot_index]
+                    .id
+                    .cmp(&snapshots[b.snapshot_index].id)
+            })
+    });
+
+    let mut granted = Vec::with_capacity(MAX_TRAFFIC);
+    for candidate in &candidates {
+        let connector = snapshots[candidate.snapshot_index].connector;
+        if granted
+            .iter()
+            .all(|&other: &usize| !connectors_conflict(connector, snapshots[other].connector))
+        {
+            granted.push(candidate.snapshot_index);
+        }
+    }
+
+    let mut plans = Vec::with_capacity(snapshots.len());
+    for (index, snapshot) in snapshots.iter().enumerate() {
+        let mut target_speed = snapshot.cruise_speed.max(0.0);
+
+        // Find the nearest leader either on this connector or on the exact
+        // connector this car will choose next. Copying route_rng is important:
+        // planning never consumes route state.
+        let mut route_rng = snapshot.route_rng;
+        let next = next_connector(snapshot.connector, &mut route_rng);
+        let mut nearest: Option<(f32, f32)> = None;
+        for leader in snapshots {
+            if leader.id == snapshot.id {
+                continue;
+            }
+            let center_distance = if same_connector(snapshot.connector, leader.connector)
+                && leader.distance > snapshot.distance
+            {
+                Some(leader.distance - snapshot.distance)
+            } else if next.is_some_and(|next| same_connector(next, leader.connector)) {
+                Some(snapshot.connector.curve.length() - snapshot.distance + leader.distance)
+            } else {
+                None
+            };
+            if let Some(center_distance) = center_distance {
+                let clearance = center_distance - 2.0 * TRAFFIC_HALF_LENGTH - MIN_BUMPER_GAP;
+                if nearest.is_none_or(|current| clearance < current.0) {
+                    nearest = Some((clearance, leader.speed.max(0.0)));
+                }
+            }
+        }
+        if let Some((clearance, leader_speed)) = nearest {
+            // Kinematic following target: enough room to match the leader at
+            // bounded deceleration, plus a hard one-step guard below.
+            target_speed = target_speed.min(
+                (leader_speed * leader_speed + 2.0 * TRAFFIC_DECELERATION * clearance.max(0.0))
+                    .sqrt(),
+            );
+        }
+
+        if let Some(candidate) = candidates
+            .iter()
+            .find(|candidate| candidate.snapshot_index == index)
+        {
+            if !candidate.inside && !granted.contains(&index) {
+                target_speed = target_speed
+                    .min((2.0 * TRAFFIC_DECELERATION * candidate.distance_to_entry).sqrt());
+            }
+        }
+
+        let max_delta = if target_speed < snapshot.speed {
+            TRAFFIC_DECELERATION * dt
+        } else {
+            TRAFFIC_ACCELERATION * dt
+        };
+        let mut speed = approach(snapshot.speed.max(0.0), target_speed, max_delta);
+
+        // Numerical/sudden-state safety guards. Normal approaches decelerate
+        // smoothly; these only prevent this frame's travel consuming the last
+        // legal bumper clearance or crossing a denied stop line.
+        if dt > f32::EPSILON {
+            if let Some((clearance, _)) = nearest {
+                // Assume the leader could stop this frame. This conservative
+                // synchronous clamp makes the minimum gap invariant even when
+                // the leader's own plan changes sharply at a junction.
+                speed = speed.min((clearance.max(0.0) / dt).max(0.0));
+            }
+            if let Some(candidate) = candidates
+                .iter()
+                .find(|candidate| candidate.snapshot_index == index)
+            {
+                if !candidate.inside && !granted.contains(&index) {
+                    speed = speed.min(
+                        ((candidate.distance_to_entry - JUNCTION_STOP_MARGIN).max(0.0) / dt)
+                            .max(0.0),
+                    );
+                }
+            }
+        }
+        plans.push(TrafficPlan {
+            id: snapshot.id,
+            speed: speed.max(0.0),
+        });
+    }
+    plans.sort_by_key(|plan| plan.id);
+    plans
+}
+
+/// Snapshot, plan, then apply moving traffic. Stable IDs, immutable planning,
+/// longitudinal headway, and deterministic geometric junction grants make the
+/// result independent of ECS query iteration order.
 fn manage_traffic(
     mut commands: Commands,
     assets: Res<TrafficAssets>,
@@ -411,6 +686,7 @@ fn manage_traffic(
     >,
     time: Res<Time>,
     mut seed: Local<u32>,
+    mut next_traffic_id: Local<u64>,
 ) {
     ensure_seeded(&mut seed, 0x0BADC0DE);
     let Ok(car_t) = car.single() else {
@@ -426,16 +702,33 @@ fn manage_traffic(
         event.traffic_count_multiplier(),
     );
 
-    let mut to_despawn = Vec::new();
-    let mut survivors = Vec::new();
-    let mut occupied = Vec::new();
+    let mut snapshots = Vec::with_capacity(MAX_TRAFFIC);
+    for (_, traffic, _, _) in &mut traffic_query {
+        snapshots.push(TrafficSnapshot {
+            id: traffic.id,
+            connector: traffic.connector,
+            distance: traffic.distance,
+            speed: traffic.speed,
+            cruise_speed: traffic_speed_for_roll(
+                difficulty.level,
+                traffic.speed_roll,
+                modifier_speed,
+                event_speed,
+            ),
+            route_rng: traffic.route_rng,
+        });
+    }
+    snapshots.sort_by_key(|snapshot| snapshot.id);
+    let plans = plan_traffic(&snapshots, dt);
+
+    let mut to_despawn = Vec::with_capacity(MAX_TRAFFIC);
+    let mut survivors = Vec::with_capacity(MAX_TRAFFIC);
+    let mut occupied = Vec::with_capacity(MAX_TRAFFIC);
     for (entity, mut traffic, mut transform, mut collider) in &mut traffic_query {
-        traffic.speed = traffic_speed_for_roll(
-            difficulty.level,
-            traffic.speed_roll,
-            modifier_speed,
-            event_speed,
-        );
+        let Ok(plan_index) = plans.binary_search_by_key(&traffic.id, |plan| plan.id) else {
+            continue;
+        };
+        traffic.speed = plans[plan_index].speed;
         if !advance_traffic(&mut traffic, &mut transform, &mut collider, dt) {
             to_despawn.push(entity);
             continue;
@@ -496,12 +789,18 @@ fn manage_traffic(
             continue;
         };
         occupied.push((candidate.position, candidate.half_extents));
+        if *next_traffic_id == 0 {
+            *next_traffic_id = 1;
+        }
+        let traffic_id = *next_traffic_id;
+        *next_traffic_id = next_traffic_id.saturating_add(1);
         spawn_one_traffic(
             &mut commands,
             &assets,
             candidate,
             speed,
             speed_roll,
+            traffic_id,
             &mut seed,
         );
     }
@@ -860,6 +1159,7 @@ fn traffic_spawn_candidate(
         };
         let half_extents = traffic_half_extents(tangent);
         if !aabb_off_gameplay_view(car_pos, position, half_extents)
+            || in_junction(connector, position)
             || (position - car_pos).abs().max_element() > TRAFFIC_KEEP_HALF_EXTENT
             || position.distance_squared(car_pos) < SPAWN_SAFE_RADIUS.powi(2)
             || occupied.iter().any(|&(other_position, other_half)| {
@@ -900,6 +1200,7 @@ fn spawn_one_traffic(
     candidate: TrafficSpawnCandidate,
     speed: f32,
     speed_roll: f32,
+    traffic_id: u64,
     seed: &mut u32,
 ) {
     let heading = (-candidate.tangent.x).atan2(-candidate.tangent.y);
@@ -912,6 +1213,7 @@ fn spawn_one_traffic(
                 .with_rotation(Quat::from_rotation_y(heading)),
             Visibility::default(),
             Traffic {
+                id: traffic_id,
                 speed,
                 speed_roll,
                 velocity: candidate.tangent * speed,
@@ -1430,6 +1732,7 @@ mod tests {
 
     fn traffic_on(connector: LaneConnector, speed: f32) -> (Traffic, Transform, Collider) {
         let mut traffic = Traffic {
+            id: 1,
             speed,
             speed_roll: 0.5,
             velocity: Vec2::ZERO,
@@ -1620,6 +1923,177 @@ mod tests {
             &mut collider,
             f32::NAN
         ));
+    }
+
+    fn planning_snapshot(
+        id: u64,
+        connector: LaneConnector,
+        distance: f32,
+        speed: f32,
+        cruise_speed: f32,
+    ) -> TrafficSnapshot {
+        TrafficSnapshot {
+            id,
+            connector,
+            distance,
+            speed,
+            cruise_speed,
+            route_rng: 0x1234_5678,
+        }
+    }
+
+    fn crossing_pair(conflicting: bool) -> (LaneConnector, LaneConnector) {
+        for gx in -30..=30 {
+            for gz in -30..=30 {
+                let connectors: Vec<_> =
+                    road_plan(gx, gz).connectors.into_iter().flatten().collect();
+                for (index, &a) in connectors.iter().enumerate() {
+                    for &b in connectors.iter().skip(index + 1) {
+                        if junction_interval(a).is_some()
+                            && junction_interval(b).is_some()
+                            && connectors_conflict(a, b) == conflicting
+                            && a.from != b.from
+                        {
+                            return (a, b);
+                        }
+                    }
+                }
+            }
+        }
+        panic!("no requested connector pair")
+    }
+
+    #[test]
+    fn follower_gap_is_preserved_at_common_frame_rates_with_faster_follower() {
+        let connector = first_crossing_with_turn(LaneTurn::Straight);
+        for hz in [30, 60, 120] {
+            let dt = 1.0 / hz as f32;
+            let mut leader_distance = 14.0;
+            let mut follower_distance = 14.0 - 2.0 * TRAFFIC_HALF_LENGTH - MIN_BUMPER_GAP;
+            let mut leader_speed = 4.0;
+            let mut follower_speed = 9.0;
+            for _ in 0..(hz * 6) {
+                let snapshots = [
+                    planning_snapshot(2, connector, follower_distance, follower_speed, 9.0),
+                    planning_snapshot(1, connector, leader_distance, leader_speed, 4.0),
+                ];
+                let plans = plan_traffic(&snapshots, dt);
+                leader_speed = plans.iter().find(|plan| plan.id == 1).unwrap().speed;
+                follower_speed = plans.iter().find(|plan| plan.id == 2).unwrap().speed;
+                leader_distance += leader_speed * dt;
+                follower_distance += follower_speed * dt;
+                assert!(
+                    leader_distance - follower_distance
+                        >= 2.0 * TRAFFIC_HALF_LENGTH + MIN_BUMPER_GAP - 1e-4
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn immediate_next_connector_headway_prevents_overlap() {
+        let connector = source_with_next_turns(&[LaneTurn::Straight]);
+        let mut rng = 0x1234_5678;
+        let next = next_connector(connector, &mut rng).unwrap();
+        let follower_distance = connector.curve.length() - 0.25;
+        let leader_distance = 2.0 * TRAFFIC_HALF_LENGTH + MIN_BUMPER_GAP + 0.25;
+        let plans = plan_traffic(
+            &[
+                planning_snapshot(9, connector, follower_distance, 8.0, 8.0),
+                planning_snapshot(3, next, leader_distance, 0.0, 0.0),
+            ],
+            1.0 / 30.0,
+        );
+        let follower_speed = plans.iter().find(|plan| plan.id == 9).unwrap().speed;
+        let clearance = connector.curve.length() - follower_distance + leader_distance
+            - 2.0 * TRAFFIC_HALF_LENGTH
+            - MIN_BUMPER_GAP;
+        assert!(follower_speed / 30.0 <= clearance + 1e-5);
+    }
+
+    #[test]
+    fn junction_conflicts_nonconflicts_inside_priority_and_stable_tie() {
+        let (a, conflicting) = crossing_pair(true);
+        let (non_a, non_b) = crossing_pair(false);
+        let a_entry = junction_interval(a).unwrap().0;
+        let conflict_entry = junction_interval(conflicting).unwrap().0;
+        let non_a_entry = junction_interval(non_a).unwrap().0;
+        let non_b_entry = junction_interval(non_b).unwrap().0;
+
+        let plans = plan_traffic(
+            &[
+                planning_snapshot(
+                    20,
+                    a,
+                    (a_entry - TRAFFIC_HALF_LENGTH - 0.2).max(0.0),
+                    5.0,
+                    5.0,
+                ),
+                planning_snapshot(
+                    10,
+                    conflicting,
+                    (conflict_entry - TRAFFIC_HALF_LENGTH - 0.2).max(0.0),
+                    5.0,
+                    5.0,
+                ),
+            ],
+            0.1,
+        );
+        assert!(plans.iter().find(|plan| plan.id == 10).unwrap().speed > 0.0);
+        assert!(plans.iter().find(|plan| plan.id == 20).unwrap().speed < 5.0);
+
+        let plans = plan_traffic(
+            &[
+                planning_snapshot(1, a, a_entry + 0.1, 2.0, 2.0),
+                planning_snapshot(
+                    0,
+                    conflicting,
+                    (conflict_entry - TRAFFIC_HALF_LENGTH - 0.1).max(0.0),
+                    5.0,
+                    5.0,
+                ),
+            ],
+            0.1,
+        );
+        assert!(plans.iter().find(|plan| plan.id == 1).unwrap().speed > 0.0);
+        assert!(plans.iter().find(|plan| plan.id == 0).unwrap().speed < 5.0);
+
+        // A geometrically independent movement can hold a simultaneous grant.
+        let plans = plan_traffic(
+            &[
+                planning_snapshot(1, non_a, non_a_entry - 0.1, 4.0, 4.0),
+                planning_snapshot(2, non_b, non_b_entry - 0.1, 4.0, 4.0),
+            ],
+            0.1,
+        );
+        assert!(plans.iter().all(|plan| plan.speed > 0.0));
+    }
+
+    #[test]
+    fn planning_is_query_order_independent_and_grants_release_after_exit() {
+        let (a, b) = crossing_pair(true);
+        let a_entry = junction_interval(a).unwrap().0;
+        let (b_entry, b_exit) = junction_interval(b).unwrap();
+        let ordered = [
+            planning_snapshot(5, a, a_entry - 0.5, 5.0, 5.0),
+            planning_snapshot(2, b, b_entry - 0.5, 5.0, 5.0),
+        ];
+        let shuffled = [ordered[1], ordered[0]];
+        assert_eq!(plan_traffic(&ordered, 0.1), plan_traffic(&shuffled, 0.1));
+
+        let released = [
+            planning_snapshot(5, a, a_entry - 0.1, 5.0, 5.0),
+            planning_snapshot(2, b, b_exit + 0.1, 5.0, 5.0),
+        ];
+        let plans = plan_traffic(&released, 0.1);
+        assert!(plans.iter().find(|plan| plan.id == 5).unwrap().speed > 0.0);
+    }
+
+    #[test]
+    fn stub_uturn_keeps_progressing_when_uncontended() {
+        let connector = first_crossing_with_turn(LaneTurn::UTurn);
+        let plan = plan_traffic(&[planning_snapshot(1, connector, 0.0, 0.0, 5.0)], 0.1);
+        assert!(plan[0].speed > 0.0);
     }
 
     #[test]
