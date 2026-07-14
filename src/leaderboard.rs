@@ -1094,7 +1094,9 @@ mod web_bridge {
             let session: SessionResponse = match serde_json::from_str(&body) {
                 Ok(s) => s,
                 Err(e) => {
-                    set_submit(Err(format!("SERVER [invalid_session_response]: {e}; retry.")));
+                    set_submit(Err(format!(
+                        "SERVER [invalid_session_response]: {e}; retry."
+                    )));
                     return;
                 }
             };

@@ -293,6 +293,31 @@ def main() -> int:
             page.wait_for_timeout(400)
             shot("03_after_multitouch.png")
 
+            # Exercise responsive touch state across portrait/landscape. No
+            # touch remains live here, so the next owner must acquire a clean
+            # floating origin rather than inheriting the old drag.
+            page.set_viewport_size({"width": 390, "height": 844})
+            page.wait_for_timeout(500)
+            portrait = canvas.evaluate(
+                "e => { const r=e.getBoundingClientRect(); return "
+                "{left:r.left,top:r.top,width:r.width,height:r.height}; }"
+            )
+            if abs(portrait["width"] - 390) > 1 or abs(portrait["height"] - 844) > 1:
+                raise AssertionError(f"canvas did not fit portrait viewport: {portrait}")
+            page.touchscreen.tap(195, 25)
+            page.wait_for_timeout(400)
+            shot("03b_portrait_paused.png")
+            # Left third resumes in portrait before rotating back.
+            page.touchscreen.tap(50, 422)
+            page.wait_for_timeout(400)
+            shot("03c_portrait_resumed.png")
+            page.set_viewport_size({"width": 844, "height": 390})
+            page.wait_for_timeout(500)
+            rect = canvas.evaluate(
+                "e => { const r=e.getBoundingClientRect(); return "
+                "{left:r.left,top:r.top,width:r.width,height:r.height}; }"
+            )
+
             # Pause zone; Settings is touch-accessible only because state is
             # Paused. The helper closes the modal through its Back row.
             page.touchscreen.tap(422, 25)

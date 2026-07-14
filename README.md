@@ -66,7 +66,7 @@ On-screen touch controls appear after the first touch and stay available for the
 | **1ST TOUCH: DRAG TO DRIVE** | The first eligible live touch anywhere always holds the gas. Drag in any screen direction and the car steers toward that camera-relative direction. |
 | **2ND TOUCH: BRAKE / REVERSE** | Any other eligible live touch anywhere brakes at speed >0.15 and holds reverse at speed <=0.15. |
 
-- The direction owner remains fixed while live. A stationary hold still accelerates; movement beyond a small 6px jitter threshold supplies smooth analog steering rather than directional zones. When the owner is released, the remaining eligible touch is promoted to direction and brake/reverse clears if only one touch remains.
+- The direction owner remains fixed while live. A stationary hold still accelerates. Steering uses a filtered floating analog drag: 8px engages it, returning to the 6px center releases it, and long drags recenter within a bounded radius. This removes center jitter while preserving true diagonal input. When the owner is released, the remaining eligible touch is promoted to direction and brake/reverse clears if only one touch remains.
 - Touches that start inside the top-center **PAUSE** hitbox are excluded from both driving roles. A second touch never changes direction.
 - Tap the top-center **PAUSE** button while driving to pause.
 - From the menu, tap anywhere to start a round.
@@ -153,6 +153,10 @@ Verify that the optimized browser bundle builds:
 ```sh
 trunk build --release --cargo-profile wasm-release
 ```
+
+Camera QA should include a sustained 90-degree turn at speed: the fixed isometric rotation must not tilt, the follow anchor must not jump on collision correction, and the car should move across the frame without the old pronounced screen-vertical whip. Repeat at 30/60/120 Hz where browser throttling controls are available; direction and lead settling should be equivalent. The automated desktop scenario also records turn-transition and settled screenshots for comparison.
+
+Touch QA should include 6px center jitter (zero steering), an unequal diagonal drag, a long drag that exercises floating-origin recentering, owner release without a steering kick, and pause/resume after switching between landscape and portrait. Camera translation/shake must not change the world direction selected by the same screen drag. The automated touch scenario switches portrait/landscape before continuing through pause/resume.
 
 For interactive browser QA, start the development server:
 

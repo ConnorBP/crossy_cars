@@ -553,6 +553,24 @@ def run_scenario(args: argparse.Namespace, summary: dict[str, Any]) -> None:
                 "capture_after_w_and_a",
                 lambda: screenshot("06_after_wa_8s.png"),
             )
+            # Reverse steering at speed to produce a sharp fixed-camera turn.
+            # The transition and settled captures are visual QA evidence for
+            # bounded anchor motion and reduced screen-vertical lead travel.
+            run_step(
+                summary,
+                "camera_sharp_turn_transition",
+                lambda: hold_keys(page, ["w", "d"], 650),
+            )
+            run_step(
+                summary,
+                "capture_camera_turn_transition",
+                lambda: screenshot("06b_camera_turn_transition.png"),
+            )
+            run_step(
+                summary,
+                "capture_camera_turn_settled",
+                lambda: (page.wait_for_timeout(700), screenshot("06c_camera_turn_settled.png")),
+            )
 
             def pause_and_capture() -> None:
                 page.keyboard.press("Escape")

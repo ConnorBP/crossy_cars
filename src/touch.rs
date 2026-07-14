@@ -13,7 +13,10 @@ const PAUSE_LEFT: f32 = 0.44;
 const PAUSE_RIGHT: f32 = 0.56;
 const ACTION_BRAKE_SPEED: f32 = 0.15;
 const TOUCH_JITTER_PX: f32 = 6.0;
+const TOUCH_ENGAGE_PX: f32 = 8.0;
 const TOUCH_JITTER_EPSILON_PX: f32 = 0.01;
+const TOUCH_DIRECTION_SMOOTH: f32 = 12.0;
+const FLOATING_ORIGIN_RADIUS_PX: f32 = 96.0;
 const FULL_STEER_ERROR: f32 = PI / 3.0;
 
 // Fixed touch-only HUD composition. These values are shared by the live
@@ -205,6 +208,19 @@ struct TouchGuidanceRoot;
 #[derive(Resource, Default, Debug, Clone, Copy, PartialEq, Eq)]
 struct DriveTouchOwner(Option<u64>);
 
+/// Stateful analog stick hidden behind the position-independent direction
+/// touch. The origin follows only when a drag exceeds a generous radius;
+/// direction itself is low-pass filtered and has separate engage/release
+/// thresholds so finger noise around center cannot chatter steering.
+#[derive(Resource, Default, Debug, Clone, Copy, PartialEq)]
+struct TouchSteering {
+    owner: Option<u64>,
+    window_size: Vec2,
+    origin_px: Vec2,
+    filtered_drag: Vec2,
+    engaged: bool,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct ActiveTouch {
     id: u64,
@@ -227,6 +243,7 @@ impl Plugin for TouchPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<TouchControlsActive>()
             .init_resource::<DriveTouchOwner>()
+            .init_resource::<TouchSteering>()
             .add_systems(
                 Update,
                 touch_state_transitions
@@ -296,7 +313,10 @@ fn safe_ground_normalize(direction: Vec3) -> Option<Vec3> {
 /// Project camera-local screen axes onto the ground and normalize safely so
 /// equal screen-axis components remain an equal analog diagonal after tilt.
 fn camera_ground_basis(camera: &GlobalTransform) -> (Vec3, Vec3) {
-    let rotation = camera.rotation();
+    camera_ground_basis_from_rotation(camera.rotation())
+}
+
+fn camera_ground_basis_from_rotation(rotation: Quat) -> (Vec3, Vec3) {
     (
         safe_ground_normalize(rotation * Vec3::X).unwrap_or(Vec3::ZERO),
         safe_ground_normalize(rotation * Vec3::Y).unwrap_or(Vec3::ZERO),
@@ -348,11 +368,10 @@ fn eligible_touch(touch: &ActiveTouch) -> bool {
 }
 
 fn update_drive_owner(owner: Option<u64>, touches: &[ActiveTouch]) -> Option<u64> {
-    if owner.is_some_and(|id| {
-        touches
-            .iter()
-            .any(|touch| touch.id == id && eligible_touch(touch))
-    }) {
+    // Eligibility is checked only while acquiring a role. A live owner is
+    // sticky until release even if orientation changes its normalized start
+    // coordinate into the pause rectangle.
+    if owner.is_some_and(|id| touches.iter().any(|touch| touch.id == id)) {
         owner
     } else {
         // Touch iteration order is not stable. IDs provide a deterministic tie
@@ -371,11 +390,8 @@ fn touch_intent(
     window_size: Vec2,
     camera_basis: Option<(Vec3, Vec3)>,
 ) -> TouchIntent {
-    let owner_touch = owner.and_then(|id| {
-        touches
-            .iter()
-            .find(|touch| touch.id == id && eligible_touch(touch))
-    });
+    // Ownership has already been selected by `update_drive_owner`.
+    let owner_touch = owner.and_then(|id| touches.iter().find(|touch| touch.id == id));
     let desired_direction = owner_touch.and_then(|touch| {
         let drag = (touch.current - touch.start) * window_size;
         let (screen_right, screen_up) = camera_basis?;
@@ -390,6 +406,85 @@ fn touch_intent(
         desired_direction,
         action,
     }
+}
+
+fn exp_smoothing_alpha(rate: f32, dt: f32) -> f32 {
+    1.0 - (-rate.max(0.0) * dt.max(0.0)).exp()
+}
+
+/// Update the virtual analog stick and return a filtered pixel drag. A newly
+/// promoted owner starts at its current finger location, preventing a jump on
+/// release promotion, pause/resume, or an orientation change.
+fn filtered_owner_drag(
+    steering: &mut TouchSteering,
+    owner: Option<u64>,
+    touches: &[ActiveTouch],
+    window_size: Vec2,
+    dt: f32,
+) -> Option<Vec2> {
+    let owner_touch = owner.and_then(|id| touches.iter().find(|touch| touch.id == id));
+    let Some(touch) = owner_touch else {
+        *steering = TouchSteering::default();
+        return None;
+    };
+    let current_px = touch.current * window_size;
+    if steering.owner != owner || steering.window_size != window_size || !current_px.is_finite() {
+        *steering = TouchSteering {
+            owner,
+            window_size,
+            origin_px: current_px,
+            ..default()
+        };
+        return None;
+    }
+
+    let mut raw = current_px - steering.origin_px;
+    let mut length = raw.length();
+    if length > FLOATING_ORIGIN_RADIUS_PX {
+        raw *= FLOATING_ORIGIN_RADIUS_PX / length;
+        length = FLOATING_ORIGIN_RADIUS_PX;
+        steering.origin_px = current_px - raw;
+    }
+
+    if steering.engaged {
+        if length <= TOUCH_JITTER_PX + TOUCH_JITTER_EPSILON_PX {
+            steering.engaged = false;
+            steering.filtered_drag = Vec2::ZERO;
+            return None;
+        }
+    } else if length > TOUCH_ENGAGE_PX {
+        steering.engaged = true;
+    } else {
+        steering.filtered_drag = Vec2::ZERO;
+        return None;
+    }
+
+    steering.filtered_drag = steering
+        .filtered_drag
+        .lerp(raw, exp_smoothing_alpha(TOUCH_DIRECTION_SMOOTH, dt));
+    (steering.filtered_drag.length_squared() > (TOUCH_JITTER_PX + TOUCH_JITTER_EPSILON_PX).powi(2))
+        .then_some(steering.filtered_drag)
+}
+
+fn smoothed_touch_intent(
+    owner: Option<u64>,
+    touches: &[ActiveTouch],
+    window_size: Vec2,
+    camera_basis: Option<(Vec3, Vec3)>,
+    steering: &mut TouchSteering,
+    dt: f32,
+) -> TouchIntent {
+    let mut intent = touch_intent(owner, touches, window_size, None);
+    intent.desired_direction = filtered_owner_drag(steering, owner, touches, window_size, dt)
+        .and_then(|drag| {
+            let (right, up) = camera_basis?;
+            // The state machine already applies the center deadzone.
+            safe_ground_normalize(
+                safe_ground_normalize(right).unwrap_or(Vec3::ZERO) * drag.x
+                    - safe_ground_normalize(up).unwrap_or(Vec3::ZERO) * drag.y,
+            )
+        });
+    intent
 }
 
 /// Merge touch intent onto keyboard input. The owner always requests forward
@@ -505,7 +600,9 @@ fn read_touch_input(
     car: Query<&Car>,
     cameras: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
     mut owner: ResMut<DriveTouchOwner>,
+    mut steering: ResMut<TouchSteering>,
     mut input: ResMut<PlayerInput>,
+    time: Res<Time>,
 ) {
     let Some(window_size) = primary_window_size(&windows) else {
         return;
@@ -536,14 +633,29 @@ fn read_touch_input(
         return;
     };
     let (speed, heading) = (car.speed, car.heading);
-    let intent = touch_intent(owner.0, &active_touches, window_size, camera_basis);
+    let intent = smoothed_touch_intent(
+        owner.0,
+        &active_touches,
+        window_size,
+        camera_basis,
+        &mut steering,
+        time.delta_secs(),
+    );
     *input = merge_touch_input(*input, intent, speed, heading);
     // Touch never writes Handbrake: keyboard Shift remains wholly owned by the
     // keyboard system and cannot be clobbered by touch release/cancel.
 }
 
-fn reset_drive_touch_owner(mut owner: ResMut<DriveTouchOwner>) {
-    owner.0 = None;
+fn reset_drive_touch_owner(
+    owner: Option<ResMut<DriveTouchOwner>>,
+    steering: Option<ResMut<TouchSteering>>,
+) {
+    if let Some(mut owner) = owner {
+        owner.0 = None;
+    }
+    if let Some(mut steering) = steering {
+        *steering = TouchSteering::default();
+    }
 }
 
 fn spawn_touch_hud(mut commands: Commands, active: Res<TouchControlsActive>) {
@@ -827,13 +939,22 @@ mod tests {
 
     #[test]
     fn camera_basis_projects_local_right_and_up_onto_ground() {
-        let transform = GlobalTransform::from(
-            Transform::from_xyz(12.0, 12.0, 12.0).looking_at(Vec3::ZERO, Vec3::Y),
-        );
+        let camera = Transform::from_xyz(12.0, 12.0, 12.0).looking_at(Vec3::ZERO, Vec3::Y);
+        let rotation = camera.rotation;
+        let transform = GlobalTransform::from(camera);
         let (right, up) = camera_ground_basis(&transform);
         assert_vec3_close(right, Vec3::new(1.0, 0.0, -1.0).normalize());
         assert_vec3_close(up, Vec3::new(-1.0, 0.0, -1.0).normalize());
         assert!(right.dot(up).abs() < 1.0e-5);
+
+        // Follow translation, collision shake, and world streaming must not
+        // rotate touch steering: only the fixed gameplay rotation is used.
+        let translated = GlobalTransform::from(Transform {
+            translation: Vec3::new(-400.0, 80.0, 900.0),
+            rotation,
+            ..default()
+        });
+        assert_eq!(camera_ground_basis(&translated), (right, up));
     }
 
     #[test]
@@ -902,13 +1023,143 @@ mod tests {
     }
 
     #[test]
+    fn filtered_drag_has_deadzone_hysteresis_no_overshoot_and_clean_release() {
+        let size = Vec2::new(844.0, 390.0);
+        let start = Vec2::new(0.25, 0.5);
+        let mut steering = TouchSteering::default();
+        let at = |pixels: Vec2| [touch(1, start, start + pixels / size)];
+
+        assert_eq!(
+            filtered_owner_drag(&mut steering, Some(1), &at(Vec2::ZERO), size, 1.0 / 60.0),
+            None
+        );
+        for jitter in [Vec2::new(6.0, 0.0), Vec2::new(7.9, 0.0)] {
+            assert_eq!(
+                filtered_owner_drag(&mut steering, Some(1), &at(jitter), size, 1.0 / 60.0),
+                None
+            );
+        }
+        let mut previous = 0.0;
+        for _ in 0..20 {
+            if let Some(drag) = filtered_owner_drag(
+                &mut steering,
+                Some(1),
+                &at(Vec2::new(40.0, -30.0)),
+                size,
+                1.0 / 60.0,
+            ) {
+                assert!(drag.x >= previous && drag.x <= 40.0);
+                previous = drag.x;
+            }
+        }
+        assert!(steering.engaged);
+        assert_eq!(
+            filtered_owner_drag(
+                &mut steering,
+                Some(1),
+                &at(Vec2::new(6.0, 0.0)),
+                size,
+                1.0 / 60.0
+            ),
+            None
+        );
+        assert!(!steering.engaged);
+        assert_eq!(
+            filtered_owner_drag(&mut steering, None, &[], size, 1.0 / 60.0),
+            None
+        );
+        assert_eq!(steering, TouchSteering::default());
+    }
+
+    #[test]
+    fn analog_diagonal_filter_is_framerate_independent() {
+        let run = |hz: usize| {
+            let size = Vec2::new(844.0, 390.0);
+            let start = Vec2::new(0.25, 0.5);
+            let moved = [touch(1, start, start + Vec2::new(80.0, -60.0) / size)];
+            let mut steering = TouchSteering::default();
+            let _ = filtered_owner_drag(
+                &mut steering,
+                Some(1),
+                &[touch(1, start, start)],
+                size,
+                1.0 / hz as f32,
+            );
+            for _ in 0..hz {
+                let _ = filtered_owner_drag(&mut steering, Some(1), &moved, size, 1.0 / hz as f32);
+            }
+            steering.filtered_drag
+        };
+        let at_30 = run(30);
+        assert!((at_30 - run(60)).length() < 1e-3);
+        assert!((at_30 - run(120)).length() < 1e-3);
+        assert!((at_30.x / -at_30.y - 4.0 / 3.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn floating_origin_is_bounded_and_preserves_direction() {
+        let size = Vec2::new(844.0, 390.0);
+        let start = Vec2::new(0.25, 0.5);
+        let mut steering = TouchSteering::default();
+        let _ = filtered_owner_drag(
+            &mut steering,
+            Some(7),
+            &[touch(7, start, start)],
+            size,
+            1.0 / 60.0,
+        );
+        let far = [touch(7, start, start + Vec2::new(300.0, 400.0) / size)];
+        let _ = filtered_owner_drag(&mut steering, Some(7), &far, size, 1.0);
+        let drag = far[0].current * size - steering.origin_px;
+        assert!((drag.length() - FLOATING_ORIGIN_RADIUS_PX).abs() < 1e-4);
+        assert!(drag.x > 0.0 && drag.y > 0.0);
+    }
+
+    #[test]
+    fn owner_stays_sticky_and_filter_recenters_when_orientation_changes() {
+        let original = touch(11, Vec2::new(0.8, 0.5), Vec2::new(0.8, 0.5));
+        let rotated_coordinates = touch(11, Vec2::new(0.5, 0.1), Vec2::new(0.5, 0.1));
+        assert_eq!(update_drive_owner(None, &[original]), Some(11));
+        assert_eq!(
+            update_drive_owner(Some(11), &[rotated_coordinates]),
+            Some(11)
+        );
+
+        let mut steering = TouchSteering::default();
+        let landscape = Vec2::new(844.0, 390.0);
+        let portrait = Vec2::new(390.0, 844.0);
+        let _ = filtered_owner_drag(&mut steering, Some(11), &[original], landscape, 1.0 / 60.0);
+        steering.engaged = true;
+        steering.filtered_drag = Vec2::splat(30.0);
+        assert_eq!(
+            filtered_owner_drag(
+                &mut steering,
+                Some(11),
+                &[rotated_coordinates],
+                portrait,
+                1.0 / 60.0,
+            ),
+            None
+        );
+        assert_eq!(steering.window_size, portrait);
+        assert!(!steering.engaged);
+        assert_eq!(steering.filtered_drag, Vec2::ZERO);
+    }
+
+    #[test]
     fn drive_owner_resets_across_playing_state_exit() {
         let mut app = App::new();
         app.init_resource::<DriveTouchOwner>()
+            .init_resource::<TouchSteering>()
             .add_systems(Update, reset_drive_touch_owner);
         app.world_mut().resource_mut::<DriveTouchOwner>().0 = Some(42);
+        app.world_mut().resource_mut::<TouchSteering>().engaged = true;
         app.update();
         assert_eq!(app.world().resource::<DriveTouchOwner>().0, None);
+        assert_eq!(
+            *app.world().resource::<TouchSteering>(),
+            TouchSteering::default()
+        );
     }
 
     #[test]
@@ -921,6 +1172,8 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(InputPlugin)
             .init_resource::<DriveTouchOwner>()
+            .init_resource::<TouchSteering>()
+            .insert_resource(Time::<()>::default())
             .insert_resource(InputFrozen(false))
             .insert_resource(keyboard_snapshot)
             .add_systems(Update, read_touch_input.in_set(TouchInputSet));
@@ -1030,14 +1283,24 @@ mod tests {
         );
         assert!(touch_intent(Some(70), &[second, first], size, basis).action);
 
-        // Releasing the owner promotes the remaining touch; with one eligible
-        // touch left the action role clears and its analog drag becomes desired.
+        // Releasing the owner promotes the remaining touch. Its action role
+        // clears immediately and the filtered analog origin is initialized at
+        // its current point, so promotion cannot kick the wheel.
         let promoted = update_drive_owner(Some(70), &[second]);
         assert_eq!(promoted, Some(9));
-        let promoted_intent = touch_intent(promoted, &[second], size, basis);
+        let mut steering = TouchSteering {
+            owner: Some(70),
+            window_size: size,
+            origin_px: Vec2::splat(100.0),
+            filtered_drag: Vec2::splat(40.0),
+            engaged: true,
+        };
+        let promoted_intent =
+            smoothed_touch_intent(promoted, &[second], size, basis, &mut steering, 1.0 / 60.0);
         assert!(promoted_intent.owner);
         assert!(!promoted_intent.action);
-        assert!(promoted_intent.desired_direction.is_some());
+        assert_eq!(promoted_intent.desired_direction, None);
+        assert_eq!(steering.owner, Some(9));
         assert_eq!(update_drive_owner(promoted, &[]), None);
     }
 

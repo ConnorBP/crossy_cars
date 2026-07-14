@@ -15,12 +15,27 @@ use crate::game::state::GameState;
 use crate::settings::Settings;
 use crate::world::world_review_bounds;
 
-/// Exponential smoothing rate for camera follow / zoom (higher = snappier).
+/// Exponential smoothing rate for speed zoom (higher = snappier).
 const SMOOTH: f32 = 4.0;
-const DIRECTION_SMOOTH: f32 = 4.0;
-const ANCHOR_SMOOTH: f32 = 12.0;
-const TRAILING_NDC_LIMIT: f32 = 0.8;
-const TELEPORT_DISTANCE_SQ: f32 = 16.0;
+/// Direction and composition deliberately settle independently. Travel
+/// direction damps slowly, while composition has its own response and tighter
+/// screen-axis slew caps so a sharp correction cannot whip across the frame.
+const DIRECTION_SMOOTH: f32 = 2.0;
+const LEAD_SMOOTH: f32 = 3.0;
+/// Full-speed lead is intentionally modest: Roady remains comfortably inside
+/// the frame instead of riding the old 80% NDC edge.
+const TRAILING_NDC_LIMIT: f32 = 0.42;
+/// Normal driving (max speed 12) is followed without accumulating a permanent
+/// absolute lag. Only exceptional collision pushout is rate limited.
+const ANCHOR_MAX_SPEED: f32 = 18.0;
+/// Screen-space lead slew bounds. The tighter vertical bound is important for
+/// the fixed isometric projection: lateral world lead otherwise reads mostly
+/// as a distracting up/down camera move during turns.
+const LEAD_HORIZONTAL_NDC_PER_SECOND: f32 = 0.9;
+const LEAD_VERTICAL_NDC_PER_SECOND: f32 = 0.28;
+// Only genuine large relocations bypass the per-frame anchor cap. Ordinary
+// obstacle/collision correction remains far below this 20-unit threshold.
+const TELEPORT_DISTANCE_SQ: f32 = 400.0;
 
 /// State local to the production gameplay camera. World-review cameras never
 /// receive this component, so their deterministic atlas framing stays fixed.
@@ -29,7 +44,7 @@ struct GameplayCamera {
     previous_car_xz: Vec2,
     travel_direction: Vec2,
     smoothed_car_xz: Vec2,
-    smoothed_ground_offset: Vec2,
+    smoothed_lead_ndc: Vec2,
     initialized: bool,
 }
 
@@ -39,7 +54,7 @@ impl Default for GameplayCamera {
             previous_car_xz: Vec2::ZERO,
             travel_direction: Vec2::Y,
             smoothed_car_xz: Vec2::ZERO,
-            smoothed_ground_offset: Vec2::ZERO,
+            smoothed_lead_ndc: Vec2::ZERO,
             initialized: false,
         }
     }
@@ -202,7 +217,7 @@ fn spawn_camera(mut commands: Commands) {
         }),
         // T7 fix preserved: the iso rotation is set ONCE here at spawn via
         // `looking_at(ZERO, Y)` and NEVER recomputed per frame. `follow_camera`
-        // only lerps translation + adjusts the ortho viewport_height (zoom).
+        // only changes translation + the ortho viewport_height (zoom).
         Transform::from_xyz(12.0, 12.0, 12.0).looking_at(Vec3::ZERO, Vec3::Y),
         GameplayCamera::default(),
     ));
@@ -247,18 +262,22 @@ fn follow_camera(
     let car_xz = Vec2::new(car_t.translation.x, car_t.translation.z);
     let displacement = car_xz - framing.previous_car_xz;
     let desired_travel = travel_direction(car.heading, car.drift, car.speed);
+    let follow_error = car_xz - framing.smoothed_car_xz;
 
-    if !framing.initialized || displacement.length_squared() > TELEPORT_DISTANCE_SQ {
+    if !framing.initialized
+        || !displacement.is_finite()
+        || !follow_error.is_finite()
+        || displacement.length_squared() > TELEPORT_DISTANCE_SQ
+        || follow_error.length_squared() > TELEPORT_DISTANCE_SQ
+    {
         framing.previous_car_xz = car_xz;
         framing.smoothed_car_xz = car_xz;
         framing.travel_direction = desired_travel;
-        framing.smoothed_ground_offset = Vec2::ZERO;
+        framing.smoothed_lead_ndc = Vec2::ZERO;
         framing.initialized = true;
     } else {
         framing.previous_car_xz = car_xz;
-        framing.smoothed_car_xz = framing
-            .smoothed_car_xz
-            .lerp(car_xz, exp_smoothing_alpha(ANCHOR_SMOOTH, dt));
+        framing.smoothed_car_xz = capped_anchor_step(framing.smoothed_car_xz, car_xz, dt);
         if car.speed.abs() > 0.1 {
             framing.travel_direction = smoothed_direction(
                 framing.travel_direction,
@@ -286,13 +305,17 @@ fn follow_camera(
     let projected_travel =
         projected_ground_direction(framing.travel_direction, cam_t.rotation, aspect);
     let desired_car_ndc = trailing_ndc_offset(projected_travel, TRAILING_NDC_LIMIT) * speed_ratio;
-    let ground_offset =
-        ground_offset_for_ndc(desired_car_ndc, cam_t.rotation, viewport_height, aspect);
-    framing.smoothed_ground_offset = if settings.reduced_motion {
+    framing.smoothed_lead_ndc = if settings.reduced_motion {
         Vec2::ZERO
     } else {
-        framing.smoothed_ground_offset.lerp(ground_offset, t)
+        damped_lead_ndc(framing.smoothed_lead_ndc, desired_car_ndc, dt)
     };
+    let ground_offset = ground_offset_for_ndc(
+        framing.smoothed_lead_ndc,
+        cam_t.rotation,
+        viewport_height,
+        aspect,
+    );
     let desired = camera_target_translation(
         Vec3::new(
             framing.smoothed_car_xz.x,
@@ -300,19 +323,18 @@ fn follow_camera(
             framing.smoothed_car_xz.y,
         ),
         cfg.cam_offset,
-        framing.smoothed_ground_offset,
+        ground_offset,
     );
 
     // Smooth the car anchor quickly enough to avoid visible collision/pushout
     // jolts, while the slower lead offset changes the composition gently.
     cam_t.translation = desired;
 
-    // T13: translational shake offset. Applied AFTER the follow lerp so the
-    // crash jolt rides on top of the smoothed position. Because next frame's
-    // lerp starts from this shaken translation and re-aims at `desired`, the
-    // offset naturally washes out as trauma decays — no snap-back. ONLY
-    // translation is touched; `cam_t.rotation` is never modified (preserves
-    // the T7 fixed-iso-rotation no-tilt fix).
+    // T13: translational shake offset. Applied AFTER the independently
+    // smoothed anchor/lead so the crash jolt rides on top without contaminating
+    // either follow state. Trauma decay washes it out without a framing snap.
+    // ONLY translation is touched; `cam_t.rotation` is never modified
+    // (preserves the T7 fixed-iso-rotation no-tilt fix).
     if shake.trauma > 0.001 {
         if !settings.reduced_motion {
             // Cheap deterministic pseudo-randomness (no crate). Fract-of-sin gives
@@ -418,8 +440,38 @@ fn exp_smoothing_alpha(rate: f32, dt: f32) -> f32 {
     1.0 - (-rate.max(0.0) * dt.max(0.0)).exp()
 }
 
-/// Smooth direction by a bounded angular step. Unlike normalized linear
-/// interpolation, this can cross a 180-degree reversal without getting stuck.
+fn capped_anchor_step(previous: Vec2, desired: Vec2, dt: f32) -> Vec2 {
+    let delta = desired - previous;
+    let max_step = ANCHOR_MAX_SPEED * dt.max(0.0);
+    if !delta.is_finite() || max_step <= 0.0 {
+        return previous;
+    }
+    previous + delta.clamp_length_max(max_step)
+}
+
+fn damped_lead_ndc(previous: Vec2, desired: Vec2, dt: f32) -> Vec2 {
+    if !previous.is_finite() || !desired.is_finite() {
+        return Vec2::ZERO;
+    }
+    let dt = dt.max(0.0);
+    let candidate = previous.lerp(desired, exp_smoothing_alpha(LEAD_SMOOTH, dt));
+    let delta = candidate - previous;
+    previous
+        + Vec2::new(
+            delta.x.clamp(
+                -LEAD_HORIZONTAL_NDC_PER_SECOND * dt,
+                LEAD_HORIZONTAL_NDC_PER_SECOND * dt,
+            ),
+            delta.y.clamp(
+                -LEAD_VERTICAL_NDC_PER_SECOND * dt,
+                LEAD_VERTICAL_NDC_PER_SECOND * dt,
+            ),
+        )
+}
+
+/// Smooth direction along the shortest arc. Scaling the remaining angle by an
+/// exponential alpha is frame-rate independent for a fixed target, cannot
+/// overshoot, and still crosses an exact 180-degree reversal deterministically.
 fn smoothed_direction(previous: Vec2, desired: Vec2, alpha: f32) -> Vec2 {
     let previous = previous.normalize_or_zero();
     let desired = desired.normalize_or_zero();
@@ -436,7 +488,7 @@ fn smoothed_direction(previous: Vec2, desired: Vec2, alpha: f32) -> Vec2 {
     } else {
         cross.atan2(dot)
     };
-    let step = signed_angle.clamp(-1.5 * alpha, 1.5 * alpha);
+    let step = signed_angle * alpha.clamp(0.0, 1.0);
     Vec2::from_angle(step).rotate(previous).normalize_or_zero()
 }
 
@@ -483,11 +535,12 @@ fn ground_offset_for_ndc(ndc: Vec2, rotation: Quat, height: f32, aspect: f32) ->
 #[cfg(test)]
 mod tests {
     use super::{
-        ANCHOR_SMOOTH, CameraObstacleFeedbackSet, GameplayCamera, camera_target_translation,
-        camera_viewport_height, configure_obstacle_feedback_order, exp_smoothing_alpha,
-        ground_offset_for_ndc, next_trauma, projected_ground_direction,
-        reset_camera_framing_for_fresh_round, review_projection_for_bounds, smoothed_direction,
-        trailing_ndc_offset, travel_direction,
+        ANCHOR_MAX_SPEED, CameraObstacleFeedbackSet, DIRECTION_SMOOTH, GameplayCamera,
+        LEAD_VERTICAL_NDC_PER_SECOND, TRAILING_NDC_LIMIT, camera_target_translation,
+        camera_viewport_height, capped_anchor_step, configure_obstacle_feedback_order,
+        damped_lead_ndc, exp_smoothing_alpha, ground_offset_for_ndc, next_trauma,
+        projected_ground_direction, reset_camera_framing_for_fresh_round,
+        review_projection_for_bounds, smoothed_direction, trailing_ndc_offset, travel_direction,
     };
     use crate::{car::DrivingSet, game::resources::RoundActive, world::world_review_bounds};
     use bevy::prelude::*;
@@ -570,18 +623,20 @@ mod tests {
     }
 
     #[test]
-    fn full_speed_framing_places_car_at_ten_percent_trailing_margin() {
+    fn full_speed_framing_uses_reduced_bounded_trailing_lead() {
         let rotation = gameplay_rotation();
         for (width, height) in [(844.0, 390.0), (960.0, 480.0), (1280.0, 720.0)] {
             let aspect = width / height;
             for travel in [Vec2::X, Vec2::Y, Vec2::new(1.0, 1.0).normalize()] {
                 let projected = projected_ground_direction(travel, rotation, aspect);
-                let desired_ndc = trailing_ndc_offset(projected, 0.8);
+                let desired_ndc = trailing_ndc_offset(projected, TRAILING_NDC_LIMIT);
                 let ground_offset = ground_offset_for_ndc(desired_ndc, rotation, 12.0, aspect);
                 let actual_ndc = projected_car_ndc(ground_offset, rotation, 12.0, aspect);
                 assert!((actual_ndc - desired_ndc).length() < 1e-4);
-                assert!(actual_ndc.x.abs() <= 0.8001 && actual_ndc.y.abs() <= 0.8001);
-                assert!((actual_ndc.x.abs().max(actual_ndc.y.abs()) - 0.8).abs() < 1e-4);
+                assert!(actual_ndc.x.abs() <= 0.4201 && actual_ndc.y.abs() <= 0.4201);
+                assert!(
+                    (actual_ndc.x.abs().max(actual_ndc.y.abs()) - TRAILING_NDC_LIMIT).abs() < 1e-4
+                );
                 assert!(actual_ndc.dot(projected) < 0.0, "car must trail travel");
             }
         }
@@ -603,7 +658,7 @@ mod tests {
             previous_car_xz: Vec2::new(3.0, 0.0),
             travel_direction: -Vec2::Y,
             smoothed_car_xz: Vec2::new(3.0, 0.0),
-            smoothed_ground_offset: Vec2::new(5.0, -4.0),
+            smoothed_lead_ndc: Vec2::new(0.3, -0.2),
             initialized: true,
         };
         let mut app = App::new();
@@ -614,18 +669,18 @@ mod tests {
 
         let framing = app.world().get::<GameplayCamera>(camera).unwrap();
         assert!(!framing.initialized);
-        assert_eq!(framing.smoothed_ground_offset, Vec2::ZERO);
+        assert_eq!(framing.smoothed_lead_ndc, Vec2::ZERO);
 
         app.world_mut().resource_mut::<RoundActive>().0 = true;
         {
             let mut framing = app.world_mut().get_mut::<GameplayCamera>(camera).unwrap();
             framing.initialized = true;
-            framing.smoothed_ground_offset = Vec2::new(2.0, 1.0);
+            framing.smoothed_lead_ndc = Vec2::new(0.2, 0.1);
         }
         app.update();
         let framing = app.world().get::<GameplayCamera>(camera).unwrap();
         assert!(framing.initialized);
-        assert_eq!(framing.smoothed_ground_offset, Vec2::new(2.0, 1.0));
+        assert_eq!(framing.smoothed_lead_ndc, Vec2::new(0.2, 0.1));
     }
 
     #[test]
@@ -638,13 +693,21 @@ mod tests {
 
     #[test]
     fn smoothed_anchor_bounds_one_frame_collision_pushout() {
-        let alpha = exp_smoothing_alpha(ANCHOR_SMOOTH, 1.0 / 60.0);
-        let after = Vec2::ZERO.lerp(Vec2::X, alpha);
-        assert!(after.x > 0.0 && after.x < 0.2);
+        let dt = 1.0 / 60.0;
+        let after = capped_anchor_step(Vec2::ZERO, Vec2::X, dt);
+        assert!(after.x > 0.0);
+        assert!(after.length() <= ANCHOR_MAX_SPEED * dt + 1e-6);
     }
 
     #[test]
-    fn stable_framing_tracks_car_delta_without_absolute_follow_lag() {
+    fn stable_framing_tracks_normal_car_delta_without_absolute_follow_lag() {
+        let dt = 1.0 / 60.0;
+        let normal_max_speed_delta = Vec2::new(0.0, 12.0 * dt);
+        assert_eq!(
+            capped_anchor_step(Vec2::ZERO, normal_max_speed_delta, dt),
+            normal_max_speed_delta
+        );
+
         let base = Vec3::new(12.0, 12.0, 12.0);
         let lead = Vec2::new(4.0, -3.0);
         let before = camera_target_translation(Vec3::new(2.0, 0.0, 5.0), base, lead);
@@ -656,7 +719,7 @@ mod tests {
     #[test]
     fn direction_smoothing_rejects_one_frame_reverse_noise() {
         let forward = Vec2::Y;
-        let alpha = exp_smoothing_alpha(4.0, 1.0 / 60.0);
+        let alpha = exp_smoothing_alpha(DIRECTION_SMOOTH, 1.0 / 60.0);
         let after_noise = smoothed_direction(forward, -forward, alpha);
         assert!(after_noise.dot(forward) > 0.99);
 
@@ -675,6 +738,57 @@ mod tests {
         let at_30 = run(30);
         assert!((at_30 - run(60)).abs() < 1e-5);
         assert!((at_30 - run(120)).abs() < 1e-5);
+    }
+
+    #[test]
+    fn ninety_degree_turn_has_bounded_anchor_and_reduced_vertical_lead_motion() {
+        let dt = 1.0 / 60.0;
+        let anchor = capped_anchor_step(Vec2::ZERO, Vec2::new(4.0, 4.0), dt);
+        assert!(anchor.length() <= ANCHOR_MAX_SPEED * dt + 1e-6);
+
+        let previous = Vec2::new(-TRAILING_NDC_LIMIT, 0.0);
+        let desired = Vec2::new(0.0, TRAILING_NDC_LIMIT);
+        let next = damped_lead_ndc(previous, desired, dt);
+        assert!((next.y - previous.y).abs() <= LEAD_VERTICAL_NDC_PER_SECOND * dt + 1e-6);
+        assert!((next.y - previous.y).abs() < (desired.y - previous.y).abs() * 0.05);
+    }
+
+    #[test]
+    fn direction_and_lead_match_at_30_60_and_120_fps_without_overshoot() {
+        let run = |hz: usize| {
+            let dt = 1.0 / hz as f32;
+            (0..hz).fold((Vec2::Y, Vec2::ZERO), |(direction, lead), _| {
+                (
+                    smoothed_direction(
+                        direction,
+                        Vec2::X,
+                        exp_smoothing_alpha(DIRECTION_SMOOTH, dt),
+                    ),
+                    damped_lead_ndc(lead, Vec2::new(0.3, 0.08), dt),
+                )
+            })
+        };
+        let at_30 = run(30);
+        for result in [run(60), run(120)] {
+            assert!((at_30.0 - result.0).length() < 1e-5);
+            assert!((at_30.1 - result.1).length() < 1e-5);
+        }
+        assert!(
+            at_30.0.x > 0.0 && at_30.0.y > 0.0,
+            "must approach, not overshoot, target"
+        );
+    }
+
+    #[test]
+    fn lead_release_is_monotonic_and_has_no_jitter_overshoot() {
+        let mut lead = Vec2::new(0.3, -0.2);
+        let mut previous_length = lead.length();
+        for _ in 0..180 {
+            lead = damped_lead_ndc(lead, Vec2::ZERO, 1.0 / 60.0);
+            assert!(lead.length() <= previous_length + 1e-6);
+            previous_length = lead.length();
+        }
+        assert!(lead.length() < 0.001);
     }
 
     #[test]
