@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import time
 import traceback
@@ -45,6 +46,9 @@ QA_SESSION_MARKER = "__roady_car_browser_qa_initialized"
 SCREENSHOT_POLICIES = {"all", "failure"}
 
 
+TURNSTILE_SCRIPT_PATH = re.compile(r"^/turnstile/v0/(?:b/[0-9a-f]+/)?api\.js$")
+
+
 def ignorable_request_failure(method: str, url: str, failure: str | None) -> bool:
     """Ignore only intentional aborts for optional remote requests."""
     if failure != "net::ERR_ABORTED":
@@ -52,7 +56,18 @@ def ignorable_request_failure(method: str, url: str, failure: str | None) -> boo
     if "/v1/leaderboard" in url:
         return True
     try:
-        return method == "POST" and urlsplit(url).path == "/cdn-cgi/rum"
+        parsed = urlsplit(url)
+        if method == "POST" and parsed.path == "/cdn-cgi/rum":
+            return True
+        return (
+            method == "GET"
+            and parsed.scheme == "https"
+            and parsed.hostname == "challenges.cloudflare.com"
+            and parsed.port in (None, 443)
+            and parsed.username is None
+            and parsed.password is None
+            and TURNSTILE_SCRIPT_PATH.fullmatch(parsed.path) is not None
+        )
     except ValueError:
         return False
 
