@@ -9,7 +9,7 @@ use bevy::post_process::bloom::Bloom;
 
 use crate::car::{Car, DrivingSet};
 use crate::game::events::ObstacleHit;
-use crate::game::resources::GameConfig;
+use crate::game::resources::{GameConfig, RoundActive};
 use crate::game::state::GameState;
 use crate::settings::Settings;
 use crate::world::world_review_bounds;
@@ -158,6 +158,10 @@ impl Plugin for CameraPlugin {
         app.init_resource::<Shake>()
             .add_systems(Startup, spawn_camera)
             .add_systems(
+                OnEnter(GameState::Playing),
+                reset_camera_framing_for_fresh_round,
+            )
+            .add_systems(
                 Update,
                 (handle_obstacle_hits, follow_camera)
                     .chain()
@@ -202,6 +206,21 @@ fn spawn_camera(mut commands: Commands) {
         Transform::from_xyz(12.0, 12.0, 12.0).looking_at(Vec3::ZERO, Vec3::Y),
         GameplayCamera::default(),
     ));
+}
+
+fn reset_camera_framing_for_fresh_round(
+    round_active: Res<RoundActive>,
+    mut cameras: Query<&mut GameplayCamera>,
+) {
+    // RoundActive remains true across pause/resume and is false only for a
+    // genuinely fresh round. Reset explicitly instead of inferring restart
+    // from distance to the origin, which fails for nearby terminal positions.
+    if round_active.0 {
+        return;
+    }
+    for mut framing in &mut cameras {
+        *framing = GameplayCamera::default();
+    }
 }
 
 fn follow_camera(
@@ -471,12 +490,13 @@ fn ground_offset_for_ndc(ndc: Vec2, rotation: Quat, height: f32, aspect: f32) ->
 #[cfg(test)]
 mod tests {
     use super::{
-        CameraObstacleFeedbackSet, camera_target_translation, camera_viewport_height,
-        configure_obstacle_feedback_order, exp_smoothing_alpha, ground_offset_for_ndc, next_trauma,
-        projected_ground_direction, review_projection_for_bounds, smoothed_direction,
+        CameraObstacleFeedbackSet, GameplayCamera, camera_target_translation,
+        camera_viewport_height, configure_obstacle_feedback_order, exp_smoothing_alpha,
+        ground_offset_for_ndc, next_trauma, projected_ground_direction,
+        reset_camera_framing_for_fresh_round, review_projection_for_bounds, smoothed_direction,
         trailing_ndc_offset,
     };
-    use crate::{car::DrivingSet, world::world_review_bounds};
+    use crate::{car::DrivingSet, game::resources::RoundActive, world::world_review_bounds};
     use bevy::prelude::*;
 
     #[derive(Resource, Default)]
@@ -582,6 +602,37 @@ mod tests {
             relative.dot(right) / (height * aspect * 0.5),
             relative.dot(up) / (height * 0.5),
         )
+    }
+
+    #[test]
+    fn fresh_round_resets_near_origin_framing_but_pause_resume_preserves_it() {
+        let stale = GameplayCamera {
+            previous_car_xz: Vec2::new(3.0, 0.0),
+            travel_direction: -Vec2::Y,
+            reverse_candidate_secs: 0.12,
+            smoothed_ground_offset: Vec2::new(5.0, -4.0),
+            initialized: true,
+        };
+        let mut app = App::new();
+        app.insert_resource(RoundActive(false));
+        let camera = app.world_mut().spawn(stale).id();
+        app.add_systems(Update, reset_camera_framing_for_fresh_round);
+        app.update();
+
+        let framing = app.world().get::<GameplayCamera>(camera).unwrap();
+        assert!(!framing.initialized);
+        assert_eq!(framing.smoothed_ground_offset, Vec2::ZERO);
+
+        app.world_mut().resource_mut::<RoundActive>().0 = true;
+        {
+            let mut framing = app.world_mut().get_mut::<GameplayCamera>(camera).unwrap();
+            framing.initialized = true;
+            framing.smoothed_ground_offset = Vec2::new(2.0, 1.0);
+        }
+        app.update();
+        let framing = app.world().get::<GameplayCamera>(camera).unwrap();
+        assert!(framing.initialized);
+        assert_eq!(framing.smoothed_ground_offset, Vec2::new(2.0, 1.0));
     }
 
     #[test]
