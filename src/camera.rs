@@ -18,9 +18,8 @@ use crate::world::world_review_bounds;
 /// Exponential smoothing rate for camera follow / zoom (higher = snappier).
 const SMOOTH: f32 = 4.0;
 const DIRECTION_SMOOTH: f32 = 4.0;
+const ANCHOR_SMOOTH: f32 = 12.0;
 const TRAILING_NDC_LIMIT: f32 = 0.8;
-const REVERSE_CONFIRM_SECS: f32 = 0.18;
-const TRAVEL_EPSILON_SQ: f32 = 0.0001;
 const TELEPORT_DISTANCE_SQ: f32 = 16.0;
 
 /// State local to the production gameplay camera. World-review cameras never
@@ -29,7 +28,7 @@ const TELEPORT_DISTANCE_SQ: f32 = 16.0;
 struct GameplayCamera {
     previous_car_xz: Vec2,
     travel_direction: Vec2,
-    reverse_candidate_secs: f32,
+    smoothed_car_xz: Vec2,
     smoothed_ground_offset: Vec2,
     initialized: bool,
 }
@@ -39,7 +38,7 @@ impl Default for GameplayCamera {
         Self {
             previous_car_xz: Vec2::ZERO,
             travel_direction: Vec2::Y,
-            reverse_candidate_secs: 0.0,
+            smoothed_car_xz: Vec2::ZERO,
             smoothed_ground_offset: Vec2::ZERO,
             initialized: false,
         }
@@ -247,42 +246,26 @@ fn follow_camera(
     let t = exp_smoothing_alpha(SMOOTH, dt);
     let car_xz = Vec2::new(car_t.translation.x, car_t.translation.z);
     let displacement = car_xz - framing.previous_car_xz;
-    let model_forward = car_t.rotation * Vec3::NEG_Z;
-    let model_forward_xz = Vec2::new(model_forward.x, model_forward.z).normalize_or_zero();
+    let desired_travel = travel_direction(car.heading, car.drift, car.speed);
 
     if !framing.initialized || displacement.length_squared() > TELEPORT_DISTANCE_SQ {
         framing.previous_car_xz = car_xz;
-        framing.travel_direction = if model_forward_xz == Vec2::ZERO {
-            Vec2::Y
-        } else {
-            model_forward_xz
-        };
-        framing.reverse_candidate_secs = 0.0;
+        framing.smoothed_car_xz = car_xz;
+        framing.travel_direction = desired_travel;
         framing.smoothed_ground_offset = Vec2::ZERO;
         framing.initialized = true;
-    } else if displacement.length_squared() > TRAVEL_EPSILON_SQ {
-        let measured = displacement.normalize();
-        if measured.dot(framing.travel_direction) < -0.8 {
-            framing.reverse_candidate_secs += dt;
-            if framing.reverse_candidate_secs >= REVERSE_CONFIRM_SECS {
-                framing.travel_direction = smoothed_direction(
-                    framing.travel_direction,
-                    measured,
-                    exp_smoothing_alpha(DIRECTION_SMOOTH, dt),
-                );
-            }
-        } else {
-            framing.reverse_candidate_secs = 0.0;
+    } else {
+        framing.previous_car_xz = car_xz;
+        framing.smoothed_car_xz = framing
+            .smoothed_car_xz
+            .lerp(car_xz, exp_smoothing_alpha(ANCHOR_SMOOTH, dt));
+        if car.speed.abs() > 0.1 {
             framing.travel_direction = smoothed_direction(
                 framing.travel_direction,
-                measured,
+                desired_travel,
                 exp_smoothing_alpha(DIRECTION_SMOOTH, dt),
             );
         }
-        framing.previous_car_xz = car_xz;
-    } else {
-        framing.reverse_candidate_secs = 0.0;
-        framing.previous_car_xz = car_xz;
     }
 
     let aspect = windows
@@ -311,14 +294,17 @@ fn follow_camera(
         framing.smoothed_ground_offset.lerp(ground_offset, t)
     };
     let desired = camera_target_translation(
-        car_t.translation,
+        Vec3::new(
+            framing.smoothed_car_xz.x,
+            car_t.translation.y,
+            framing.smoothed_car_xz.y,
+        ),
         cfg.cam_offset,
         framing.smoothed_ground_offset,
     );
 
-    // Track the car directly and smooth only the framing offset. Smoothing the
-    // absolute target creates permanent speed-dependent lag that pulls the car
-    // back toward center and defeats the trailing inset.
+    // Smooth the car anchor quickly enough to avoid visible collision/pushout
+    // jolts, while the slower lead offset changes the composition gently.
     cam_t.translation = desired;
 
     // T13: translational shake offset. Applied AFTER the follow lerp so the
@@ -418,6 +404,12 @@ fn camera_viewport_height(
     current + (target - current) * smoothing.clamp(0.0, 1.0)
 }
 
+fn travel_direction(heading: f32, drift: f32, speed: f32) -> Vec2 {
+    let angle = heading + drift;
+    let forward = Vec2::new(-angle.sin(), -angle.cos());
+    if speed < -0.1 { -forward } else { forward }
+}
+
 fn camera_target_translation(car: Vec3, base_offset: Vec3, ground_offset: Vec2) -> Vec3 {
     car + base_offset + Vec3::new(ground_offset.x, 0.0, ground_offset.y)
 }
@@ -491,11 +483,11 @@ fn ground_offset_for_ndc(ndc: Vec2, rotation: Quat, height: f32, aspect: f32) ->
 #[cfg(test)]
 mod tests {
     use super::{
-        CameraObstacleFeedbackSet, GameplayCamera, camera_target_translation,
+        ANCHOR_SMOOTH, CameraObstacleFeedbackSet, GameplayCamera, camera_target_translation,
         camera_viewport_height, configure_obstacle_feedback_order, exp_smoothing_alpha,
         ground_offset_for_ndc, next_trauma, projected_ground_direction,
         reset_camera_framing_for_fresh_round, review_projection_for_bounds, smoothed_direction,
-        trailing_ndc_offset,
+        trailing_ndc_offset, travel_direction,
     };
     use crate::{car::DrivingSet, game::resources::RoundActive, world::world_review_bounds};
     use bevy::prelude::*;
@@ -610,7 +602,7 @@ mod tests {
         let stale = GameplayCamera {
             previous_car_xz: Vec2::new(3.0, 0.0),
             travel_direction: -Vec2::Y,
-            reverse_candidate_secs: 0.12,
+            smoothed_car_xz: Vec2::new(3.0, 0.0),
             smoothed_ground_offset: Vec2::new(5.0, -4.0),
             initialized: true,
         };
@@ -634,6 +626,21 @@ mod tests {
         let framing = app.world().get::<GameplayCamera>(camera).unwrap();
         assert!(framing.initialized);
         assert_eq!(framing.smoothed_ground_offset, Vec2::new(2.0, 1.0));
+    }
+
+    #[test]
+    fn travel_direction_uses_slip_and_reverses_only_for_reverse_speed() {
+        let forward = travel_direction(0.0, 0.2, 8.0);
+        let reverse = travel_direction(0.0, 0.2, -4.0);
+        assert!((forward + reverse).length() < 1e-6);
+        assert!(forward.x < 0.0 && forward.y < 0.0);
+    }
+
+    #[test]
+    fn smoothed_anchor_bounds_one_frame_collision_pushout() {
+        let alpha = exp_smoothing_alpha(ANCHOR_SMOOTH, 1.0 / 60.0);
+        let after = Vec2::ZERO.lerp(Vec2::X, alpha);
+        assert!(after.x > 0.0 && after.x < 0.2);
     }
 
     #[test]
