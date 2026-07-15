@@ -477,6 +477,7 @@ fn road_curb_segment_count(sock: [Edge; 4]) -> usize {
 
 const CURB_AO_WIDTH: f32 = 0.65;
 const CURB_AO_HEIGHT: f32 = 0.031;
+const CURB_AO_INNER_ALPHA: f32 = 0.20;
 
 /// One cached block-local mesh per tile kind. Each curb contributes a ribbon
 /// immediately outside its non-road long edge. The curb edge is dark and the
@@ -527,8 +528,8 @@ fn curb_contact_overlay_mesh(kind: TileKind) -> Mesh {
             normals.push([0.0, 1.0, 0.0]);
         }
         colors.extend_from_slice(&[
-            [1.0, 1.0, 1.0, 0.14],
-            [1.0, 1.0, 1.0, 0.14],
+            [1.0, 1.0, 1.0, CURB_AO_INNER_ALPHA],
+            [1.0, 1.0, 1.0, CURB_AO_INNER_ALPHA],
             [1.0, 1.0, 1.0, 0.0],
             [1.0, 1.0, 1.0, 0.0],
         ]);
@@ -1717,7 +1718,7 @@ const MAX_HAY_SPRIGS: usize = 12;
 /// Keep production lighting and projected toy shadows on the same fixed sun.
 const PRODUCTION_SUN_SOURCE: Vec3 = Vec3::new(30.0, 25.0, 15.0);
 
-const BUILDING_CONTACT_FOOTPRINT_SCALE: f32 = 1.08;
+const BUILDING_CONTACT_FOOTPRINT_SCALE: f32 = 1.35;
 const MAX_HOME_DECOR: usize = 9;
 
 /// Deterministic visual-only tree yaw. This hashes the layout identity and
@@ -7550,12 +7551,35 @@ mod tests {
                 panic!("curb overlay requires float vertex colors")
             };
             assert_eq!(colors.len(), expected_vertices);
-            assert!(
-                colors
-                    .iter()
-                    .all(|color| color[3] == 0.0 || color[3] == 0.14)
-            );
+            assert!(colors.iter().all(|color| {
+                color[3] == 0.0 || (color[3] - CURB_AO_INNER_ALPHA).abs() < f32::EPSILON
+            }));
+            if expected_vertices > 0 {
+                assert!(colors.iter().any(|color| color[3] >= 0.20));
+                assert!(colors.iter().any(|color| color[3] == 0.0));
+            }
         }
+        let material = app
+            .world()
+            .resource::<Assets<StandardMaterial>>()
+            .get(&assets.materials.curb_contact_overlay)
+            .unwrap();
+        assert_eq!(material.alpha_mode, AlphaMode::Blend);
+        assert!(material.unlit);
+        assert!(CURB_AO_HEIGHT > 0.02);
+    }
+
+    #[test]
+    fn building_contact_exposes_a_perceptible_soft_band() {
+        let footprint_boundary_radius = 1.0 / BUILDING_CONTACT_FOOTPRINT_SCALE;
+        let t = ((footprint_boundary_radius - 0.28) / (0.98 - 0.28)).clamp(0.0, 1.0);
+        let texture_alpha = 1.0 - t * t * (3.0 - 2.0 * t);
+        let effective_alpha = texture_alpha * 0.30;
+        assert!(
+            effective_alpha >= 0.06,
+            "building contact boundary alpha {effective_alpha:.3} is imperceptible"
+        );
+        assert!(BUILDING_CONTACT_FOOTPRINT_SCALE >= 1.30);
     }
 
     #[test]
