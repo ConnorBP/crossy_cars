@@ -322,6 +322,94 @@ fn exposed_pad_curb_sides(sock: [Edge; 4]) -> [bool; 4] {
     sock.map(|edge| has_road && edge == Edge::None)
 }
 
+const CURB_HALF_WIDTH: f32 = 0.75;
+const ARM_CURB_HALF_LENGTH: f32 = 8.0;
+const PAD_CURB_CENTER: f32 = ROAD_HALF_WIDTH + CURB_HALF_WIDTH;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RoadCurbSource {
+    Arm(usize),
+    PadCap(usize),
+}
+
+/// Pure block-local curb footprint used by spawning and geometry tests.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct RoadCurbPlacement {
+    source: RoadCurbSource,
+    center: Vec2,
+    half_extents: Vec2,
+}
+
+/// Derive arm curbs and exposed pad caps from socket topology. Ordinary caps
+/// span 8 units. Stub caps span 11 units so each reaches the outer curb edge
+/// at both ends: the original transforms left a 1.5-unit curb-width gap at
+/// every dead-end corner. The extension remains wholly outside the road pad.
+fn road_curb_placements(sock: [Edge; 4]) -> Vec<RoadCurbPlacement> {
+    let road_count = sock.iter().filter(|&&edge| edge == Edge::Road).count();
+    let active_stub_side = (road_count == 1)
+        .then(|| sock.iter().position(|&edge| edge == Edge::Road))
+        .flatten();
+    let mut curbs = Vec::with_capacity(12);
+    for (side, edge) in sock.into_iter().enumerate() {
+        if edge != Edge::Road {
+            continue;
+        }
+        let horizontal = side == W || side == E;
+        let along = if side == W || side == S { -12.0 } else { 12.0 };
+        for cross in [-PAD_CURB_CENTER, PAD_CURB_CENTER] {
+            curbs.push(RoadCurbPlacement {
+                source: RoadCurbSource::Arm(side),
+                center: if horizontal {
+                    Vec2::new(along, cross)
+                } else {
+                    Vec2::new(cross, along)
+                },
+                half_extents: if horizontal {
+                    Vec2::new(ARM_CURB_HALF_LENGTH, CURB_HALF_WIDTH)
+                } else {
+                    Vec2::new(CURB_HALF_WIDTH, ARM_CURB_HALF_LENGTH)
+                },
+            });
+        }
+    }
+    for (side, exposed) in exposed_pad_curb_sides(sock).into_iter().enumerate() {
+        if !exposed {
+            continue;
+        }
+        let horizontal = side == S || side == N;
+        let along = if side == W || side == S {
+            -PAD_CURB_CENTER
+        } else {
+            PAD_CURB_CENTER
+        };
+        // For a stub, the cap opposite the live arm owns both outside
+        // corners. The two perpendicular caps retain the base span and butt
+        // against it, filling the holes without coplanar overlap.
+        let opposite_stub_cap = active_stub_side
+            .is_some_and(|active| matches!((active, side), (W, E) | (E, W) | (S, N) | (N, S)));
+        let half_length = ROAD_HALF_WIDTH
+            + if opposite_stub_cap {
+                CURB_HALF_WIDTH * 2.0
+            } else {
+                0.0
+            };
+        curbs.push(RoadCurbPlacement {
+            source: RoadCurbSource::PadCap(side),
+            center: if horizontal {
+                Vec2::new(0.0, along)
+            } else {
+                Vec2::new(along, 0.0)
+            },
+            half_extents: if horizontal {
+                Vec2::new(half_length, CURB_HALF_WIDTH)
+            } else {
+                Vec2::new(CURB_HALF_WIDTH, half_length)
+            },
+        });
+    }
+    curbs
+}
+
 fn road_curb_segment_count(sock: [Edge; 4]) -> usize {
     let arms = sock.iter().filter(|&&edge| edge == Edge::Road).count();
     arms * 2
@@ -3042,6 +3130,7 @@ pub fn populate_block(
     } else {
         0.01
     };
+    let curb_placements = road_curb_placements(sock);
 
     commands.entity(root).with_children(|p| {
         // --- Ground cell (exactly block-wide; neighbours only touch edges) ---
@@ -3101,19 +3190,27 @@ pub fn populate_block(
             // Curbs and edge lines belong to the arm, never to a boundary
             // plane. Two parallel curbs make each finite arm legible.
             let line_mat = world_assets.materials.line.clone();
+            for curb in curb_placements
+                .iter()
+                .filter(|curb| matches!(curb.source, RoadCurbSource::Arm(side) if side == socket))
+            {
+                let horizontal = curb.half_extents.x > curb.half_extents.y;
+                p.spawn((
+                    Mesh3d(if horizontal {
+                        world_assets.meshes.curb_x[0].clone()
+                    } else {
+                        world_assets.meshes.curb_z[0].clone()
+                    }),
+                    MeshMaterial3d(textures.sidewalk.clone()),
+                    Transform::from_xyz(curb.center.x, 0.09, curb.center.y),
+                    Curb {
+                        half_x: curb.half_extents.x,
+                        half_z: curb.half_extents.y,
+                        height: 0.18,
+                    },
+                ));
+            }
             if socket <= E {
-                for z in [-4.75_f32, 4.75] {
-                    p.spawn((
-                        Mesh3d(world_assets.meshes.curb_x[0].clone()),
-                        MeshMaterial3d(textures.sidewalk.clone()),
-                        Transform::from_xyz(center.x, 0.09, z),
-                        Curb {
-                            half_x: 8.0,
-                            half_z: 0.75,
-                            height: 0.18,
-                        },
-                    ));
-                }
                 for z in [-3.75_f32, 3.75] {
                     p.spawn((
                         Mesh3d(world_assets.meshes.edge_line_x[0].clone()),
@@ -3130,18 +3227,6 @@ pub fn populate_block(
                     ));
                 }
             } else {
-                for x in [-4.75_f32, 4.75] {
-                    p.spawn((
-                        Mesh3d(world_assets.meshes.curb_z[0].clone()),
-                        MeshMaterial3d(textures.sidewalk.clone()),
-                        Transform::from_xyz(x, 0.09, center.y),
-                        Curb {
-                            half_x: 0.75,
-                            half_z: 8.0,
-                            height: 0.18,
-                        },
-                    ));
-                }
                 for x in [-3.75_f32, 3.75] {
                     p.spawn((
                         Mesh3d(world_assets.meshes.edge_line_z[0].clone()),
@@ -3213,36 +3298,28 @@ pub fn populate_block(
             }
         }
 
-        // Cap every exposed side of the center pad. Active sockets remain
-        // open into their arm; inactive sides get a complete 8-unit sidewalk.
-        for (side, exposed) in exposed_pad_curb_sides(sock).into_iter().enumerate() {
-            if !exposed {
-                continue;
-            }
-            let (mesh, transform, half_x, half_z) = if side == W || side == E {
-                (
-                    world_assets.meshes.curb_z[0].clone(),
-                    Transform::from_xyz(if side == W { -4.75 } else { 4.75 }, 0.09, 0.0)
-                        .with_scale(Vec3::new(1.0, 1.0, 0.5)),
-                    0.75,
-                    4.0,
-                )
-            } else {
-                (
-                    world_assets.meshes.curb_x[0].clone(),
-                    Transform::from_xyz(0.0, 0.09, if side == S { -4.75 } else { 4.75 })
-                        .with_scale(Vec3::new(0.5, 1.0, 1.0)),
-                    4.0,
-                    0.75,
-                )
-            };
+        // Cap every exposed side. Stub caps extend through the otherwise open
+        // outer corner squares, without changing curb count or height.
+        for curb in curb_placements
+            .iter()
+            .filter(|curb| matches!(curb.source, RoadCurbSource::PadCap(_)))
+        {
+            let horizontal = curb.half_extents.x > curb.half_extents.y;
             p.spawn((
-                Mesh3d(mesh),
+                Mesh3d(if horizontal {
+                    world_assets.meshes.curb_x[0].clone()
+                } else {
+                    world_assets.meshes.curb_z[0].clone()
+                }),
                 MeshMaterial3d(textures.sidewalk.clone()),
-                transform,
+                Transform::from_xyz(curb.center.x, 0.09, curb.center.y).with_scale(if horizontal {
+                    Vec3::new(curb.half_extents.x / ARM_CURB_HALF_LENGTH, 1.0, 1.0)
+                } else {
+                    Vec3::new(1.0, 1.0, curb.half_extents.y / ARM_CURB_HALF_LENGTH)
+                }),
                 Curb {
-                    half_x,
-                    half_z,
+                    half_x: curb.half_extents.x,
+                    half_z: curb.half_extents.y,
                     height: 0.18,
                 },
             ));
@@ -7070,9 +7147,136 @@ mod tests {
                 roads * 2 + (4 - roads)
             };
             assert_eq!(road_curb_segment_count(sock), expected, "{kind:?}");
+            assert_eq!(road_curb_placements(sock).len(), expected, "{kind:?}");
             for (side, exposed) in exposed_pad_curb_sides(sock).into_iter().enumerate() {
                 assert_eq!(exposed, roads > 0 && sock[side] == Edge::None, "{kind:?}");
             }
+        }
+    }
+
+    fn curb_bounds(curb: RoadCurbPlacement) -> [f32; 4] {
+        [
+            curb.center.x - curb.half_extents.x,
+            curb.center.x + curb.half_extents.x,
+            curb.center.y - curb.half_extents.y,
+            curb.center.y + curb.half_extents.y,
+        ]
+    }
+
+    fn curb_touch(a: RoadCurbPlacement, b: RoadCurbPlacement, epsilon: f32) -> bool {
+        let a = curb_bounds(a);
+        let b = curb_bounds(b);
+        a[0] <= b[1] + epsilon
+            && b[0] <= a[1] + epsilon
+            && a[2] <= b[3] + epsilon
+            && b[2] <= a[3] + epsilon
+    }
+
+    #[test]
+    fn cardinal_stub_curbs_close_arm_and_outside_pad_corners_without_road_spill() {
+        let epsilon = 1e-5;
+        for (kind, active, rotation) in [
+            (TileKind::StubW, W, 0),
+            (TileKind::StubS, S, 1),
+            (TileKind::StubE, E, 2),
+            (TileKind::StubN, N, 3),
+        ] {
+            let curbs = road_curb_placements(sockets(kind));
+            let arms: Vec<_> = curbs
+                .iter()
+                .copied()
+                .filter(|curb| curb.source == RoadCurbSource::Arm(active))
+                .collect();
+            let caps: Vec<_> = curbs
+                .iter()
+                .copied()
+                .filter(|curb| matches!(curb.source, RoadCurbSource::PadCap(_)))
+                .collect();
+            assert_eq!((arms.len(), caps.len()), (2, 3), "{kind:?}");
+
+            for arm in arms {
+                assert!(
+                    caps.iter().any(|&cap| curb_touch(arm, cap, epsilon)),
+                    "{kind:?}: arm-side curb endpoint misses cap"
+                );
+            }
+
+            let outside = match active {
+                W => Vec2::new(PAD_CURB_CENTER, 0.0),
+                E => Vec2::new(-PAD_CURB_CENTER, 0.0),
+                S => Vec2::new(0.0, PAD_CURB_CENTER),
+                N => Vec2::new(0.0, -PAD_CURB_CENTER),
+                _ => unreachable!(),
+            };
+            let perpendicular = if active == W || active == E {
+                Vec2::Y
+            } else {
+                Vec2::X
+            };
+            for sign in [-1.0, 1.0] {
+                let former_hole_center = outside + perpendicular * (sign * PAD_CURB_CENTER);
+                assert_eq!(
+                    caps.iter()
+                        .filter(|cap| {
+                            let b = curb_bounds(**cap);
+                            former_hole_center.x >= b[0] - epsilon
+                                && former_hole_center.x <= b[1] + epsilon
+                                && former_hole_center.y >= b[2] - epsilon
+                                && former_hole_center.y <= b[3] + epsilon
+                        })
+                        .count(),
+                    1,
+                    "{kind:?}: former corner hole must have one owner"
+                );
+
+                // The extended opposite cap meets the perpendicular side cap
+                // at the inner edge of the former square, with zero-area
+                // overlap rather than stacked coplanar geometry.
+                let seam = if active == W || active == E {
+                    Vec2::new(outside.x.signum() * ROAD_HALF_WIDTH, sign * PAD_CURB_CENTER)
+                } else {
+                    Vec2::new(sign * PAD_CURB_CENTER, outside.y.signum() * ROAD_HALF_WIDTH)
+                };
+                let covering: Vec<_> = caps
+                    .iter()
+                    .copied()
+                    .filter(|cap| {
+                        let b = curb_bounds(*cap);
+                        seam.x >= b[0] - epsilon
+                            && seam.x <= b[1] + epsilon
+                            && seam.y >= b[2] - epsilon
+                            && seam.y <= b[3] + epsilon
+                    })
+                    .collect();
+                assert_eq!(covering.len(), 2, "{kind:?}: caps miss seam {seam:?}");
+                let a = curb_bounds(covering[0]);
+                let b = curb_bounds(covering[1]);
+                let overlap_x = (a[1].min(b[1]) - a[0].max(b[0])).max(0.0);
+                let overlap_z = (a[3].min(b[3]) - a[2].max(b[2])).max(0.0);
+                assert!(overlap_x <= epsilon || overlap_z <= epsilon);
+            }
+
+            for cap in caps {
+                let side = match cap.source {
+                    RoadCurbSource::PadCap(side) => side,
+                    _ => unreachable!(),
+                };
+                let b = curb_bounds(cap);
+                let inner = match side {
+                    W => b[1],
+                    E => b[0],
+                    S => b[3],
+                    N => b[2],
+                    _ => unreachable!(),
+                };
+                let road_edge = if side == W || side == S {
+                    -ROAD_HALF_WIDTH
+                } else {
+                    ROAD_HALF_WIDTH
+                };
+                assert!((inner - road_edge).abs() <= epsilon, "{kind:?}: road spill");
+            }
+            assert_eq!(active, [W, S, E, N][rotation]);
         }
     }
 
