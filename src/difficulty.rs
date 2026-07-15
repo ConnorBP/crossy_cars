@@ -215,11 +215,14 @@ impl FromWorld for TrafficAssets {
             let body_mats = body_colors.map(|base_color| {
                 materials.add(StandardMaterial {
                     base_color,
-                    metallic: 0.6,
-                    // Shared glossy metallic paint responds consistently to
-                    // the scene's image-based lighting without clearcoat or
-                    // per-car material allocation.
-                    perceptual_roughness: 0.25,
+                    // Automotive paint is a dielectric colored coating, not a
+                    // bare colored metal. Keep the five cached palette
+                    // materials while giving only the body a clearcoat layer.
+                    metallic: 0.0,
+                    perceptual_roughness: 0.30,
+                    reflectance: 0.5,
+                    clearcoat: 0.85,
+                    clearcoat_perceptual_roughness: 0.20,
                     ..default()
                 })
             });
@@ -1391,6 +1394,180 @@ mod tests {
     use super::*;
     use crate::modifiers::ModifierKind;
     use crate::run_events::EventKind;
+    use bevy::ecs::world::CommandQueue;
+
+    const EXPECTED_BODY_COLORS: [Color; 5] = [
+        Color::srgb(0.85, 0.12, 0.10),
+        Color::srgb(0.15, 0.35, 0.85),
+        Color::srgb(0.18, 0.55, 0.22),
+        Color::srgb(0.78, 0.78, 0.82),
+        Color::srgb(0.95, 0.65, 0.08),
+    ];
+
+    fn traffic_asset_test_world() -> World {
+        let mut world = World::new();
+        world.init_resource::<Assets<Mesh>>();
+        world.init_resource::<Assets<StandardMaterial>>();
+        let assets = TrafficAssets::from_world(&mut world);
+        world.insert_resource(assets);
+        world
+    }
+
+    #[test]
+    fn traffic_body_palette_has_exact_cached_coated_plastic_materials() {
+        let world = traffic_asset_test_world();
+        let assets = world.resource::<TrafficAssets>();
+        let materials = world.resource::<Assets<StandardMaterial>>();
+
+        assert_eq!(assets.body_mats.len(), EXPECTED_BODY_COLORS.len());
+        // Five body paints plus the seven unchanged shared part materials.
+        assert_eq!(materials.len(), 12);
+        for (index, (handle, expected_color)) in assets
+            .body_mats
+            .iter()
+            .zip(EXPECTED_BODY_COLORS)
+            .enumerate()
+        {
+            let actual = materials.get(handle).expect("cached body material");
+            let expected = StandardMaterial {
+                base_color: expected_color,
+                metallic: 0.0,
+                perceptual_roughness: 0.30,
+                reflectance: 0.5,
+                clearcoat: 0.85,
+                clearcoat_perceptual_roughness: 0.20,
+                ..default()
+            };
+            assert_eq!(
+                format!("{actual:?}"),
+                format!("{expected:?}"),
+                "body palette material {index} differs"
+            );
+        }
+
+        for left in 0..EXPECTED_BODY_COLORS.len() {
+            for right in left + 1..EXPECTED_BODY_COLORS.len() {
+                assert_ne!(
+                    EXPECTED_BODY_COLORS[left], EXPECTED_BODY_COLORS[right],
+                    "body palette entries {left} and {right} must be distinct"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn traffic_non_body_materials_keep_their_existing_finishes() {
+        let world = traffic_asset_test_world();
+        let assets = world.resource::<TrafficAssets>();
+        let materials = world.resource::<Assets<StandardMaterial>>();
+
+        let cabin = materials.get(&assets.cabin_mat).unwrap();
+        assert_eq!(cabin.base_color, Color::srgb(0.10, 0.10, 0.18));
+        assert_eq!(cabin.metallic, 0.2);
+        assert_eq!(cabin.perceptual_roughness, 0.4);
+        assert_eq!(cabin.clearcoat, 0.0);
+
+        // Preserve the existing dark dielectric-style glazing rather than
+        // applying the body clearcoat to it.
+        let windshield = materials.get(&assets.windshield_mat).unwrap();
+        assert_eq!(windshield.base_color, Color::srgb(0.05, 0.08, 0.12));
+        assert_eq!(windshield.metallic, 0.6);
+        assert_eq!(windshield.perceptual_roughness, 0.08);
+        assert_eq!(windshield.clearcoat, 0.0);
+
+        let tire = materials.get(&assets.wheel_mat).unwrap();
+        assert_eq!(tire.base_color, Color::srgb(0.025, 0.025, 0.03));
+        assert_eq!(tire.metallic, 0.0);
+        assert_eq!(tire.perceptual_roughness, 0.92);
+        assert_eq!(tire.clearcoat, 0.0);
+
+        let hub = materials.get(&assets.hub_mat).unwrap();
+        assert_eq!(hub.base_color, Color::srgb(0.5, 0.53, 0.56));
+        assert_eq!(hub.metallic, 0.95);
+        assert_eq!(hub.perceptual_roughness, 0.18);
+        assert_eq!(hub.clearcoat, 0.0);
+
+        let headlight = materials.get(&assets.headlight_mat).unwrap();
+        assert_eq!(headlight.base_color, Color::srgb(1.0, 0.9, 0.6));
+        assert_eq!(headlight.emissive, LinearRgba::new(1.0, 0.9, 0.6, 1.0));
+        assert_eq!(headlight.perceptual_roughness, 0.18);
+        assert_eq!(headlight.clearcoat, 0.0);
+
+        let rear_light = materials.get(&assets.rear_light_mat).unwrap();
+        assert_eq!(rear_light.base_color, Color::srgb(0.45, 0.015, 0.01));
+        assert_eq!(rear_light.emissive, LinearRgba::new(0.8, 0.025, 0.015, 1.0));
+        assert_eq!(rear_light.perceptual_roughness, 0.22);
+        assert_eq!(rear_light.clearcoat, 0.0);
+
+        let shadow = materials.get(&assets.shadow_mat).unwrap();
+        assert_eq!(shadow.base_color, Color::srgba(0.0, 0.0, 0.0, 0.35));
+        assert_eq!(shadow.alpha_mode, AlphaMode::Blend);
+        assert_eq!(shadow.metallic, 0.0);
+        assert_eq!(shadow.clearcoat, 0.0);
+    }
+
+    #[test]
+    fn spawned_traffic_reuses_cached_body_material_handles() {
+        let mut world = traffic_asset_test_world();
+        let cached_body_handles = world.resource::<TrafficAssets>().body_mats.clone();
+        let material_count = world.resource::<Assets<StandardMaterial>>().len();
+        let connector = road_plan(0, 0)
+            .connectors
+            .into_iter()
+            .flatten()
+            .next()
+            .expect("origin road plan has a traffic connector");
+        let candidate = TrafficSpawnCandidate {
+            position: Vec2::ZERO,
+            half_extents: Vec2::new(TRAFFIC_HALF_WIDTH, TRAFFIC_HALF_LENGTH),
+            tangent: Vec2::Y,
+            connector,
+            distance: 0.0,
+            route_rng: 1,
+        };
+        let initial_seed = 0x1234_5678;
+        let mut expected_seed = initial_seed;
+        let expected_index = (rand(&mut expected_seed) * cached_body_handles.len() as f32) as usize
+            % cached_body_handles.len();
+        let expected_handle = cached_body_handles[expected_index].clone();
+
+        let mut queue = CommandQueue::default();
+        {
+            let assets = world.resource::<TrafficAssets>();
+            let mut commands = Commands::new(&mut queue, &world);
+            for traffic_id in 1..=2 {
+                let mut seed = initial_seed;
+                spawn_one_traffic(
+                    &mut commands,
+                    assets,
+                    candidate,
+                    5.0,
+                    0.5,
+                    traffic_id,
+                    &mut seed,
+                );
+            }
+        }
+        queue.apply(&mut world);
+
+        let mut query = world.query::<&MeshMaterial3d<StandardMaterial>>();
+        let spawned_body_handles: Vec<_> = query
+            .iter(&world)
+            .filter(|material| cached_body_handles.contains(&material.0))
+            .map(|material| material.0.clone())
+            .collect();
+        assert_eq!(spawned_body_handles.len(), 2);
+        assert!(
+            spawned_body_handles
+                .iter()
+                .all(|handle| handle == &expected_handle)
+        );
+        assert_eq!(
+            world.resource::<Assets<StandardMaterial>>().len(),
+            material_count,
+            "spawning must not allocate per-car materials"
+        );
+    }
 
     #[test]
     fn standard_traffic_count_preserves_existing_boundaries() {
