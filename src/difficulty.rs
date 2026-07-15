@@ -28,11 +28,13 @@
 //! - UI lifecycle mirrors `minimap.rs` / `health.rs`: spawned on
 //!   `OnEnter(Playing)`, despawned on `OnExit(Playing)`.
 
+#[cfg(test)]
 use bevy::color::LinearRgba;
+use bevy::gltf::GltfMaterialName;
 use bevy::prelude::*;
 use bevy::text::FontSize;
 use std::cmp::Ordering;
-use std::f32::consts::{FRAC_PI_2, TAU};
+use std::f32::consts::TAU;
 
 #[cfg(any(target_arch = "wasm32", test))]
 use crate::car::ToyShadowCaster;
@@ -51,6 +53,7 @@ use crate::touch::{
 #[cfg(target_arch = "wasm32")]
 use crate::toy_shading::ToyCastShadow;
 use crate::toy_shading::{ToyContactShadow, ToyShadingAssets, contact_shadow_transform};
+#[cfg(test)]
 use crate::toy_shading::{ToyMaterialFamily, toy_material};
 use crate::world::{
     Collider, LaneConnector, LaneCurve, LaneEdge, LaneTurn, ROAD_BLOCK_SIZE, road_plan,
@@ -119,31 +122,78 @@ const TRAFFIC_SPEED_JITTER_BASE: f32 = 0.85;
 /// retains a 0.5u/s margin below the player's documented 12.0u/s maximum.
 const TRAFFIC_MAX_SPEED: f32 = 11.5;
 
-// --- Traffic car mesh proportions ---
-const BODY_W: f32 = 1.0;
-const BODY_D: f32 = 2.0;
-const WINDSHIELD_D: f32 = 0.03;
-const TRAFFIC_WHEEL_RADIUS: f32 = 0.15;
+// Imported toy-car dimensions fit the established conservative collider and
+// share one shadow footprint across all five authored silhouettes.
 const TRAFFIC_SHADOW_FOOTPRINT: Vec2 = Vec2::new(1.38, 2.30);
+
+// Retained only for the legacy cache regression tests below. Runtime NPCs use
+// authored scenes and allocate none of this procedural geometry.
+#[cfg(test)]
+const BODY_W: f32 = 1.0;
+#[cfg(test)]
+const BODY_D: f32 = 2.0;
+#[cfg(test)]
+const WINDSHIELD_D: f32 = 0.03;
+/// The established deterministic traffic paint palette. Imported instances
+/// replace only an authored `Toy_Paint` material's base color with one entry.
+const TRAFFIC_PAINT_COLORS: [Color; 5] = [
+    Color::srgb(0.85, 0.12, 0.10),
+    Color::srgb(0.15, 0.35, 0.85),
+    Color::srgb(0.18, 0.55, 0.22),
+    Color::srgb(0.78, 0.78, 0.82),
+    Color::srgb(0.95, 0.65, 0.08),
+];
+/// Authored wheel radius shared by every imported traffic variant.
+const TRAFFIC_WHEEL_RADIUS: f32 = 0.19;
 #[cfg(target_arch = "wasm32")]
 const TRAFFIC_SHADOW_CASTER_HEIGHT: f32 = 1.10;
 
-/// Shared visual silhouettes. Selection reads the module's deterministic
-/// LCG state without advancing it, so visuals do not perturb movement rolls.
+/// Authored toy-car silhouettes. A fixed 20-bucket table gives these variants
+/// exact 6/5/4/3/2 weights without consuming the gameplay LCG.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TrafficKind {
     Sedan,
-    Van,
+    CityVan,
+    Hatchback,
+    Pickup,
+    Suv,
 }
 
 impl TrafficKind {
-    fn index(self) -> usize {
+    /// Exact node-name prefix authored into this variant's glTF hierarchy.
+    fn asset_prefix(self) -> &'static str {
         match self {
-            Self::Sedan => 0,
-            Self::Van => 1,
+            Self::Sedan => "npc_toy_sedan",
+            Self::CityVan => "npc_toy_city_van",
+            Self::Hatchback => "npc_toy_hatchback",
+            Self::Pickup => "npc_toy_pickup",
+            Self::Suv => "npc_toy_suv",
         }
     }
 }
+
+const TRAFFIC_KIND_BUCKETS: [TrafficKind; 20] = [
+    TrafficKind::Sedan,
+    TrafficKind::Sedan,
+    TrafficKind::Sedan,
+    TrafficKind::Sedan,
+    TrafficKind::Sedan,
+    TrafficKind::Sedan,
+    TrafficKind::CityVan,
+    TrafficKind::CityVan,
+    TrafficKind::CityVan,
+    TrafficKind::CityVan,
+    TrafficKind::CityVan,
+    TrafficKind::Hatchback,
+    TrafficKind::Hatchback,
+    TrafficKind::Hatchback,
+    TrafficKind::Hatchback,
+    TrafficKind::Pickup,
+    TrafficKind::Pickup,
+    TrafficKind::Pickup,
+    TrafficKind::Suv,
+    TrafficKind::Suv,
+];
 
 // --- UI placement (top-right, below the minimap) ---
 /// Minimap bottom edge = `minimap::PANEL_TOP (54) + MAP_SIZE (120)`; sit 8px
@@ -155,6 +205,59 @@ const UI_RIGHT: f32 = 16.0;
 // ===========================================================================
 // Resources
 // ===========================================================================
+
+const TRAFFIC_SEDAN_SCENE: &str = "models/traffic/toy/npc_toy_sedan.glb#Scene0";
+const TRAFFIC_CITY_VAN_SCENE: &str = "models/traffic/toy/npc_toy_city_van.glb#Scene0";
+const TRAFFIC_HATCHBACK_SCENE: &str = "models/traffic/toy/npc_toy_hatchback.glb#Scene0";
+const TRAFFIC_PICKUP_SCENE: &str = "models/traffic/toy/npc_toy_pickup.glb#Scene0";
+const TRAFFIC_SUV_SCENE: &str = "models/traffic/toy/npc_toy_suv.glb#Scene0";
+
+/// All five authored traffic scenes. They are requested once and every NPC
+/// wrapper clones one of these stable handles.
+#[derive(Resource)]
+struct TrafficVisualAssets {
+    sedan: Handle<WorldAsset>,
+    city_van: Handle<WorldAsset>,
+    hatchback: Handle<WorldAsset>,
+    pickup: Handle<WorldAsset>,
+    suv: Handle<WorldAsset>,
+}
+
+impl TrafficVisualAssets {
+    fn scene(&self, kind: TrafficKind) -> Handle<WorldAsset> {
+        match kind {
+            TrafficKind::Sedan => self.sedan.clone(),
+            TrafficKind::CityVan => self.city_van.clone(),
+            TrafficKind::Hatchback => self.hatchback.clone(),
+            TrafficKind::Pickup => self.pickup.clone(),
+            TrafficKind::Suv => self.suv.clone(),
+        }
+    }
+
+    #[cfg(test)]
+    fn all(&self) -> [Handle<WorldAsset>; 5] {
+        [
+            self.sedan.clone(),
+            self.city_van.clone(),
+            self.hatchback.clone(),
+            self.pickup.clone(),
+            self.suv.clone(),
+        ]
+    }
+}
+
+impl FromWorld for TrafficVisualAssets {
+    fn from_world(world: &mut World) -> Self {
+        let assets = world.resource::<AssetServer>();
+        Self {
+            sedan: assets.load(TRAFFIC_SEDAN_SCENE),
+            city_van: assets.load(TRAFFIC_CITY_VAN_SCENE),
+            hatchback: assets.load(TRAFFIC_HATCHBACK_SCENE),
+            pickup: assets.load(TRAFFIC_PICKUP_SCENE),
+            suv: assets.load(TRAFFIC_SUV_SCENE),
+        }
+    }
+}
 
 /// Round difficulty state.
 ///
@@ -171,9 +274,12 @@ pub struct Difficulty {
 /// Pre-built mesh + material handles for traffic cars. Built once via
 /// `FromWorld` (resource-scoping `Assets<Mesh>` then `Assets<StandardMaterial>`,
 /// mirroring `chickens.rs::ChickenAssets` / `pickups.rs::PickupAssets`).
+#[cfg(test)]
 #[derive(Resource)]
+#[allow(dead_code)]
 pub struct TrafficAssets {
-    /// Sedan and van geometry, indexed by [`TrafficKind::index`].
+    /// Legacy procedural sedan/van geometry retained only for focused cache
+    /// regression tests. Runtime traffic never spawns these visible meshes.
     body_meshes: [Handle<Mesh>; 2],
     cabin_meshes: [Handle<Mesh>; 2],
     windshield_meshes: [Handle<Mesh>; 2],
@@ -190,6 +296,7 @@ pub struct TrafficAssets {
     hub_mat: Handle<StandardMaterial>,
 }
 
+#[cfg(test)]
 impl FromWorld for TrafficAssets {
     fn from_world(world: &mut World) -> Self {
         // Build every mesh/material exactly once. Spawns below only clone
@@ -213,14 +320,7 @@ impl FromWorld for TrafficAssets {
             let wheel_mesh = meshes.add(Cylinder::new(TRAFFIC_WHEEL_RADIUS, 0.18));
             let hub_mesh = meshes.add(Cylinder::new(0.066, 0.19));
 
-            let body_colors = [
-                Color::srgb(0.85, 0.12, 0.10),
-                Color::srgb(0.15, 0.35, 0.85),
-                Color::srgb(0.18, 0.55, 0.22),
-                Color::srgb(0.78, 0.78, 0.82),
-                Color::srgb(0.95, 0.65, 0.08),
-            ];
-            let body_mats = body_colors.map(|base_color| {
+            let body_mats = TRAFFIC_PAINT_COLORS.map(|base_color| {
                 materials.add(toy_material(
                     ToyMaterialFamily::CoatedPlastic,
                     StandardMaterial {
@@ -308,12 +408,56 @@ pub struct Traffic {
     route_rng: u32,
 }
 
-/// A wheel directly parented to a [`Traffic`] root. Keeping spin as a scalar
-/// lets the animation rebuild the axle-aligned rotation each frame instead of
-/// repeatedly multiplying quaternions (which would eventually drift/tumble).
-#[derive(Component, Default)]
-struct TrafficWheel {
+/// Identity-transform wrapper that owns one asynchronously instantiated NPC
+/// scene. The exact authored prefix prevents similarly named nodes from a
+/// different selected asset from ever being bound.
+#[derive(Component, Clone, Copy, Debug)]
+struct ImportedTrafficVisual {
+    asset_prefix: &'static str,
+    paint_index: usize,
+}
+
+/// The sole per-instance clone of the selected owner's authored paint. The
+/// source handle is never mutated; every matching primitive beneath this
+/// wrapper is redirected to this handle as it arrives asynchronously.
+#[derive(Component, Clone, Debug, Default)]
+struct ImportedTrafficPaintMaterial(Option<Handle<StandardMaterial>>);
+
+/// Marks a `Toy_Paint` primitive after assignment to its owner's clone.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
+struct ImportedTrafficPaintOwner(Entity);
+
+/// Per-wrapper rolling state. Keeping this separate from wheel transforms lets
+/// every wheel be rebuilt from its captured authored baseline each frame.
+#[derive(Component, Clone, Copy, Debug, Default)]
+struct ImportedTrafficWheelAnimation {
     spin_radians: f32,
+}
+
+/// Added to the imported wrapper only while all four wheel slots are present
+/// exactly once beneath that wrapper.
+#[derive(Component, Clone, Copy, Debug)]
+struct ImportedTrafficReady;
+
+/// Marks an asynchronously discovered authored wheel pivot.
+#[derive(Component, Clone, Copy, Debug)]
+struct ImportedTrafficWheel;
+
+/// Stable gameplay owner used to read speed without depending on the glTF's
+/// intermediate hierarchy.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
+struct ImportedTrafficWheelOwner(Entity);
+
+/// Authored local orientation captured once when the wheel pivot appears.
+#[derive(Component, Clone, Copy, Debug)]
+struct ImportedTrafficWheelBaseline(Quat);
+
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
+enum ImportedTrafficWheelSlot {
+    Fl,
+    Fr,
+    Rl,
+    Rr,
 }
 
 /// Root node of the "Lv {level}" UI. Despawned on exit from `Playing`
@@ -335,7 +479,7 @@ pub struct DifficultyPlugin;
 impl Plugin for DifficultyPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Difficulty>()
-            .init_resource::<TrafficAssets>()
+            .init_resource::<TrafficVisualAssets>()
             .init_resource::<ToyShadingAssets>()
             // Fresh-round reset (skipped on resume from Paused). MUST run
             // before `reset_run` flips `RoundActive` on, so it's in
@@ -351,15 +495,27 @@ impl Plugin for DifficultyPlugin {
                 OnExit(GameState::Playing),
                 despawn_marker::<DifficultyUiRoot>,
             )
-            // Per-frame: ramp the level, manage traffic, then animate the
-            // wheel children from each owning traffic root's speed.
+            // Per-frame: ramp the level, plan/move/replenish traffic, then
+            // discover and animate wheel pivots that may have arrived from the
+            // asynchronous scene spawner this frame.
+            .add_systems(Update, tick_difficulty.run_if(in_state(GameState::Playing)))
+            .add_systems(
+                Update,
+                manage_traffic
+                    .after(tick_difficulty)
+                    .before(DrivingSet)
+                    .run_if(in_state(GameState::Playing)),
+            )
             .add_systems(
                 Update,
                 (
-                    tick_difficulty,
-                    manage_traffic.after(tick_difficulty).before(DrivingSet),
-                    spin_traffic_wheels.after(manage_traffic),
+                    bind_imported_traffic_wheels,
+                    bind_imported_traffic_paint,
+                    update_imported_traffic_ready,
+                    animate_imported_traffic_wheels,
                 )
+                    .chain()
+                    .after(manage_traffic)
                     .run_if(in_state(GameState::Playing)),
             )
             // UI refresh runs in every state so the label recovers even while
@@ -630,7 +786,7 @@ fn plan_traffic(snapshots: &[TrafficSnapshot], delta_seconds: f32) -> Vec<Traffi
 /// result independent of ECS query iteration order.
 fn manage_traffic(
     mut commands: Commands,
-    assets: Res<TrafficAssets>,
+    visual_assets: Res<TrafficVisualAssets>,
     toy_shading: Res<ToyShadingAssets>,
     difficulty: Res<Difficulty>,
     modifier: Res<ActiveModifier>,
@@ -638,7 +794,7 @@ fn manage_traffic(
     car: Query<&Transform, (With<Car>, Without<Traffic>)>,
     mut traffic_query: Query<
         (Entity, &mut Traffic, &mut Transform, &mut Collider),
-        (With<Traffic>, Without<TrafficWheel>, Without<Car>),
+        (With<Traffic>, Without<Car>),
     >,
     time: Res<Time>,
     mut seed: Local<u32>,
@@ -760,7 +916,7 @@ fn manage_traffic(
             *next_traffic_id = next_traffic_id.saturating_add(1);
             spawn_one_traffic(
                 &mut commands,
-                &assets,
+                &visual_assets,
                 &toy_shading,
                 candidate,
                 speed,
@@ -773,49 +929,274 @@ fn manage_traffic(
 }
 
 /// Despawn every traffic car (e.g. on GameOver / Menu). Recursive despawn in
-/// 0.19 nukes the body/cabin/headlight children (safe, risk E2).
+/// 0.19 removes the imported wrapper and shadow children (safe, risk E2).
 fn cleanup_traffic(mut commands: Commands, traffic: Query<Entity, With<Traffic>>) {
     for e in &traffic {
         commands.entity(e).despawn();
     }
 }
 
-/// Distance-derived wheel rotation for one frame. Traffic speed is expressed
-/// in world units per second and the traffic root always faces local -Z, so a
-/// positive local-X rotation gives forward rolling regardless of road axis or
-/// direction.
 fn traffic_wheel_spin_delta(speed: f32, delta_seconds: f32) -> f32 {
     speed * delta_seconds / TRAFFIC_WHEEL_RADIUS
 }
 
-/// Reconstruct an axle-aligned wheel rotation from its scalar spin state.
-/// Applying spin around the cylinder's local Y before the fixed axle rotation
-/// keeps the resulting world-space axle on local X without accumulated error.
-fn traffic_wheel_rotation(spin_radians: f32) -> Quat {
-    Quat::from_rotation_z(FRAC_PI_2) * Quat::from_rotation_y(spin_radians)
+fn classify_imported_traffic_wheel(
+    asset_prefix: &str,
+    node_name: &str,
+) -> Option<ImportedTrafficWheelSlot> {
+    use ImportedTrafficWheelSlot::*;
+    let suffix = node_name.strip_prefix(asset_prefix)?;
+    Some(match suffix {
+        "_Wheel_FL" => Fl,
+        "_Wheel_FR" => Fr,
+        "_Wheel_RL" => Rl,
+        "_Wheel_RR" => Rr,
+        _ => return None,
+    })
 }
 
-/// Animate direct wheel children from their owning traffic root. The explicit
-/// opposing filters keep mutable wheel transforms disjoint from traffic-root
-/// transforms in `manage_traffic` and guard against B0001 if either query is
-/// expanded later.
-fn spin_traffic_wheels(
-    time: Res<Time>,
-    mut wheels: Query<
-        (&ChildOf, &mut TrafficWheel, &mut Transform),
-        (With<TrafficWheel>, Without<Traffic>),
+fn imported_traffic_wheel_binding_to_insert(
+    asset_prefix: &str,
+    node_name: &str,
+    existing: Option<&ImportedTrafficWheel>,
+    owner: Entity,
+    baseline: Quat,
+) -> Option<(
+    ImportedTrafficWheelOwner,
+    ImportedTrafficWheelBaseline,
+    ImportedTrafficWheelSlot,
+)> {
+    if existing.is_some() {
+        return None;
+    }
+    Some((
+        ImportedTrafficWheelOwner(owner),
+        ImportedTrafficWheelBaseline(baseline),
+        classify_imported_traffic_wheel(asset_prefix, node_name)?,
+    ))
+}
+
+fn is_traffic_descendant_of(
+    mut entity: Entity,
+    root: Entity,
+    mut parent_of: impl FnMut(Entity) -> Option<Entity>,
+) -> bool {
+    while let Some(parent) = parent_of(entity) {
+        if parent == root {
+            return true;
+        }
+        if parent == entity {
+            return false;
+        }
+        entity = parent;
+    }
+    false
+}
+
+fn imported_traffic_wheels_ready(
+    slots: impl IntoIterator<Item = ImportedTrafficWheelSlot>,
+) -> bool {
+    use ImportedTrafficWheelSlot::*;
+    let mut counts = [0_u8; 4];
+    for slot in slots {
+        let index = match slot {
+            Fl => 0,
+            Fr => 1,
+            Rl => 2,
+            Rr => 3,
+        };
+        counts[index] = counts[index].saturating_add(1);
+    }
+    counts == [1; 4]
+}
+
+fn imported_traffic_visual_ready(
+    slots: impl IntoIterator<Item = ImportedTrafficWheelSlot>,
+    paint_assigned: bool,
+) -> bool {
+    paint_assigned && imported_traffic_wheels_ready(slots)
+}
+
+fn compose_imported_traffic_wheel_rotation(baseline: Quat, spin_radians: f32) -> Quat {
+    baseline * Quat::from_rotation_x(spin_radians)
+}
+
+/// Bind named wheel pivots only within their selected scene wrapper. Scene
+/// entities arrive asynchronously, so this runs every playing frame until the
+/// wrapper is ready. Existing markers are never replaced, preserving the true
+/// authored baseline rather than accidentally capturing an animated pose.
+fn bind_imported_traffic_wheels(
+    mut commands: Commands,
+    wrappers: Query<(Entity, &ImportedTrafficVisual, &ChildOf), Without<ImportedTrafficReady>>,
+    nodes: Query<(Entity, &Name, &Transform, Option<&ImportedTrafficWheel>)>,
+    parents: Query<&ChildOf>,
+) {
+    for (wrapper, visual, wrapper_parent) in &wrappers {
+        let owner = wrapper_parent.parent();
+        for (entity, name, transform, existing) in &nodes {
+            if existing.is_some()
+                || !is_traffic_descendant_of(entity, wrapper, |candidate| {
+                    parents.get(candidate).ok().map(ChildOf::parent)
+                })
+            {
+                continue;
+            }
+            let Some((wheel_owner, baseline, slot)) = imported_traffic_wheel_binding_to_insert(
+                visual.asset_prefix,
+                name.as_str(),
+                existing,
+                owner,
+                transform.rotation,
+            ) else {
+                continue;
+            };
+            commands
+                .entity(entity)
+                .insert((ImportedTrafficWheel, wheel_owner, baseline, slot));
+        }
+    }
+}
+
+/// Clone an imported `Toy_Paint` material at most once for each traffic
+/// wrapper, changing only its base color. All matching primitives owned by the
+/// wrapper share that clone, including primitives instantiated in later
+/// frames. Unrelated imported player/world primitives are ancestry-excluded.
+fn bind_imported_traffic_paint(
+    mut commands: Commands,
+    mut wrappers: Query<(
+        Entity,
+        &ImportedTrafficVisual,
+        &ChildOf,
+        &mut ImportedTrafficPaintMaterial,
+    )>,
+    mut primitives: Query<(
+        Entity,
+        &GltfMaterialName,
+        &mut MeshMaterial3d<StandardMaterial>,
+        Option<&ImportedTrafficPaintOwner>,
+    )>,
+    parents: Query<&ChildOf>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    for (wrapper, visual, wrapper_parent, mut instance_material) in &mut wrappers {
+        let owner = wrapper_parent.parent();
+        for (entity, name, mut primitive_material, assigned_owner) in &mut primitives {
+            if name.0 != "Toy_Paint"
+                || !is_traffic_descendant_of(entity, wrapper, |candidate| {
+                    parents.get(candidate).ok().map(ChildOf::parent)
+                })
+            {
+                continue;
+            }
+
+            let instance_handle = if let Some(handle) = &instance_material.0 {
+                handle.clone()
+            } else {
+                let Some(mut cloned) = materials.get(primitive_material.0.id()).cloned() else {
+                    // Scene dependencies normally make this available with the
+                    // primitive; retry next frame if loading is still pending.
+                    continue;
+                };
+                cloned.base_color = TRAFFIC_PAINT_COLORS[visual.paint_index];
+                let handle = materials.add(cloned);
+                instance_material.0 = Some(handle.clone());
+                handle
+            };
+
+            if primitive_material.0.id() != instance_handle.id() {
+                primitive_material.0 = instance_handle;
+            }
+            if assigned_owner.map(|assigned| assigned.0) != Some(owner) {
+                commands
+                    .entity(entity)
+                    .insert(ImportedTrafficPaintOwner(owner));
+            }
+        }
+    }
+}
+
+fn update_imported_traffic_ready(
+    mut commands: Commands,
+    wrappers: Query<(Entity, &ChildOf, Option<&ImportedTrafficReady>), With<ImportedTrafficVisual>>,
+    wheels: Query<
+        (
+            Entity,
+            &ImportedTrafficWheelOwner,
+            &ImportedTrafficWheelSlot,
+        ),
+        With<ImportedTrafficWheel>,
     >,
-    owners: Query<&Traffic, (With<Traffic>, Without<TrafficWheel>)>,
+    paints: Query<(Entity, &ImportedTrafficPaintOwner)>,
+    parents: Query<&ChildOf>,
+) {
+    for (wrapper, wrapper_parent, ready) in &wrappers {
+        let owner = wrapper_parent.parent();
+        let slots = wheels.iter().filter_map(|(entity, wheel_owner, slot)| {
+            (wheel_owner.0 == owner
+                && is_traffic_descendant_of(entity, wrapper, |candidate| {
+                    parents.get(candidate).ok().map(ChildOf::parent)
+                }))
+            .then_some(*slot)
+        });
+        let paint_assigned = paints.iter().any(|(entity, paint_owner)| {
+            paint_owner.0 == owner
+                && is_traffic_descendant_of(entity, wrapper, |candidate| {
+                    parents.get(candidate).ok().map(ChildOf::parent)
+                })
+        });
+        let complete = imported_traffic_visual_ready(slots, paint_assigned);
+        match (complete, ready.is_some()) {
+            (true, false) => {
+                commands.entity(wrapper).insert(ImportedTrafficReady);
+            }
+            (false, true) => {
+                commands.entity(wrapper).remove::<ImportedTrafficReady>();
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Roll all four imported wheel pivots after traffic movement. Rotation is
+/// always `authored_baseline * rotation_x(spin)`, never the prior frame's
+/// transform, so floating-point error cannot accumulate into axle drift.
+fn animate_imported_traffic_wheels(
+    time: Res<Time>,
+    owners: Query<&Traffic>,
+    mut wrappers: Query<
+        (Entity, &ChildOf, &mut ImportedTrafficWheelAnimation),
+        (With<ImportedTrafficVisual>, With<ImportedTrafficReady>),
+    >,
+    mut wheels: Query<
+        (
+            Entity,
+            &ImportedTrafficWheelOwner,
+            &ImportedTrafficWheelBaseline,
+            &mut Transform,
+        ),
+        With<ImportedTrafficWheel>,
+    >,
+    parents: Query<&ChildOf>,
 ) {
     let delta_seconds = time.delta_secs();
-    for (child_of, mut wheel, mut transform) in &mut wheels {
-        let Ok(traffic) = owners.get(child_of.parent()) else {
+    for (wrapper, wrapper_parent, mut animation) in &mut wrappers {
+        let owner = wrapper_parent.parent();
+        let Ok(traffic) = owners.get(owner) else {
             continue;
         };
-        wheel.spin_radians = (wheel.spin_radians
+        animation.spin_radians = (animation.spin_radians
             + traffic_wheel_spin_delta(traffic.speed, delta_seconds))
         .rem_euclid(TAU);
-        transform.rotation = traffic_wheel_rotation(wheel.spin_radians);
+        for (entity, wheel_owner, baseline, mut transform) in &mut wheels {
+            if wheel_owner.0 == owner
+                && is_traffic_descendant_of(entity, wrapper, |candidate| {
+                    parents.get(candidate).ok().map(ChildOf::parent)
+                })
+            {
+                transform.rotation =
+                    compose_imported_traffic_wheel_rotation(baseline.0, animation.spin_radians);
+            }
+        }
     }
 }
 
@@ -1166,23 +1547,25 @@ fn traffic_spawn_candidate(
     None
 }
 
-/// Deterministic silhouette selection from the shared traffic LCG state.
-/// This deliberately does not advance the state: adding visual variety must
-/// not change subsequent movement direction, speed, or spawn-position rolls.
+/// Pure integer avalanche used only for presentation selection. This is not an
+/// LCG step and cannot mutate or otherwise perturb gameplay RNG state.
+fn traffic_visual_hash(mut value: u32) -> u32 {
+    value ^= value >> 16;
+    value = value.wrapping_mul(0x7feb_352d);
+    value ^= value >> 15;
+    value = value.wrapping_mul(0x846c_a68b);
+    value ^ (value >> 16)
+}
+
 fn traffic_kind(seed: u32) -> TrafficKind {
-    let visual_hash = seed.wrapping_mul(747796405).wrapping_add(2891336453) ^ seed.rotate_left(13);
-    if visual_hash % 20 < 13 {
-        TrafficKind::Sedan
-    } else {
-        TrafficKind::Van
-    }
+    TRAFFIC_KIND_BUCKETS[(traffic_visual_hash(seed) % 20) as usize]
 }
 
 /// Spawn one top-level traffic car. The root front (-Z), stored velocity, and
 /// conservative collider all derive from the same connector tangent.
 fn spawn_one_traffic(
     commands: &mut Commands,
-    assets: &TrafficAssets,
+    visual_assets: &TrafficVisualAssets,
     toy_shading: &ToyShadingAssets,
     candidate: TrafficSpawnCandidate,
     speed: f32,
@@ -1192,8 +1575,13 @@ fn spawn_one_traffic(
 ) {
     let heading = (-candidate.tangent.x).atan2(-candidate.tangent.y);
     let kind = traffic_kind(*seed);
-    let kind_idx = kind.index();
-    let color_idx = (rand(seed) * assets.body_mats.len() as f32) as usize % assets.body_mats.len();
+    let scene = visual_assets.scene(kind);
+    // Preserve the established spawn RNG contract and palette selection.
+    // Presentation hashing consumes no LCG state; paint still consumes the one
+    // post-kind roll used by the former procedural traffic.
+    let paint_roll = rand(seed);
+    let paint_index =
+        (paint_roll * TRAFFIC_PAINT_COLORS.len() as f32) as usize % TRAFFIC_PAINT_COLORS.len();
     commands
         .spawn((
             Transform::from_xyz(candidate.position.x, 0.0, candidate.position.y)
@@ -1239,56 +1627,18 @@ fn spawn_one_traffic(
                 ));
             }
 
-            let (body_y, cabin_y, cabin_z, glass_y, glass_z) = match kind {
-                TrafficKind::Sedan => (0.35, 0.35, 0.2, 0.45, -0.3),
-                TrafficKind::Van => (0.41, 0.54, 0.1, 0.62, -0.64),
-            };
+            // The authored glTF is already Bevy-oriented (front -Z, ground at
+            // Y=0), so this wrapper must remain exactly identity transformed.
             root.spawn((
-                Mesh3d(assets.body_meshes[kind_idx].clone()),
-                MeshMaterial3d(assets.body_mats[color_idx].clone()),
-                Transform::from_xyz(0.0, body_y, 0.0),
-            ))
-            .with_children(|body| {
-                body.spawn((
-                    Mesh3d(assets.cabin_meshes[kind_idx].clone()),
-                    MeshMaterial3d(assets.cabin_mat.clone()),
-                    Transform::from_xyz(0.0, cabin_y, cabin_z),
-                ));
-                body.spawn((
-                    Mesh3d(assets.windshield_meshes[kind_idx].clone()),
-                    MeshMaterial3d(assets.windshield_mat.clone()),
-                    Transform::from_xyz(0.0, glass_y, glass_z),
-                ));
-                // Warm front lamps and red rear lamps make heading readable.
-                for &x in &[-0.3_f32, 0.3] {
-                    body.spawn((
-                        Mesh3d(assets.light_mesh.clone()),
-                        MeshMaterial3d(assets.headlight_mat.clone()),
-                        Transform::from_xyz(x, -0.1, -1.02),
-                    ));
-                    body.spawn((
-                        Mesh3d(assets.light_mesh.clone()),
-                        MeshMaterial3d(assets.rear_light_mat.clone()),
-                        Transform::from_xyz(x, -0.1, 1.02),
-                    ));
-                }
-            });
-
-            // Four cylinder tires with slightly wider metallic hubs. Axles
-            // lie along local X; all geometry/material handles are shared.
-            for &(x, z) in &[(0.58, 0.7), (-0.58, 0.7), (0.58, -0.7), (-0.58, -0.7)] {
-                root.spawn((
-                    Mesh3d(assets.wheel_mesh.clone()),
-                    MeshMaterial3d(assets.wheel_mat.clone()),
-                    Transform::from_xyz(x, 0.15, z).with_rotation(traffic_wheel_rotation(0.0)),
-                    TrafficWheel::default(),
-                ))
-                .with_child((
-                    Mesh3d(assets.hub_mesh.clone()),
-                    MeshMaterial3d(assets.hub_mat.clone()),
-                    Transform::default(),
-                ));
-            }
+                WorldAssetRoot(scene),
+                Transform::IDENTITY,
+                ImportedTrafficVisual {
+                    asset_prefix: kind.asset_prefix(),
+                    paint_index,
+                },
+                ImportedTrafficPaintMaterial::default(),
+                ImportedTrafficWheelAnimation::default(),
+            ));
         });
 }
 
@@ -1419,13 +1769,7 @@ mod tests {
     use crate::toy_shading::ToyShadingAssets;
     use bevy::ecs::world::CommandQueue;
 
-    const EXPECTED_BODY_COLORS: [Color; 5] = [
-        Color::srgb(0.85, 0.12, 0.10),
-        Color::srgb(0.15, 0.35, 0.85),
-        Color::srgb(0.18, 0.55, 0.22),
-        Color::srgb(0.78, 0.78, 0.82),
-        Color::srgb(0.95, 0.65, 0.08),
-    ];
+    const EXPECTED_BODY_COLORS: [Color; 5] = TRAFFIC_PAINT_COLORS;
 
     fn traffic_asset_test_world() -> World {
         let mut world = World::new();
@@ -1436,6 +1780,59 @@ mod tests {
         let assets = TrafficAssets::from_world(&mut world);
         world.insert_resource(assets);
         world
+    }
+
+    fn traffic_runtime_test_world() -> World {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()));
+        app.init_asset::<WorldAsset>()
+            .init_resource::<Assets<Mesh>>()
+            .init_resource::<Assets<Image>>()
+            .init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<ToyShadingAssets>();
+        app.finish();
+        app.cleanup();
+        app.init_resource::<TrafficVisualAssets>();
+        std::mem::replace(app.world_mut(), World::new())
+    }
+
+    fn traffic_paint_test_app() -> App {
+        let mut app = App::new();
+        app.init_resource::<Assets<StandardMaterial>>()
+            .add_systems(Update, bind_imported_traffic_paint);
+        app
+    }
+
+    fn spawn_paint_wrapper(app: &mut App, paint_index: usize) -> (Entity, Entity) {
+        let owner = app.world_mut().spawn_empty().id();
+        let wrapper = app
+            .world_mut()
+            .spawn((
+                ImportedTrafficVisual {
+                    asset_prefix: TrafficKind::Sedan.asset_prefix(),
+                    paint_index,
+                },
+                ImportedTrafficPaintMaterial::default(),
+            ))
+            .id();
+        app.world_mut().entity_mut(owner).add_child(wrapper);
+        (owner, wrapper)
+    }
+
+    fn spawn_paint_primitive(
+        app: &mut App,
+        parent: Entity,
+        material: Handle<StandardMaterial>,
+    ) -> Entity {
+        let primitive = app
+            .world_mut()
+            .spawn((
+                GltfMaterialName("Toy_Paint".to_owned()),
+                MeshMaterial3d(material),
+            ))
+            .id();
+        app.world_mut().entity_mut(parent).add_child(primitive);
+        primitive
     }
 
     #[test]
@@ -1529,73 +1926,28 @@ mod tests {
     }
 
     #[test]
-    fn spawned_traffic_reuses_cached_body_material_handles() {
-        let mut world = traffic_asset_test_world();
-        let cached_body_handles = world.resource::<TrafficAssets>().body_mats.clone();
-        let material_count = world.resource::<Assets<StandardMaterial>>().len();
-        let connector = road_plan(0, 0)
-            .connectors
-            .into_iter()
-            .flatten()
-            .next()
-            .expect("origin road plan has a traffic connector");
-        let candidate = TrafficSpawnCandidate {
-            position: Vec2::ZERO,
-            half_extents: Vec2::new(TRAFFIC_HALF_WIDTH, TRAFFIC_HALF_LENGTH),
-            tangent: Vec2::Y,
-            connector,
-            distance: 0.0,
-            route_rng: 1,
-        };
-        let initial_seed = 0x1234_5678;
-        let mut expected_seed = initial_seed;
-        let expected_index = (rand(&mut expected_seed) * cached_body_handles.len() as f32) as usize
-            % cached_body_handles.len();
-        let expected_handle = cached_body_handles[expected_index].clone();
-
-        let mut queue = CommandQueue::default();
-        {
-            let assets = world.resource::<TrafficAssets>();
-            let toy_shading = world.resource::<ToyShadingAssets>();
-            let mut commands = Commands::new(&mut queue, &world);
-            for traffic_id in 1..=2 {
-                let mut seed = initial_seed;
-                spawn_one_traffic(
-                    &mut commands,
-                    assets,
-                    toy_shading,
-                    candidate,
-                    5.0,
-                    0.5,
-                    traffic_id,
-                    &mut seed,
-                );
-            }
-        }
-        queue.apply(&mut world);
-
-        let mut query = world.query::<&MeshMaterial3d<StandardMaterial>>();
-        let spawned_body_handles: Vec<_> = query
-            .iter(&world)
-            .filter(|material| cached_body_handles.contains(&material.0))
-            .map(|material| material.0.clone())
-            .collect();
-        assert_eq!(spawned_body_handles.len(), 2);
-        assert!(
-            spawned_body_handles
-                .iter()
-                .all(|handle| handle == &expected_handle)
-        );
-        assert_eq!(
-            world.resource::<Assets<StandardMaterial>>().len(),
-            material_count,
-            "spawning must not allocate per-car materials"
-        );
+    fn traffic_visual_cache_has_exact_scene0_paths() {
+        let world = traffic_runtime_test_world();
+        let assets = world.resource::<TrafficVisualAssets>();
+        let expected = [
+            TRAFFIC_SEDAN_SCENE,
+            TRAFFIC_CITY_VAN_SCENE,
+            TRAFFIC_HATCHBACK_SCENE,
+            TRAFFIC_PICKUP_SCENE,
+            TRAFFIC_SUV_SCENE,
+        ];
+        let actual = assets.all().map(|handle| {
+            handle
+                .path()
+                .expect("cached traffic handle has a path")
+                .to_string()
+        });
+        assert_eq!(actual, expected);
     }
 
     #[test]
-    fn spawned_traffic_has_one_cached_contact_card_per_root() {
-        let mut world = traffic_asset_test_world();
+    fn spawned_traffic_has_one_imported_visual_collider_and_cached_contact_card() {
+        let mut world = traffic_runtime_test_world();
         let connector = road_plan(0, 0)
             .connectors
             .into_iter()
@@ -1610,12 +1962,19 @@ mod tests {
             distance: 0.0,
             route_rng: 1,
         };
+        let initial_seed = 7;
+        let expected_scene = world
+            .resource::<TrafficVisualAssets>()
+            .scene(traffic_kind(initial_seed))
+            .id();
+        let mut expected_seed = initial_seed;
+        let _ = rand(&mut expected_seed);
+        let mut actual_seed = initial_seed;
         let mut queue = CommandQueue::default();
         {
-            let assets = world.resource::<TrafficAssets>();
+            let assets = world.resource::<TrafficVisualAssets>();
             let toy = world.resource::<ToyShadingAssets>();
             let mut commands = Commands::new(&mut queue, &world);
-            let mut seed = 7;
             spawn_one_traffic(
                 &mut commands,
                 assets,
@@ -1624,10 +1983,14 @@ mod tests {
                 5.0,
                 0.5,
                 1,
-                &mut seed,
+                &mut actual_seed,
             );
         }
         queue.apply(&mut world);
+        assert_eq!(
+            actual_seed, expected_seed,
+            "visual hashing must not add an LCG step"
+        );
 
         let root = world
             .query_filtered::<Entity, With<Traffic>>()
@@ -1637,7 +2000,39 @@ mod tests {
             .query_filtered::<Entity, With<ToyContactShadow>>()
             .single(&world)
             .unwrap();
+        let visual = world
+            .query_filtered::<Entity, With<ImportedTrafficVisual>>()
+            .single(&world)
+            .unwrap();
+        assert_eq!(
+            world
+                .get::<ImportedTrafficVisual>(visual)
+                .unwrap()
+                .asset_prefix,
+            traffic_kind(initial_seed).asset_prefix()
+        );
+        assert!(world.get::<ImportedTrafficWheelAnimation>(visual).is_some());
+        assert!(world.get::<ImportedTrafficPaintMaterial>(visual).is_some());
+        assert!(world.get::<ImportedTrafficReady>(visual).is_none());
         assert_eq!(world.get::<ChildOf>(contact).unwrap().parent(), root);
+        assert_eq!(world.get::<ChildOf>(visual).unwrap().parent(), root);
+        assert_eq!(
+            *world.get::<Transform>(visual).unwrap(),
+            Transform::IDENTITY
+        );
+        assert_eq!(
+            world.get::<WorldAssetRoot>(visual).unwrap().0.id(),
+            expected_scene
+        );
+        assert!(world.get::<Collider>(root).is_some());
+        assert!(world.get::<Collider>(visual).is_none());
+        assert_eq!(world.query::<&Traffic>().iter(&world).count(), 1);
+        assert_eq!(world.query::<&Collider>().iter(&world).count(), 1);
+        assert_eq!(world.query::<&WorldAssetRoot>().iter(&world).count(), 1);
+        assert_eq!(
+            world.query::<&Mesh3d>().iter(&world).count(),
+            1 + usize::from(cfg!(target_arch = "wasm32"))
+        );
         let toy = world.resource::<ToyShadingAssets>();
         assert_eq!(
             world.get::<Mesh3d>(contact).unwrap().0.id(),
@@ -1656,9 +2051,9 @@ mod tests {
             usize::from(cfg!(target_arch = "wasm32"))
         );
 
-        // Recursive traffic cleanup owns both cards. A subsequent round spawn
-        // produces exactly one fresh hierarchy rather than leaking/duplicating
-        // the old shadow child.
+        // Recursive traffic cleanup owns the imported wrapper and both cards.
+        // A subsequent round spawn produces exactly one fresh hierarchy rather
+        // than leaking or duplicating a visual/shadow child.
         let mut cleanup = CommandQueue::default();
         Commands::new(&mut cleanup, &world).entity(root).despawn();
         cleanup.apply(&mut world);
@@ -1669,10 +2064,18 @@ mod tests {
                 .count(),
             0
         );
+        assert_eq!(
+            world
+                .query_filtered::<Entity, With<ImportedTrafficVisual>>()
+                .iter(&world)
+                .count(),
+            0,
+            "recursive traffic cleanup must own the async scene wrapper"
+        );
 
         let mut restart = CommandQueue::default();
         {
-            let assets = world.resource::<TrafficAssets>();
+            let assets = world.resource::<TrafficVisualAssets>();
             let toy = world.resource::<ToyShadingAssets>();
             let mut commands = Commands::new(&mut restart, &world);
             let mut seed = 9;
@@ -1695,6 +2098,338 @@ mod tests {
                 .iter(&world)
                 .count(),
             1
+        );
+        assert_eq!(
+            world
+                .query_filtered::<Entity, With<ImportedTrafficVisual>>()
+                .iter(&world)
+                .count(),
+            1,
+            "a new lifecycle gets exactly one fresh imported wrapper"
+        );
+    }
+
+    #[test]
+    fn imported_traffic_paint_clones_once_shares_and_preserves_authored_fields() {
+        let mut app = traffic_paint_test_app();
+        let base_texture = Handle::<Image>::default();
+        let emissive_texture = Handle::<Image>::default();
+        let source = app
+            .world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial {
+                base_color: Color::WHITE,
+                base_color_texture: Some(base_texture.clone()),
+                metallic: 0.63,
+                perceptual_roughness: 0.17,
+                reflectance: 0.41,
+                clearcoat: 0.72,
+                clearcoat_perceptual_roughness: 0.26,
+                emissive: LinearRgba::new(0.1, 0.2, 0.3, 1.0),
+                emissive_texture: Some(emissive_texture.clone()),
+                alpha_mode: AlphaMode::Blend,
+                ..default()
+            });
+        let source_before = app
+            .world()
+            .resource::<Assets<StandardMaterial>>()
+            .get(&source)
+            .unwrap()
+            .clone();
+        let (owner, wrapper) = spawn_paint_wrapper(&mut app, 3);
+        let first = spawn_paint_primitive(&mut app, wrapper, source.clone());
+        let branch = app.world_mut().spawn_empty().id();
+        app.world_mut().entity_mut(wrapper).add_child(branch);
+        let second = spawn_paint_primitive(&mut app, branch, source.clone());
+        // A similarly named player/world primitive outside the wrapper must be
+        // untouched and must not receive traffic ownership.
+        let outside = spawn_paint_primitive(&mut app, owner, source.clone());
+
+        app.update();
+
+        let first_handle = app
+            .world()
+            .get::<MeshMaterial3d<StandardMaterial>>(first)
+            .unwrap();
+        let second_handle = app
+            .world()
+            .get::<MeshMaterial3d<StandardMaterial>>(second)
+            .unwrap();
+        assert_eq!(first_handle.0.id(), second_handle.0.id());
+        assert_ne!(first_handle.0.id(), source.id());
+        assert_eq!(
+            app.world()
+                .get::<ImportedTrafficPaintMaterial>(wrapper)
+                .unwrap()
+                .0
+                .as_ref()
+                .unwrap()
+                .id(),
+            first_handle.0.id()
+        );
+        assert_eq!(
+            app.world()
+                .get::<ImportedTrafficPaintOwner>(first)
+                .unwrap()
+                .0,
+            owner
+        );
+        assert_eq!(
+            app.world()
+                .get::<MeshMaterial3d<StandardMaterial>>(outside)
+                .unwrap()
+                .0
+                .id(),
+            source.id()
+        );
+        assert!(
+            app.world()
+                .get::<ImportedTrafficPaintOwner>(outside)
+                .is_none()
+        );
+        assert_eq!(
+            app.world().resource::<Assets<StandardMaterial>>().len(),
+            2,
+            "two owner primitives must create exactly one instance clone"
+        );
+
+        let materials = app.world().resource::<Assets<StandardMaterial>>();
+        assert_eq!(
+            format!("{:?}", materials.get(&source).unwrap()),
+            format!("{source_before:?}"),
+            "the shared authored source must remain untouched"
+        );
+        let mut expected = source_before;
+        expected.base_color = TRAFFIC_PAINT_COLORS[3];
+        let cloned = materials.get(&first_handle.0).unwrap();
+        assert_eq!(
+            format!("{cloned:?}"),
+            format!("{expected:?}"),
+            "only base_color may differ from the authored source"
+        );
+        assert_eq!(cloned.base_color_texture.as_ref(), Some(&base_texture));
+        assert_eq!(cloned.emissive_texture.as_ref(), Some(&emissive_texture));
+        assert_eq!(cloned.alpha_mode, AlphaMode::Blend);
+    }
+
+    #[test]
+    fn imported_traffic_paint_clones_are_independent_across_owners() {
+        let mut app = traffic_paint_test_app();
+        let source = app
+            .world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial::default());
+        let (_, first_wrapper) = spawn_paint_wrapper(&mut app, 0);
+        let (_, second_wrapper) = spawn_paint_wrapper(&mut app, 1);
+        let first = spawn_paint_primitive(&mut app, first_wrapper, source.clone());
+        let second = spawn_paint_primitive(&mut app, second_wrapper, source.clone());
+
+        app.update();
+
+        let first_handle = app
+            .world()
+            .get::<MeshMaterial3d<StandardMaterial>>(first)
+            .unwrap();
+        let second_handle = app
+            .world()
+            .get::<MeshMaterial3d<StandardMaterial>>(second)
+            .unwrap();
+        assert_ne!(first_handle.0.id(), second_handle.0.id());
+        assert_eq!(
+            app.world()
+                .resource::<Assets<StandardMaterial>>()
+                .get(&first_handle.0)
+                .unwrap()
+                .base_color,
+            TRAFFIC_PAINT_COLORS[0]
+        );
+        assert_eq!(
+            app.world()
+                .resource::<Assets<StandardMaterial>>()
+                .get(&second_handle.0)
+                .unwrap()
+                .base_color,
+            TRAFFIC_PAINT_COLORS[1]
+        );
+        assert_eq!(
+            app.world().resource::<Assets<StandardMaterial>>().len(),
+            3,
+            "one shared source plus exactly one clone per owner"
+        );
+    }
+
+    #[test]
+    fn imported_traffic_wheel_classifier_uses_exact_selected_prefix_and_suffixes() {
+        use ImportedTrafficWheelSlot::*;
+        for kind in [
+            TrafficKind::Sedan,
+            TrafficKind::CityVan,
+            TrafficKind::Hatchback,
+            TrafficKind::Pickup,
+            TrafficKind::Suv,
+        ] {
+            let prefix = kind.asset_prefix();
+            assert_eq!(
+                classify_imported_traffic_wheel(prefix, &format!("{prefix}_Wheel_FL")),
+                Some(Fl)
+            );
+            assert_eq!(
+                classify_imported_traffic_wheel(prefix, &format!("{prefix}_Wheel_FR")),
+                Some(Fr)
+            );
+            assert_eq!(
+                classify_imported_traffic_wheel(prefix, &format!("{prefix}_Wheel_RL")),
+                Some(Rl)
+            );
+            assert_eq!(
+                classify_imported_traffic_wheel(prefix, &format!("{prefix}_Wheel_RR")),
+                Some(Rr)
+            );
+        }
+        assert_eq!(
+            classify_imported_traffic_wheel(
+                TrafficKind::Sedan.asset_prefix(),
+                "npc_toy_suv_Wheel_FL"
+            ),
+            None,
+            "a node from a non-selected asset must not bind"
+        );
+        assert_eq!(
+            classify_imported_traffic_wheel(
+                TrafficKind::Sedan.asset_prefix(),
+                "npc_toy_sedan_Wheel_FL_Tire"
+            ),
+            None
+        );
+        assert_eq!(
+            classify_imported_traffic_wheel(
+                TrafficKind::Sedan.asset_prefix(),
+                "NPC_TOY_SEDAN_Wheel_FL"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn imported_traffic_binding_is_ancestry_scoped_and_idempotent() {
+        let wrapper = Entity::from_raw_u32(1).unwrap();
+        let branch = Entity::from_raw_u32(2).unwrap();
+        let wheel = Entity::from_raw_u32(3).unwrap();
+        let outside = Entity::from_raw_u32(4).unwrap();
+        let parent = |entity| match entity {
+            e if e == wheel => Some(branch),
+            e if e == branch => Some(wrapper),
+            _ => None,
+        };
+        assert!(is_traffic_descendant_of(wheel, wrapper, parent));
+        assert!(!is_traffic_descendant_of(outside, wrapper, parent));
+        assert!(!is_traffic_descendant_of(wrapper, wrapper, parent));
+
+        // A second async-discovery pass must not replace the true authored
+        // baseline with an already animated transform.
+        let baseline = Quat::from_euler(EulerRot::XYZ, 0.2, -0.3, 0.4);
+        let name = "npc_toy_sedan_Wheel_FL";
+        let (_, captured, slot) = imported_traffic_wheel_binding_to_insert(
+            "npc_toy_sedan",
+            name,
+            None,
+            wrapper,
+            baseline,
+        )
+        .unwrap();
+        assert_eq!(slot, ImportedTrafficWheelSlot::Fl);
+        assert!(captured.0.abs_diff_eq(baseline, 1e-6));
+        assert!(
+            imported_traffic_wheel_binding_to_insert(
+                "npc_toy_sedan",
+                name,
+                Some(&ImportedTrafficWheel),
+                wrapper,
+                Quat::IDENTITY,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn imported_traffic_readiness_requires_paint_and_four_unique_slots() {
+        use ImportedTrafficWheelSlot::*;
+        assert!(imported_traffic_visual_ready([Fl, Fr, Rl, Rr], true));
+        assert!(!imported_traffic_visual_ready([Fl, Fr, Rl, Rr], false));
+        assert!(!imported_traffic_visual_ready([Fl, Fr, Rl], true));
+        assert!(!imported_traffic_visual_ready([Fl, Fr, Rl, Rr, Fl], true));
+        assert!(!imported_traffic_visual_ready([Fl, Fr, Rl, Rl], true));
+    }
+
+    #[test]
+    fn imported_traffic_rotation_rebuilds_from_baseline_without_accumulation() {
+        let baseline = Quat::from_euler(EulerRot::XYZ, 0.2, -0.3, 0.4);
+        let spin = 1.27;
+        let expected = baseline * Quat::from_rotation_x(spin);
+        let first = compose_imported_traffic_wheel_rotation(baseline, spin);
+        let second = compose_imported_traffic_wheel_rotation(baseline, spin);
+        assert!(first.abs_diff_eq(expected, 1e-6));
+        assert!(second.abs_diff_eq(first, 1e-6));
+        assert_eq!(TRAFFIC_WHEEL_RADIUS, 0.19);
+    }
+
+    #[test]
+    fn imported_visual_roots_respect_the_traffic_hard_cap() {
+        let mut world = traffic_runtime_test_world();
+        let connector = road_plan(0, 0)
+            .connectors
+            .into_iter()
+            .flatten()
+            .next()
+            .unwrap();
+        let candidate = TrafficSpawnCandidate {
+            position: Vec2::ZERO,
+            half_extents: Vec2::new(TRAFFIC_HALF_WIDTH, TRAFFIC_HALF_LENGTH),
+            tangent: Vec2::Y,
+            connector,
+            distance: 0.0,
+            route_rng: 1,
+        };
+        let mut queue = CommandQueue::default();
+        {
+            let assets = world.resource::<TrafficVisualAssets>();
+            let toy = world.resource::<ToyShadingAssets>();
+            let mut commands = Commands::new(&mut queue, &world);
+            let mut seed = 1;
+            for id in 1..=MAX_TRAFFIC as u64 {
+                spawn_one_traffic(
+                    &mut commands,
+                    assets,
+                    toy,
+                    candidate,
+                    5.0,
+                    0.5,
+                    id,
+                    &mut seed,
+                );
+            }
+        }
+        queue.apply(&mut world);
+        assert_eq!(world.query::<&Traffic>().iter(&world).count(), MAX_TRAFFIC);
+        assert_eq!(
+            world
+                .query_filtered::<Entity, With<ImportedTrafficVisual>>()
+                .iter(&world)
+                .count(),
+            MAX_TRAFFIC,
+            "each bounded gameplay root owns exactly one imported wrapper"
+        );
+        assert_eq!(
+            world.query::<&WorldAssetRoot>().iter(&world).count(),
+            MAX_TRAFFIC
+        );
+        assert_eq!(
+            world
+                .query::<&ImportedTrafficPaintMaterial>()
+                .iter(&world)
+                .count(),
+            MAX_TRAFFIC,
+            "the traffic cap bounds per-owner paint state to eight wrappers"
         );
     }
 
@@ -2602,14 +3337,47 @@ mod tests {
     }
 
     #[test]
-    fn kind_selection_is_deterministic_and_varied() {
+    fn kind_bucket_distribution_is_exact_and_every_variant_is_reachable() {
+        let mut counts = [0; 5];
+        for kind in TRAFFIC_KIND_BUCKETS {
+            counts[match kind {
+                TrafficKind::Sedan => 0,
+                TrafficKind::CityVan => 1,
+                TrafficKind::Hatchback => 2,
+                TrafficKind::Pickup => 3,
+                TrafficKind::Suv => 4,
+            }] += 1;
+        }
+        assert_eq!(counts, [6, 5, 4, 3, 2]);
+
+        let reached: Vec<_> = (0..10_000_u32).map(traffic_kind).collect();
+        for kind in [
+            TrafficKind::Sedan,
+            TrafficKind::CityVan,
+            TrafficKind::Hatchback,
+            TrafficKind::Pickup,
+            TrafficKind::Suv,
+        ] {
+            assert!(reached.contains(&kind), "{kind:?} must be reachable");
+        }
+    }
+
+    #[test]
+    fn kind_selection_is_deterministic_and_does_not_advance_gameplay_rng() {
         let seeds: Vec<_> = (0_u32..64)
             .map(|i| 0xCAFE_BABE_u32.wrapping_add(i.wrapping_mul(0x9E37_79B9)))
             .collect();
-        let a: Vec<_> = seeds.iter().copied().map(traffic_kind).collect();
-        let b: Vec<_> = seeds.iter().copied().map(traffic_kind).collect();
-        assert_eq!(a, b);
-        assert!(a.contains(&TrafficKind::Sedan));
-        assert!(a.contains(&TrafficKind::Van));
+        assert_eq!(
+            seeds.iter().copied().map(traffic_kind).collect::<Vec<_>>(),
+            seeds.iter().copied().map(traffic_kind).collect::<Vec<_>>()
+        );
+        for initial in seeds {
+            let mut selected_seed = initial;
+            let _ = traffic_kind(selected_seed);
+            let selected_next = next_random_u32(&mut selected_seed);
+            let mut control_seed = initial;
+            let control_next = next_random_u32(&mut control_seed);
+            assert_eq!((selected_seed, selected_next), (control_seed, control_next));
+        }
     }
 }
