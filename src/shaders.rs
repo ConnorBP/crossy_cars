@@ -75,31 +75,31 @@ fn atmosphere_descriptor(kind: ModifierKind) -> AtmosphereDescriptor {
             // Preserve the original clear daytime presentation.
             sky_top: LinearRgba::new(0.55, 0.78, 0.95, 1.0),
             sky_bottom: LinearRgba::new(0.85, 0.90, 0.95, 1.0),
-            environment_intensity: 900.0,
+            environment_intensity: 600.0,
         },
         ModifierKind::RushHour => AtmosphereDescriptor {
             // Warm, muted haze evokes a traffic-heavy late afternoon.
             sky_top: LinearRgba::new(0.78, 0.55, 0.42, 1.0),
             sky_bottom: LinearRgba::new(0.95, 0.78, 0.60, 1.0),
-            environment_intensity: 1_000.0,
+            environment_intensity: 666.6667,
         },
         ModifierKind::ChickenFrenzy => AtmosphereDescriptor {
             // A saturated golden sky and stronger IBL make the round lively.
             sky_top: LinearRgba::new(0.82, 0.66, 0.28, 1.0),
             sky_bottom: LinearRgba::new(1.00, 0.88, 0.52, 1.0),
-            environment_intensity: 1_250.0,
+            environment_intensity: 833.3333,
         },
         ModifierKind::Stampede => AtmosphereDescriptor {
             // Dusty earth tones sell a churned-up, critter-filled road.
             sky_top: LinearRgba::new(0.50, 0.38, 0.27, 1.0),
             sky_bottom: LinearRgba::new(0.72, 0.58, 0.40, 1.0),
-            environment_intensity: 750.0,
+            environment_intensity: 500.0,
         },
         ModifierKind::GlassCannon => AtmosphereDescriptor {
             // Cool twilight and reduced fill light sharpen the dangerous mood.
             sky_top: LinearRgba::new(0.22, 0.38, 0.58, 1.0),
             sky_bottom: LinearRgba::new(0.46, 0.58, 0.70, 1.0),
-            environment_intensity: 500.0,
+            environment_intensity: 333.3333,
         },
     }
 }

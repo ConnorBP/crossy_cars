@@ -122,7 +122,7 @@ fn main() {
             // Tuned down for HDR + TonyMcMapface tonemapping (T9). 150.0 was
             // pre-HDR and washed the scene out once bloom/tonemapping landed;
             // the directional sun + IBL now carry the lighting.
-            brightness: 22.0,
+            brightness: 40.0,
             ..default()
         });
 
