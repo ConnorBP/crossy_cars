@@ -427,6 +427,10 @@ pub(crate) enum PlayerCarVisual {
 }
 
 const IMPORTED_CAR_SCENE: &str = "models/car_concept_final.glb#Scene0";
+/// The reviewed GLB's `Material0` is the confirmed "Car Paint" material.
+/// Loading the label directly keeps polish ownership independent of scene
+/// instantiation timing and avoids touching any other imported material.
+const IMPORTED_CAR_PAINT_MATERIAL: &str = "models/car_concept_final.glb#Material0/std";
 const IMPORTED_CAR_Y: f32 = -0.112;
 const IMPORTED_CAR_SCALE: f32 = 0.60;
 const IMPORTED_BINDING_COUNT: usize = 8;
@@ -441,6 +445,53 @@ pub(crate) struct ImportedCarSceneRoot;
 /// target exists exactly once below that root and has captured its baseline.
 #[derive(Component)]
 pub(crate) struct ImportedCarReady;
+
+/// Owns the dedicated asynchronous handle for the imported concept's confirmed
+/// car-paint material. `applied` makes polishing a one-shot operation after the
+/// labeled material appears in [`Assets<StandardMaterial>`].
+#[derive(Resource)]
+pub(crate) struct ImportedCarPaint {
+    handle: Handle<StandardMaterial>,
+    applied: bool,
+}
+
+impl FromWorld for ImportedCarPaint {
+    fn from_world(world: &mut World) -> Self {
+        Self {
+            handle: world
+                .resource::<AssetServer>()
+                .load(IMPORTED_CAR_PAINT_MATERIAL),
+            applied: false,
+        }
+    }
+}
+
+/// Apply only the reviewed finish values. Assigning these four fields in place
+/// deliberately preserves the GLB's color/texture, emissive and alpha data, as
+/// well as every unrelated material property.
+fn polish_imported_car_paint(material: &mut StandardMaterial) {
+    material.metallic = 0.90;
+    material.perceptual_roughness = 0.22;
+    material.clearcoat = 1.0;
+    material.clearcoat_perceptual_roughness = 0.14;
+}
+
+fn apply_imported_car_paint_polish(
+    visual: Res<PlayerCarVisual>,
+    mut imported_paint: ResMut<ImportedCarPaint>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    // The retained procedural selection must never mutate either its own paint
+    // or the asynchronously loaded imported material.
+    if *visual != PlayerCarVisual::ImportedConcept || imported_paint.applied {
+        return;
+    }
+    let Some(mut material) = materials.get_mut(&imported_paint.handle) else {
+        return;
+    };
+    polish_imported_car_paint(&mut material);
+    imported_paint.applied = true;
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum ImportedCarBindingKind {
@@ -594,10 +645,12 @@ impl Plugin for CarReviewPlugin {
         app.init_resource::<PlayerCarVisual>()
             .init_resource::<PlayerInput>()
             .init_resource::<Time>()
+            .init_resource::<ImportedCarPaint>()
             .add_systems(Startup, spawn_car)
             .add_systems(
                 Update,
                 (
+                    apply_imported_car_paint_polish,
                     bind_imported_scene_nodes,
                     update_imported_car_ready,
                     animate_imported_car,
@@ -613,6 +666,7 @@ impl Plugin for CarPlugin {
             .init_resource::<InputFrozen>()
             .init_resource::<PlayerInput>()
             .init_resource::<Handbrake>()
+            .init_resource::<ImportedCarPaint>()
             .configure_sets(
                 Update,
                 (KeyboardInputSet, TouchInputSet, DrivingSet).chain(),
@@ -624,7 +678,12 @@ impl Plugin for CarPlugin {
             .add_systems(Update, read_keyboard_input.in_set(KeyboardInputSet))
             .add_systems(
                 Update,
-                (bind_imported_scene_nodes, update_imported_car_ready).chain(),
+                (
+                    apply_imported_car_paint_polish,
+                    bind_imported_scene_nodes,
+                    update_imported_car_ready,
+                )
+                    .chain(),
             )
             .add_systems(
                 Update,
@@ -2486,6 +2545,128 @@ mod tests {
     }
 
     #[test]
+    fn imported_paint_helper_sets_exact_finish_and_preserves_every_other_field() {
+        let mut material = StandardMaterial {
+            base_color: Color::srgba(0.17, 0.29, 0.41, 0.53),
+            base_color_texture: Some(Handle::default()),
+            emissive: LinearRgba::new(3.0, 2.0, 1.0, 0.7),
+            emissive_texture: Some(Handle::default()),
+            metallic: 0.13,
+            perceptual_roughness: 0.87,
+            clearcoat: 0.19,
+            clearcoat_perceptual_roughness: 0.73,
+            alpha_mode: AlphaMode::Blend,
+            double_sided: true,
+            unlit: true,
+            fog_enabled: false,
+            ..default()
+        };
+        let original = material.clone();
+
+        polish_imported_car_paint(&mut material);
+
+        assert_eq!(material.metallic, 0.90);
+        assert_eq!(material.perceptual_roughness, 0.22);
+        assert_eq!(material.clearcoat, 1.0);
+        assert_eq!(material.clearcoat_perceptual_roughness, 0.14);
+
+        // Restore only the four owned finish fields, then compare the complete
+        // debug representation to catch mutation of any present or future
+        // unrelated StandardMaterial field.
+        material.metallic = original.metallic;
+        material.perceptual_roughness = original.perceptual_roughness;
+        material.clearcoat = original.clearcoat;
+        material.clearcoat_perceptual_roughness = original.clearcoat_perceptual_roughness;
+        assert_eq!(format!("{material:?}"), format!("{original:?}"));
+    }
+
+    fn imported_paint_update_app(visual: PlayerCarVisual) -> (App, Handle<StandardMaterial>) {
+        let mut app = App::new();
+        app.init_resource::<Assets<StandardMaterial>>()
+            .insert_resource(visual);
+        let handle = app
+            .world()
+            .resource::<Assets<StandardMaterial>>()
+            .reserve_handle();
+        app.insert_resource(ImportedCarPaint {
+            handle: handle.clone(),
+            applied: false,
+        })
+        .add_systems(Update, apply_imported_car_paint_polish);
+        (app, handle)
+    }
+
+    #[test]
+    fn imported_paint_waits_while_material_is_missing() {
+        let (mut app, _) = imported_paint_update_app(PlayerCarVisual::ImportedConcept);
+        app.update();
+        assert!(!app.world().resource::<ImportedCarPaint>().applied);
+    }
+
+    #[test]
+    fn imported_paint_is_polished_once_after_loading() {
+        let (mut app, handle) = imported_paint_update_app(PlayerCarVisual::ImportedConcept);
+        app.world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .insert(handle.id(), StandardMaterial::default())
+            .unwrap();
+
+        app.update();
+        assert!(app.world().resource::<ImportedCarPaint>().applied);
+        let material = app
+            .world()
+            .resource::<Assets<StandardMaterial>>()
+            .get(&handle)
+            .unwrap();
+        assert_eq!(material.metallic, 0.90);
+        assert_eq!(material.perceptual_roughness, 0.22);
+        assert_eq!(material.clearcoat, 1.0);
+        assert_eq!(material.clearcoat_perceptual_roughness, 0.14);
+
+        // A later change is not overwritten: applied means exactly once.
+        app.world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .get_mut(&handle)
+            .unwrap()
+            .metallic = 0.37;
+        app.update();
+        assert_eq!(
+            app.world()
+                .resource::<Assets<StandardMaterial>>()
+                .get(&handle)
+                .unwrap()
+                .metallic,
+            0.37
+        );
+    }
+
+    #[test]
+    fn legacy_visual_skips_imported_paint_mutation() {
+        let (mut app, handle) = imported_paint_update_app(PlayerCarVisual::LegacyProcedural);
+        let original = StandardMaterial {
+            metallic: 0.31,
+            perceptual_roughness: 0.68,
+            clearcoat: 0.27,
+            clearcoat_perceptual_roughness: 0.76,
+            ..default()
+        };
+        app.world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .insert(handle.id(), original.clone())
+            .unwrap();
+
+        app.update();
+
+        assert!(!app.world().resource::<ImportedCarPaint>().applied);
+        let material = app
+            .world()
+            .resource::<Assets<StandardMaterial>>()
+            .get(&handle)
+            .unwrap();
+        assert_eq!(format!("{material:?}"), format!("{original:?}"));
+    }
+
+    #[test]
     fn imported_name_classifier_is_exact() {
         use ImportedCarBindingKind::*;
         assert_eq!(classify_imported_car_name("Steering_FL"), Some(SteeringFl));
@@ -2573,7 +2754,7 @@ mod tests {
         .init_asset::<WorldAsset>()
         .init_resource::<Assets<Mesh>>()
         .init_resource::<Assets<Image>>()
-        .init_resource::<Assets<StandardMaterial>>()
+        .init_asset::<StandardMaterial>()
         .init_resource::<TextureAssets>()
         .insert_resource(visual)
         .add_plugins(CarReviewPlugin);
