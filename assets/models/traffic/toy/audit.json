@@ -1,0 +1,422 @@
+{
+  "npc_toy_sedan": {
+    "root": "NPC_Toy_Sedan",
+    "wheel_nodes": [
+      "npc_toy_sedan_Wheel_FL",
+      "npc_toy_sedan_Wheel_FR",
+      "npc_toy_sedan_Wheel_RL",
+      "npc_toy_sedan_Wheel_RR"
+    ],
+    "nodes": 19,
+    "meshes": 14,
+    "materials": 8,
+    "triangles": 1184,
+    "actual_bounds": {
+      "min": [
+        -0.6744999885559082,
+        -1.1319999694824219,
+        0.0
+      ],
+      "max": [
+        0.6744999885559082,
+        1.1380000114440918,
+        0.8899999856948853
+      ],
+      "dimensions": [
+        1.3489999771118164,
+        2.2699999809265137,
+        0.8899999856948853
+      ]
+    },
+    "wheel_pivots": {
+      "FL": {
+        "node": "npc_toy_sedan_Wheel_FL",
+        "location": [
+          -0.550000011920929,
+          0.6899999976158142,
+          0.18000000715255737
+        ],
+        "children": [
+          "npc_toy_sedan_Wheel_FL_Hub",
+          "npc_toy_sedan_Wheel_FL_Tire"
+        ]
+      },
+      "FR": {
+        "node": "npc_toy_sedan_Wheel_FR",
+        "location": [
+          0.550000011920929,
+          0.6899999976158142,
+          0.18000000715255737
+        ],
+        "children": [
+          "npc_toy_sedan_Wheel_FR_Hub",
+          "npc_toy_sedan_Wheel_FR_Tire"
+        ]
+      },
+      "RL": {
+        "node": "npc_toy_sedan_Wheel_RL",
+        "location": [
+          -0.550000011920929,
+          -0.6899999976158142,
+          0.18000000715255737
+        ],
+        "children": [
+          "npc_toy_sedan_Wheel_RL_Hub",
+          "npc_toy_sedan_Wheel_RL_Tire"
+        ]
+      },
+      "RR": {
+        "node": "npc_toy_sedan_Wheel_RR",
+        "location": [
+          0.550000011920929,
+          -0.6899999976158142,
+          0.18000000715255737
+        ],
+        "children": [
+          "npc_toy_sedan_Wheel_RR_Hub",
+          "npc_toy_sedan_Wheel_RR_Tire"
+        ]
+      }
+    },
+    "bytes": 94464,
+    "ground_min_z": 0.0,
+    "glb2_valid": true,
+    "toy_paint": true
+  },
+  "npc_toy_city_van": {
+    "root": "NPC_Toy_City_Van",
+    "wheel_nodes": [
+      "npc_toy_city_van_Wheel_FL",
+      "npc_toy_city_van_Wheel_FR",
+      "npc_toy_city_van_Wheel_RL",
+      "npc_toy_city_van_Wheel_RR"
+    ],
+    "nodes": 20,
+    "meshes": 15,
+    "materials": 9,
+    "triangles": 1196,
+    "actual_bounds": {
+      "min": [
+        -0.6894999742507935,
+        -1.1319999694824219,
+        0.0
+      ],
+      "max": [
+        0.6894999742507935,
+        1.1380000114440918,
+        1.2000000476837158
+      ],
+      "dimensions": [
+        1.378999948501587,
+        2.2699999809265137,
+        1.2000000476837158
+      ]
+    },
+    "wheel_pivots": {
+      "FL": {
+        "node": "npc_toy_city_van_Wheel_FL",
+        "location": [
+          -0.5600000023841858,
+          0.6899999976158142,
+          0.1899999976158142
+        ],
+        "children": [
+          "npc_toy_city_van_Wheel_FL_Hub",
+          "npc_toy_city_van_Wheel_FL_Tire"
+        ]
+      },
+      "FR": {
+        "node": "npc_toy_city_van_Wheel_FR",
+        "location": [
+          0.5600000023841858,
+          0.6899999976158142,
+          0.1899999976158142
+        ],
+        "children": [
+          "npc_toy_city_van_Wheel_FR_Hub",
+          "npc_toy_city_van_Wheel_FR_Tire"
+        ]
+      },
+      "RL": {
+        "node": "npc_toy_city_van_Wheel_RL",
+        "location": [
+          -0.5600000023841858,
+          -0.6899999976158142,
+          0.1899999976158142
+        ],
+        "children": [
+          "npc_toy_city_van_Wheel_RL_Hub",
+          "npc_toy_city_van_Wheel_RL_Tire"
+        ]
+      },
+      "RR": {
+        "node": "npc_toy_city_van_Wheel_RR",
+        "location": [
+          0.5600000023841858,
+          -0.6899999976158142,
+          0.1899999976158142
+        ],
+        "children": [
+          "npc_toy_city_van_Wheel_RR_Hub",
+          "npc_toy_city_van_Wheel_RR_Tire"
+        ]
+      }
+    },
+    "bytes": 96028,
+    "ground_min_z": 0.0,
+    "glb2_valid": true,
+    "toy_paint": true
+  },
+  "npc_toy_hatchback": {
+    "root": "NPC_Toy_Hatchback",
+    "wheel_nodes": [
+      "npc_toy_hatchback_Wheel_FL",
+      "npc_toy_hatchback_Wheel_FR",
+      "npc_toy_hatchback_Wheel_RL",
+      "npc_toy_hatchback_Wheel_RR"
+    ],
+    "nodes": 19,
+    "meshes": 14,
+    "materials": 8,
+    "triangles": 1208,
+    "actual_bounds": {
+      "min": [
+        -0.6644999980926514,
+        -1.149999976158142,
+        0.0
+      ],
+      "max": [
+        0.6644999980926514,
+        1.0379999876022339,
+        1.0149999856948853
+      ],
+      "dimensions": [
+        1.3289999961853027,
+        2.187999963760376,
+        1.0149999856948853
+      ]
+    },
+    "wheel_pivots": {
+      "FL": {
+        "node": "npc_toy_hatchback_Wheel_FL",
+        "location": [
+          -0.5400000214576721,
+          0.6200000047683716,
+          0.18000000715255737
+        ],
+        "children": [
+          "npc_toy_hatchback_Wheel_FL_Hub",
+          "npc_toy_hatchback_Wheel_FL_Tire"
+        ]
+      },
+      "FR": {
+        "node": "npc_toy_hatchback_Wheel_FR",
+        "location": [
+          0.5400000214576721,
+          0.6200000047683716,
+          0.18000000715255737
+        ],
+        "children": [
+          "npc_toy_hatchback_Wheel_FR_Hub",
+          "npc_toy_hatchback_Wheel_FR_Tire"
+        ]
+      },
+      "RL": {
+        "node": "npc_toy_hatchback_Wheel_RL",
+        "location": [
+          -0.5400000214576721,
+          -0.6200000047683716,
+          0.18000000715255737
+        ],
+        "children": [
+          "npc_toy_hatchback_Wheel_RL_Hub",
+          "npc_toy_hatchback_Wheel_RL_Tire"
+        ]
+      },
+      "RR": {
+        "node": "npc_toy_hatchback_Wheel_RR",
+        "location": [
+          0.5400000214576721,
+          -0.6200000047683716,
+          0.18000000715255737
+        ],
+        "children": [
+          "npc_toy_hatchback_Wheel_RR_Hub",
+          "npc_toy_hatchback_Wheel_RR_Tire"
+        ]
+      }
+    },
+    "bytes": 95408,
+    "ground_min_z": 0.0,
+    "glb2_valid": true,
+    "toy_paint": true
+  },
+  "npc_toy_pickup": {
+    "root": "NPC_Toy_Pickup",
+    "wheel_nodes": [
+      "npc_toy_pickup_Wheel_FL",
+      "npc_toy_pickup_Wheel_FR",
+      "npc_toy_pickup_Wheel_RL",
+      "npc_toy_pickup_Wheel_RR"
+    ],
+    "nodes": 19,
+    "meshes": 14,
+    "materials": 8,
+    "triangles": 1228,
+    "actual_bounds": {
+      "min": [
+        -0.7044999599456787,
+        -1.1719999313354492,
+        0.0
+      ],
+      "max": [
+        0.7044999599456787,
+        1.1779999732971191,
+        1.059999942779541
+      ],
+      "dimensions": [
+        1.4089999198913574,
+        2.3499999046325684,
+        1.059999942779541
+      ]
+    },
+    "wheel_pivots": {
+      "FL": {
+        "node": "npc_toy_pickup_Wheel_FL",
+        "location": [
+          -0.5699999928474426,
+          0.7099999785423279,
+          0.1899999976158142
+        ],
+        "children": [
+          "npc_toy_pickup_Wheel_FL_Hub",
+          "npc_toy_pickup_Wheel_FL_Tire"
+        ]
+      },
+      "FR": {
+        "node": "npc_toy_pickup_Wheel_FR",
+        "location": [
+          0.5699999928474426,
+          0.7099999785423279,
+          0.1899999976158142
+        ],
+        "children": [
+          "npc_toy_pickup_Wheel_FR_Hub",
+          "npc_toy_pickup_Wheel_FR_Tire"
+        ]
+      },
+      "RL": {
+        "node": "npc_toy_pickup_Wheel_RL",
+        "location": [
+          -0.5699999928474426,
+          -0.7099999785423279,
+          0.1899999976158142
+        ],
+        "children": [
+          "npc_toy_pickup_Wheel_RL_Hub",
+          "npc_toy_pickup_Wheel_RL_Tire"
+        ]
+      },
+      "RR": {
+        "node": "npc_toy_pickup_Wheel_RR",
+        "location": [
+          0.5699999928474426,
+          -0.7099999785423279,
+          0.1899999976158142
+        ],
+        "children": [
+          "npc_toy_pickup_Wheel_RR_Hub",
+          "npc_toy_pickup_Wheel_RR_Tire"
+        ]
+      }
+    },
+    "bytes": 97016,
+    "ground_min_z": 0.0,
+    "glb2_valid": true,
+    "toy_paint": true
+  },
+  "npc_toy_suv": {
+    "root": "NPC_Toy_SUV",
+    "wheel_nodes": [
+      "npc_toy_suv_Wheel_FL",
+      "npc_toy_suv_Wheel_FR",
+      "npc_toy_suv_Wheel_RL",
+      "npc_toy_suv_Wheel_RR"
+    ],
+    "nodes": 19,
+    "meshes": 14,
+    "materials": 8,
+    "triangles": 1288,
+    "actual_bounds": {
+      "min": [
+        -0.7144999504089355,
+        -1.1749999523162842,
+        0.0
+      ],
+      "max": [
+        0.7144999504089355,
+        1.1579999923706055,
+        1.1549999713897705
+      ],
+      "dimensions": [
+        1.428999900817871,
+        2.3329999446868896,
+        1.1549999713897705
+      ]
+    },
+    "wheel_pivots": {
+      "FL": {
+        "node": "npc_toy_suv_Wheel_FL",
+        "location": [
+          -0.5799999833106995,
+          0.7099999785423279,
+          0.20000000298023224
+        ],
+        "children": [
+          "npc_toy_suv_Wheel_FL_Hub",
+          "npc_toy_suv_Wheel_FL_Tire"
+        ]
+      },
+      "FR": {
+        "node": "npc_toy_suv_Wheel_FR",
+        "location": [
+          0.5799999833106995,
+          0.7099999785423279,
+          0.20000000298023224
+        ],
+        "children": [
+          "npc_toy_suv_Wheel_FR_Hub",
+          "npc_toy_suv_Wheel_FR_Tire"
+        ]
+      },
+      "RL": {
+        "node": "npc_toy_suv_Wheel_RL",
+        "location": [
+          -0.5799999833106995,
+          -0.7099999785423279,
+          0.20000000298023224
+        ],
+        "children": [
+          "npc_toy_suv_Wheel_RL_Hub",
+          "npc_toy_suv_Wheel_RL_Tire"
+        ]
+      },
+      "RR": {
+        "node": "npc_toy_suv_Wheel_RR",
+        "location": [
+          0.5799999833106995,
+          -0.7099999785423279,
+          0.20000000298023224
+        ],
+        "children": [
+          "npc_toy_suv_Wheel_RR_Hub",
+          "npc_toy_suv_Wheel_RR_Tire"
+        ]
+      }
+    },
+    "bytes": 100456,
+    "ground_min_z": 0.0,
+    "glb2_valid": true,
+    "toy_paint": true
+  }
+}
