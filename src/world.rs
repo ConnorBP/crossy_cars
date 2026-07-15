@@ -1222,6 +1222,82 @@ type GridCoord = (i32, i32);
 #[derive(Resource, Default, Debug, PartialEq, Eq)]
 struct LastRecycledCell(Option<GridCoord>);
 
+/// Incremental, incoming-first reconciliation work. Block-root commands are
+/// deferred, so `scheduled` remains set until a later query observes the
+/// requested coordinate. This prevents a missing root from being scheduled
+/// repeatedly when command application is delayed.
+#[derive(Resource, Default, Debug)]
+struct PendingRecycle(Option<RecycleWork>);
+
+/// Root spawned by an incomplete incremental recycle. The marker is cleared
+/// only when that plan reaches an exact desired set. On a mid-plan retarget,
+/// obsolete speculative roots may be pruned without touching established
+/// world coverage or retaining stale entity IDs.
+#[derive(Component)]
+struct PendingBlock;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RecyclePhase {
+    /// Fill every hole in the new window before retiring any old root.
+    Incoming,
+    /// The incoming set was verified by a later query; retire old roots one
+    /// at a time, rechecking the live snapshot before every command.
+    Outgoing,
+}
+
+#[derive(Debug)]
+struct RecycleWork {
+    target: GridCoord,
+    desired: BTreeSet<GridCoord>,
+    incoming: BTreeSet<GridCoord>,
+    scheduled: Option<GridCoord>,
+    phase: RecyclePhase,
+}
+
+impl RecycleWork {
+    fn new(
+        target: GridCoord,
+        desired: BTreeSet<GridCoord>,
+        counts: &BTreeMap<GridCoord, usize>,
+    ) -> Self {
+        let incoming = desired
+            .iter()
+            .filter(|coord| counts.get(coord).copied().unwrap_or(0) == 0)
+            .copied()
+            .collect();
+        Self {
+            target,
+            desired,
+            incoming,
+            scheduled: None,
+            phase: RecyclePhase::Incoming,
+        }
+    }
+
+    fn desired_is_present(&self, counts: &BTreeMap<GridCoord, usize>) -> bool {
+        self.desired
+            .iter()
+            .all(|coord| counts.get(coord).copied().unwrap_or(0) >= 1)
+    }
+
+    fn desired_is_exact(&self, counts: &BTreeMap<GridCoord, usize>) -> bool {
+        self.desired_is_present(counts)
+            && self
+                .desired
+                .iter()
+                .all(|coord| counts.get(coord).copied() == Some(1))
+    }
+
+    fn refresh_incoming(&mut self, counts: &BTreeMap<GridCoord, usize>) {
+        self.incoming = self
+            .desired
+            .iter()
+            .filter(|coord| counts.get(coord).copied().unwrap_or(0) == 0)
+            .copied()
+            .collect();
+    }
+}
+
 fn grid_coord_for_position(coordinate: f32, block: f32) -> i32 {
     if !coordinate.is_finite() || !block.is_finite() || block <= 0.0 {
         return 0;
@@ -1265,6 +1341,7 @@ fn desired_grid_coords(center: GridCoord, count: i32) -> BTreeSet<GridCoord> {
 /// A deferred-command-safe set-difference plan. Coordinates are sets, so a
 /// malformed snapshot containing duplicate coordinates still cannot schedule
 /// duplicate coordinate spawns or despawns.
+#[cfg(test)]
 #[derive(Debug, PartialEq, Eq)]
 struct RecyclePlan {
     despawn: BTreeSet<GridCoord>,
@@ -1273,6 +1350,7 @@ struct RecyclePlan {
 
 /// Build a recycle plan from one immutable snapshot and one desired window.
 /// No result depends on commands issued while applying the plan.
+#[cfg(test)]
 fn recycle_plan(
     existing_coords: impl IntoIterator<Item = GridCoord>,
     desired: &BTreeSet<GridCoord>,
@@ -1717,6 +1795,7 @@ impl Plugin for WorldPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<GridConfig>()
             .init_resource::<LastRecycledCell>()
+            .init_resource::<PendingRecycle>()
             .init_resource::<WorldAssets>()
             .add_systems(Startup, spawn_initial_grid)
             // Coin spin + pickup still live here (coins are environment now).
@@ -1739,8 +1818,8 @@ impl Plugin for WorldPlugin {
             // in SpawnSet so it's before reset_run, which zeroes the car to
             // origin.
             .add_systems(OnEnter(GameState::Playing), reset_grid.in_set(SpawnSet))
-            // Reconcile all block roots to the exact count×count coordinate
-            // window around the car in one deferred-safe snapshot/plan pass.
+            // Reconcile incrementally: incoming roots are verified before old
+            // roots are retired, with at most one root operation per update.
             .add_systems(Update, recycle_grid.run_if(in_state(GameState::Playing)));
     }
 }
@@ -4302,11 +4381,15 @@ fn try_place(
     None
 }
 
-/// Reconcile the block roots to the exact count×count rectangle centered on
-/// the car's current grid cell. The query is read once, then a pure set-diff
-/// plan is applied through deferred commands. This avoids stale-query axis
-/// passes and handles X, Z, diagonal and arbitrarily large teleports in one
-/// frame.
+/// Incrementally reconcile block roots to the car's count×count window.
+///
+/// The phases are intentionally separated by ECS queries. Missing incoming
+/// roots are scheduled one per update and remembered until a later query sees
+/// them. Only after a later query proves every desired coordinate exists
+/// exactly once may one currently-queryable outgoing root be despawned. A
+/// final later query must prove the exact desired set before completion is
+/// recorded. Thus deferred commands can neither create holes nor cause stale
+/// entity IDs to be despawned.
 fn recycle_grid(
     mut commands: Commands,
     cfg: Res<GridConfig>,
@@ -4314,75 +4397,156 @@ fn recycle_grid(
     textures: Res<TextureAssets>,
     world_assets: Res<WorldAssets>,
     car: Query<&Transform, (With<Car>, Without<Block>)>,
-    blocks: Query<(Entity, &Block)>,
+    blocks: Query<(Entity, &Block, Option<&PendingBlock>)>,
     mut last_recycled_cell: ResMut<LastRecycledCell>,
+    mut pending: ResMut<PendingRecycle>,
 ) {
     let Ok(car_t) = car.single() else {
         return;
     };
-    let block = cfg.block;
-    if !block.is_finite() || block <= 0.0 {
+    let block_size = cfg.block;
+    if !block_size.is_finite() || block_size <= 0.0 {
         return;
     }
 
     let center = (
-        grid_coord_for_position(car_t.translation.x, block),
-        grid_coord_for_position(car_t.translation.z, block),
+        grid_coord_for_position(car_t.translation.x, block_size),
+        grid_coord_for_position(car_t.translation.z, block_size),
     );
-    // This gate deliberately precedes both desired-window construction and
-    // the block snapshot: stationary frames allocate no BTreeSet/BTreeMap.
-    if !last_recycled_cell.needs_recycle(center) {
+    // Preserve the allocation-free stationary gate. An active reconciliation
+    // must continue even while the player remains in its target cell.
+    if pending.0.is_none() && !last_recycled_cell.needs_recycle(center) {
         return;
     }
 
-    let desired = desired_grid_coords(center, cfg.count);
-
-    // One immutable ECS snapshot. Grouping entities by coordinate lets us
-    // apply each coordinate action exactly once; duplicate roots, if a prior
-    // bad frame left any, are also retired while retaining one desired root.
+    // This is the only entity snapshot used by this update. Entity IDs are
+    // selected for despawn from this live snapshot, never retained in queues.
     let mut entities_by_coord: BTreeMap<GridCoord, Vec<Entity>> = BTreeMap::new();
-    for (entity, block_component) in &blocks {
+    let mut speculative = BTreeSet::new();
+    for (entity, block_component, pending_block) in &blocks {
         entities_by_coord
             .entry((block_component.gx, block_component.gz))
             .or_default()
             .push(entity);
+        if pending_block.is_some() {
+            speculative.insert(entity);
+        }
     }
-    let existing_coords: BTreeSet<_> = entities_by_coord.keys().copied().collect();
-    let plan = recycle_plan(existing_coords.iter().copied(), &desired);
+    let counts: BTreeMap<_, _> = entities_by_coord
+        .iter()
+        .map(|(&coord, entities)| (coord, entities.len()))
+        .collect();
 
-    for coord in &plan.despawn {
-        if let Some(entities) = entities_by_coord.get(coord) {
-            for &entity in entities {
+    // A move during either phase invalidates all old queues. Rebuild them from
+    // the actual query snapshot so stale target work and entity IDs cannot be
+    // acted upon. Any already-applied stale spawn simply becomes outgoing.
+    if pending.0.as_ref().is_none_or(|work| work.target != center) {
+        let desired = desired_grid_coords(center, cfg.count);
+        // A command queued for the old target may not be query-visible yet.
+        // Carry only that deferred-command guard across the retarget; all
+        // actual coordinate work queues are rebuilt from the snapshot. We
+        // wait for even a now-undesired scheduled root to become visible so a
+        // rapid A→B→A retarget cannot schedule its coordinate twice.
+        let deferred_spawn = pending.0.as_ref().and_then(|work| work.scheduled);
+        let mut retargeted = RecycleWork::new(center, desired, &counts);
+        retargeted.scheduled = deferred_spawn;
+        pending.0 = Some(retargeted);
+    }
+
+    let work = pending.0.as_mut().expect("recycle work was just created");
+
+    // Retargeted, incomplete plans may leave query-visible speculative roots.
+    // Prune at most one that is obsolete for the newest target before adding
+    // more. Established roots are never removed here, preserving incoming-
+    // first coverage. With one scheduled root plus at most one speculative
+    // root per desired coordinate, temporary growth is concretely bounded.
+    if let Some(entity) = entities_by_coord
+        .iter()
+        .filter(|(coord, _)| !work.desired.contains(coord) && Some(**coord) != work.scheduled)
+        .flat_map(|(_, entities)| entities.iter())
+        .find(|entity| speculative.contains(entity))
+        .copied()
+    {
+        commands.entity(entity).despawn();
+        return;
+    }
+
+    match work.phase {
+        RecyclePhase::Incoming => {
+            if let Some(scheduled) = work.scheduled {
+                // Do not schedule anything else until deferred Commands have
+                // become visible. In normal Bevy schedules that is next update;
+                // retaining this state also makes custom schedules safe.
+                if counts.get(&scheduled).copied().unwrap_or(0) == 0 {
+                    return;
+                }
+                work.scheduled = None;
+            }
+
+            work.refresh_incoming(&counts);
+            if let Some(&(gx, gz)) = work.incoming.first() {
+                let entity = spawn_block_at(
+                    &mut commands,
+                    &mut meshes,
+                    &textures,
+                    &world_assets,
+                    block_size,
+                    gx,
+                    gz,
+                );
+                commands.entity(entity).insert(PendingBlock);
+                work.scheduled = Some((gx, gz));
+                return;
+            }
+
+            // This query is later than every incoming spawn command. Every
+            // desired coordinate must be present before outgoing cleanup may
+            // begin. Duplicates are handled safely in the outgoing phase.
+            if work.desired_is_present(&counts) {
+                work.phase = RecyclePhase::Outgoing;
+            }
+        }
+        RecyclePhase::Outgoing => {
+            // External mutation or a retarget race can reintroduce a hole.
+            // Return to incoming without removing anything.
+            if !work.desired_is_present(&counts) {
+                work.phase = RecyclePhase::Incoming;
+                work.refresh_incoming(&counts);
+                return;
+            }
+
+            // Select at most one root from this update's query: first an
+            // undesired coordinate, then a duplicate at a desired coordinate.
+            let outgoing = entities_by_coord
+                .iter()
+                .find(|(coord, _)| !work.desired.contains(coord))
+                .and_then(|(_, entities)| entities.first())
+                .copied()
+                .or_else(|| {
+                    entities_by_coord
+                        .iter()
+                        .filter(|(coord, _)| work.desired.contains(coord))
+                        .find_map(|(_, entities)| entities.get(1).copied())
+                });
+            if let Some(entity) = outgoing {
                 commands.entity(entity).despawn();
+                return;
             }
+
+            // No root command is issued here: this later query verifies that
+            // the final cleanup applied and the desired set is exact. Commit
+            // all roots from this completed plan by clearing their transient
+            // marker before arming the stationary gate.
+            if !work.desired_is_exact(&counts) {
+                return;
+            }
+            for entity in &speculative {
+                commands.entity(*entity).remove::<PendingBlock>();
+            }
+            last_recycled_cell.record_completed(work.target);
+            pending.0 = None;
         }
     }
-
-    // A desired coordinate needs one root. Keep the first snapshot entity and
-    // remove any duplicates without ever scheduling an entity twice.
-    for coord in desired.intersection(&existing_coords) {
-        if let Some(entities) = entities_by_coord.get(coord) {
-            for &duplicate in entities.iter().skip(1) {
-                commands.entity(duplicate).despawn();
-            }
-        }
-    }
-
-    for &(gx, gz) in &plan.spawn {
-        spawn_block_at(
-            &mut commands,
-            &mut meshes,
-            &textures,
-            &world_assets,
-            block,
-            gx,
-            gz,
-        );
-    }
-
-    // Record only after the complete plan has been applied to Commands. If a
-    // future early-return path is added above, this cell remains eligible.
-    last_recycled_cell.record_completed(center);
 }
 
 /// Spawn one block at (gx,gz): derive its tile deterministically from the road
@@ -4397,7 +4561,7 @@ fn spawn_block_at(
     block: f32,
     gx: i32,
     gz: i32,
-) {
+) -> Entity {
     let kind = tile_from_edges(gx, gz);
     let district = district_for(gx, gz);
     let family = district_family_for(gx, gz, district);
@@ -4427,6 +4591,7 @@ fn spawn_block_at(
         district,
         family,
     );
+    root
 }
 
 /// On a fresh round, re-center the grid on the car's spawn (origin): despawn
@@ -4443,13 +4608,16 @@ fn reset_grid(
     blocks: Query<Entity, With<Block>>,
     round_active: Res<RoundActive>,
     mut last_recycled_cell: ResMut<LastRecycledCell>,
+    mut pending: ResMut<PendingRecycle>,
 ) {
     if round_active.0 {
         return;
     }
     // A fresh round is an unconditional world rebuild even when the car is
-    // already in cell zero. Invalidate before scheduling it, then record the
-    // rebuilt origin only after the complete window has been scheduled.
+    // already in cell zero. Cancel incremental work before scheduling it,
+    // then record the rebuilt origin only after the complete window has been
+    // scheduled.
+    pending.0 = None;
     last_recycled_cell.invalidate();
     for e in &blocks {
         commands.entity(e).despawn();
@@ -4961,6 +5129,77 @@ mod tests {
         true
     }
 
+    fn block_for_test(gx: i32, gz: i32) -> Block {
+        let district = district_for(gx, gz);
+        Block {
+            gx,
+            gz,
+            kind: tile_from_edges(gx, gz),
+            district,
+            family: district_family_for(gx, gz, district),
+        }
+    }
+
+    fn recycle_test_app(count: i32) -> App {
+        let mut app = App::new();
+        app.init_resource::<Assets<Mesh>>()
+            .init_resource::<Assets<Image>>()
+            .init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<Assets<WaterMaterial>>()
+            .init_resource::<TextureAssets>()
+            .init_resource::<WorldAssets>()
+            .insert_resource(GridConfig {
+                block: ROAD_BLOCK_SIZE,
+                count,
+            })
+            .insert_resource(LastRecycledCell(Some((0, 0))))
+            .init_resource::<PendingRecycle>()
+            .add_systems(Update, recycle_grid);
+        app.world_mut().spawn((
+            Car {
+                speed: 0.0,
+                heading: 0.0,
+                drift: 0.0,
+            },
+            Transform::default(),
+        ));
+        for (gx, gz) in desired_grid_coords((0, 0), count) {
+            app.world_mut()
+                .spawn((Transform::default(), block_for_test(gx, gz)));
+        }
+        app
+    }
+
+    fn root_snapshot(app: &mut App) -> BTreeMap<GridCoord, usize> {
+        let world = app.world_mut();
+        let mut query = world.query::<&Block>();
+        let mut counts = BTreeMap::new();
+        for block in query.iter(world) {
+            *counts.entry((block.gx, block.gz)).or_default() += 1;
+        }
+        counts
+    }
+
+    fn set_car_cell(app: &mut App, cell: GridCoord) {
+        let world = app.world_mut();
+        let mut query = world.query_filtered::<&mut Transform, With<Car>>();
+        let mut transform = query.single_mut(world).unwrap();
+        transform.translation.x = cell.0 as f32 * ROAD_BLOCK_SIZE;
+        transform.translation.z = cell.1 as f32 * ROAD_BLOCK_SIZE;
+    }
+
+    fn run_until_recycled(app: &mut App, target: GridCoord, limit: usize) {
+        for _ in 0..limit {
+            app.update();
+            if app.world().resource::<LastRecycledCell>().0 == Some(target)
+                && app.world().resource::<PendingRecycle>().0.is_none()
+            {
+                return;
+            }
+        }
+        panic!("recycling did not converge to {target:?}");
+    }
+
     #[test]
     fn configured_block_size_controls_recycle_boundaries() {
         assert_eq!(grid_coord_for_position(9.99, 20.0), 0);
@@ -5015,6 +5254,174 @@ mod tests {
         // A new round at the same cell must still permit another rebuild.
         last.invalidate();
         assert!(last.needs_recycle((0, 0)));
+    }
+
+    #[test]
+    fn pending_work_tracks_one_deferred_incoming_and_retargets_from_snapshot() {
+        let old_desired = desired_grid_coords((0, 0), 3);
+        let counts: BTreeMap<_, _> = old_desired.iter().map(|&coord| (coord, 1)).collect();
+        let desired = desired_grid_coords((1, 0), 3);
+        let mut work = RecycleWork::new((1, 0), desired.clone(), &counts);
+        assert_eq!(work.phase, RecyclePhase::Incoming);
+        assert_eq!(work.incoming.len(), 3);
+        let first = *work.incoming.first().unwrap();
+        work.scheduled = Some(first);
+        assert_eq!(work.scheduled, Some(first));
+        assert!(!work.desired_is_exact(&counts));
+
+        let teleported = desired_grid_coords((9, -6), 3);
+        let retargeted = RecycleWork::new((9, -6), teleported.clone(), &counts);
+        assert_eq!(retargeted.desired, teleported);
+        assert_eq!(retargeted.incoming.len(), 9);
+        assert_eq!(retargeted.scheduled, None);
+    }
+
+    #[test]
+    fn ecs_recycling_has_no_holes_and_performs_at_most_one_root_operation() {
+        let mut app = recycle_test_app(3);
+        let start = desired_grid_coords((0, 0), 3);
+        let target = (1, 0);
+        let desired = desired_grid_coords(target, 3);
+        set_car_cell(&mut app, target);
+
+        let mut previous_count = start.len();
+        let mut outgoing_started = false;
+        for _ in 0..20 {
+            app.update();
+            let snapshot = root_snapshot(&mut app);
+            let root_count: usize = snapshot.values().sum();
+            assert!(root_count.abs_diff(previous_count) <= 1);
+            assert!(snapshot.values().all(|&count| count == 1));
+            let incoming_complete = desired
+                .iter()
+                .all(|coord| snapshot.get(coord).copied() == Some(1));
+            let removed_old = start.iter().any(|coord| !snapshot.contains_key(coord));
+            if removed_old {
+                outgoing_started = true;
+                assert!(
+                    incoming_complete,
+                    "outgoing root retired before incoming set"
+                );
+            }
+            if !outgoing_started {
+                assert!(start.iter().all(|coord| snapshot.contains_key(coord)));
+            }
+            previous_count = root_count;
+            if app.world().resource::<PendingRecycle>().0.is_none() {
+                break;
+            }
+        }
+
+        assert_eq!(app.world().resource::<LastRecycledCell>().0, Some(target));
+        let snapshot = root_snapshot(&mut app);
+        assert_eq!(snapshot.keys().copied().collect::<BTreeSet<_>>(), desired);
+        assert!(snapshot.values().all(|&count| count == 1));
+    }
+
+    #[test]
+    fn ecs_mid_phase_diagonal_teleport_discards_stale_work_and_converges_exactly() {
+        let mut app = recycle_test_app(3);
+        set_car_cell(&mut app, (1, 0));
+        app.update();
+        app.update();
+
+        let target = (8, -7);
+        set_car_cell(&mut app, target);
+        let mut previous_count: usize = root_snapshot(&mut app).values().sum();
+        for _ in 0..80 {
+            app.update();
+            let snapshot = root_snapshot(&mut app);
+            let count: usize = snapshot.values().sum();
+            assert!(count.abs_diff(previous_count) <= 1);
+            assert!(snapshot.values().all(|&multiplicity| multiplicity == 1));
+            previous_count = count;
+            if app.world().resource::<PendingRecycle>().0.is_none() {
+                break;
+            }
+        }
+        assert_eq!(app.world().resource::<LastRecycledCell>().0, Some(target));
+        let snapshot = root_snapshot(&mut app);
+        assert_eq!(
+            snapshot.keys().copied().collect::<BTreeSet<_>>(),
+            desired_grid_coords(target, 3)
+        );
+    }
+
+    #[test]
+    fn desired_coordinate_duplicates_are_removed_without_deadlock() {
+        let mut app = recycle_test_app(3);
+        let duplicate = (0, 0);
+        app.world_mut().spawn((
+            Transform::default(),
+            block_for_test(duplicate.0, duplicate.1),
+        ));
+        set_car_cell(&mut app, (1, 0));
+        run_until_recycled(&mut app, (1, 0), 40);
+        let snapshot = root_snapshot(&mut app);
+        assert_eq!(
+            snapshot.keys().copied().collect::<BTreeSet<_>>(),
+            desired_grid_coords((1, 0), 3)
+        );
+        assert!(snapshot.values().all(|&count| count == 1));
+    }
+
+    #[test]
+    fn repeated_retargets_prune_speculative_roots_and_remain_bounded() {
+        let mut app = recycle_test_app(3);
+        let baseline = 9;
+        let targets = [(1, 0), (2, 1), (-2, 3), (5, -4), (-6, -5), (8, 2)];
+        let mut previous_count = baseline;
+        for &target in &targets {
+            set_car_cell(&mut app, target);
+            app.update();
+            let count: usize = root_snapshot(&mut app).values().sum();
+            assert!(count.abs_diff(previous_count) <= 1);
+            assert!(count <= baseline + 2, "unbounded roots: {count}");
+            previous_count = count;
+        }
+        let target = *targets.last().unwrap();
+        run_until_recycled(&mut app, target, 100);
+        let snapshot = root_snapshot(&mut app);
+        assert_eq!(snapshot.len(), baseline);
+        assert!(snapshot.values().all(|&count| count == 1));
+    }
+
+    #[test]
+    fn reset_cancels_pending_recycle_and_unconditionally_rebuilds_origin() {
+        let mut app = recycle_test_app(3);
+        set_car_cell(&mut app, (2, 2));
+        app.update();
+        assert!(app.world().resource::<PendingRecycle>().0.is_some());
+
+        app.insert_resource(RoundActive(false));
+        // A real fresh-round transition also resets the car to origin. Order
+        // this ad-hoc test schedule explicitly; production runs reset_grid in
+        // OnEnter before the ordinary Update recycle schedule.
+        set_car_cell(&mut app, (0, 0));
+        app.add_systems(Update, reset_grid.after(recycle_grid));
+        app.update();
+
+        assert!(app.world().resource::<PendingRecycle>().0.is_none());
+        assert_eq!(app.world().resource::<LastRecycledCell>().0, Some((0, 0)));
+        let snapshot = root_snapshot(&mut app);
+        assert_eq!(
+            snapshot.keys().copied().collect::<BTreeSet<_>>(),
+            desired_grid_coords((0, 0), 3)
+        );
+        assert!(snapshot.values().all(|&count| count == 1));
+    }
+
+    #[test]
+    fn stationary_ecs_updates_do_not_rearm_completed_recycling() {
+        let mut app = recycle_test_app(3);
+        set_car_cell(&mut app, (1, 1));
+        run_until_recycled(&mut app, (1, 1), 40);
+        let before = root_snapshot(&mut app);
+        for _ in 0..10 {
+            app.update();
+        }
+        assert_eq!(root_snapshot(&mut app), before);
+        assert!(app.world().resource::<PendingRecycle>().0.is_none());
     }
 
     /// The default odd window is exactly 5×5. In particular, integer

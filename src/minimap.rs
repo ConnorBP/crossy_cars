@@ -15,6 +15,7 @@
 //!   Owns its UI; does not touch `ui.rs`.
 
 use bevy::prelude::*;
+use bevy::window::PrimaryWindow;
 
 use crate::car::Car;
 use crate::chickens::Chicken;
@@ -22,6 +23,7 @@ use crate::game::TouchStateSet;
 use crate::game::state::GameState;
 use crate::touch::{
     TOUCH_MINIMAP_OUTER_SIZE, TOUCH_MINIMAP_RIGHT, TOUCH_MINIMAP_TOP, TouchControlsActive,
+    is_touch_portrait, touch_minimap_bounds,
 };
 use crate::world::{Coin, Collider};
 
@@ -72,14 +74,25 @@ struct MapLayout {
 }
 
 impl MapLayout {
-    fn for_touch(compact: bool) -> Self {
+    fn for_viewport(compact: bool, viewport: Option<Vec2>) -> Self {
         if compact {
-            Self {
-                map_size: TOUCH_MAP_SIZE,
-                inner_frame_inset: TOUCH_INNER_FRAME_INSET,
-                top: TOUCH_MINIMAP_TOP,
-                right: TOUCH_MINIMAP_RIGHT,
-                compact: true,
+            if let Some(viewport) = viewport.filter(|viewport| is_touch_portrait(*viewport)) {
+                let bounds = touch_minimap_bounds(viewport);
+                Self {
+                    map_size: bounds.width() - PANEL_BORDER * 2.0,
+                    inner_frame_inset: TOUCH_INNER_FRAME_INSET,
+                    top: bounds.top,
+                    right: viewport.x - bounds.right,
+                    compact: true,
+                }
+            } else {
+                Self {
+                    map_size: TOUCH_MAP_SIZE,
+                    inner_frame_inset: TOUCH_INNER_FRAME_INSET,
+                    top: TOUCH_MINIMAP_TOP,
+                    right: TOUCH_MINIMAP_RIGHT,
+                    compact: true,
+                }
             }
         } else {
             Self {
@@ -90,6 +103,11 @@ impl MapLayout {
                 compact: false,
             }
         }
+    }
+
+    #[cfg(test)]
+    fn for_touch(compact: bool) -> Self {
+        Self::for_viewport(compact, None)
     }
 
     fn outer_size(self) -> f32 {
@@ -243,8 +261,16 @@ impl Plugin for MinimapPlugin {
 /// Spawn the minimap panel + its fixed pool of dot children (hidden). Lives
 /// only while `Playing`; the root is despawned on exit (recursively removing
 /// the dot children).
-fn spawn_minimap(mut commands: Commands, touch: Res<TouchControlsActive>) {
-    let layout = MapLayout::for_touch(touch.0);
+fn spawn_minimap(
+    mut commands: Commands,
+    touch: Res<TouchControlsActive>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+) {
+    let viewport = windows
+        .single()
+        .ok()
+        .map(|window| Vec2::new(window.width(), window.height()));
+    let layout = MapLayout::for_viewport(touch.0, viewport);
     let initial_style = dot_style(DotKind::Car, layout.compact);
     commands
         .spawn((
@@ -356,6 +382,7 @@ fn spawn_minimap(mut commands: Commands, touch: Res<TouchControlsActive>) {
 
 fn update_minimap_layout(
     touch: Res<TouchControlsActive>,
+    windows: Query<&Window, With<PrimaryWindow>>,
     mut nodes: Query<
         (
             &mut Node,
@@ -379,7 +406,11 @@ fn update_minimap_layout(
     if !touch.0 {
         return;
     }
-    let layout = MapLayout::for_touch(true);
+    let viewport = windows
+        .single()
+        .ok()
+        .map(|window| Vec2::new(window.width(), window.height()));
+    let layout = MapLayout::for_viewport(true, viewport);
     for (mut node, root, surface, frame, vertical, horizontal, north) in &mut nodes {
         if root.is_some() {
             node.top = px(layout.top);
@@ -428,6 +459,7 @@ fn despawn_marker<M: Component>(mut commands: Commands, q: Query<Entity, With<M>
 /// the pool size.
 fn update_minimap(
     touch: Res<TouchControlsActive>,
+    windows: Query<&Window, With<PrimaryWindow>>,
     car: Query<(&Car, &Transform)>,
     coins: Query<&GlobalTransform, With<Coin>>,
     chickens: Query<&GlobalTransform, With<Chicken>>,
@@ -444,7 +476,11 @@ fn update_minimap(
     let Ok((car, car_t)) = car.single() else {
         return;
     };
-    let layout = MapLayout::for_touch(touch.0);
+    let viewport = windows
+        .single()
+        .ok()
+        .map(|window| Vec2::new(window.width(), window.height()));
+    let layout = MapLayout::for_viewport(touch.0, viewport);
     let car_pos = car_t.translation;
     let heading = car.heading;
 
@@ -727,5 +763,25 @@ mod tests {
         assert!((forward.y - layout.plot_min()).abs() < 0.001);
         assert!((right.x - layout.plot_max()).abs() < 0.001);
         assert!((right.y - layout.center()).abs() < 0.001);
+    }
+
+    #[test]
+    fn portrait_touch_map_uses_responsive_96_and_88_pixel_panels() {
+        let wide = MapLayout::for_viewport(true, Some(Vec2::new(390.0, 844.0)));
+        let narrow = MapLayout::for_viewport(true, Some(Vec2::new(320.0, 700.0)));
+        assert_eq!(wide.outer_size(), 96.0);
+        assert_eq!(narrow.outer_size(), 88.0);
+        assert_eq!(wide.right, 8.0);
+        assert_eq!(narrow.right, 8.0);
+
+        // Landscape touch and non-touch remain pixel-identical.
+        assert_eq!(
+            MapLayout::for_viewport(true, Some(Vec2::new(844.0, 390.0))).outer_size(),
+            108.0
+        );
+        assert_eq!(
+            MapLayout::for_viewport(false, Some(Vec2::new(390.0, 844.0))).outer_size(),
+            136.0
+        );
     }
 }

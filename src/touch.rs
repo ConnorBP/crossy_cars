@@ -52,6 +52,16 @@ pub(crate) const TOUCH_LEVEL_RIGHT: f32 = 16.0;
 pub(crate) const TOUCH_LEVEL_WIDTH: f32 = 48.0;
 pub(crate) const TOUCH_LEVEL_HEIGHT: f32 = 26.0;
 
+const PORTRAIT_INSET: f32 = 8.0;
+const PORTRAIT_COCKPIT_WIDTH: f32 = 120.0;
+const PORTRAIT_TIMER_WIDTH: f32 = 110.0;
+const PORTRAIT_OBJECTIVE_TOP: f32 = 270.0;
+const PORTRAIT_OBJECTIVE_MAX_WIDTH: f32 = 320.0;
+const PORTRAIT_MINIMAP_TOP: f32 = 56.0;
+const PORTRAIT_MINIMAP_SIZE: f32 = 96.0;
+const NARROW_PORTRAIT_MINIMAP_SIZE: f32 = 88.0;
+const NARROW_PORTRAIT_WIDTH: f32 = 360.0;
+
 const TOUCH_INSTRUCTION_HEIGHT: f32 = 44.0;
 const TOUCH_INSTRUCTION_INSET: f32 = 14.0;
 
@@ -73,6 +83,14 @@ impl ScreenBounds {
             && self.right > other.left
             && self.top < other.bottom
             && self.bottom > other.top
+    }
+
+    pub(crate) fn width(self) -> f32 {
+        self.right - self.left
+    }
+
+    pub(crate) fn height(self) -> f32 {
+        self.bottom - self.top
     }
 
     #[cfg(test)]
@@ -98,18 +116,84 @@ fn centered_bounds(viewport_width: f32, top: f32, width: f32, height: f32) -> Sc
     fixed_bounds((viewport_width - width) * 0.5, top, width, height)
 }
 
-/// Painted bounds for every persistent/active touch HUD panel. These values
-/// are shared with each owning module so this audit covers the timer, level,
-/// and the actual compact minimap rather than stale approximations.
+/// Portrait is deliberately a touch-only policy. Keyboard-driven portrait
+/// windows and every landscape viewport keep the established pixel layout.
+pub(crate) fn is_touch_portrait(viewport: Vec2) -> bool {
+    viewport.x.is_finite()
+        && viewport.y.is_finite()
+        && viewport.x > 0.0
+        && viewport.y > 0.0
+        && viewport.x < viewport.y
+}
+
+/// Painted bounds for every persistent/active touch HUD panel. Owning UI
+/// modules read their geometry from this pure model when portrait touch is
+/// active; the landscape branch is the original fixed composition.
 #[allow(dead_code)]
 pub(crate) fn touch_hud_bounds(viewport: Vec2) -> [ScreenBounds; 10] {
-    [
+    let portrait = is_touch_portrait(viewport);
+    let cockpit = if portrait {
+        // Below 320px, preserve separation from the percentage-based pause
+        // target by yielding width symmetrically with the timer.
+        let width = PORTRAIT_COCKPIT_WIDTH.min((viewport.x * PAUSE_LEFT - 20.0).max(96.0));
+        fixed_bounds(PORTRAIT_INSET, PORTRAIT_INSET, width, TOUCH_COCKPIT_HEIGHT)
+    } else {
         fixed_bounds(
             TOUCH_COCKPIT_LEFT,
             TOUCH_COCKPIT_TOP,
             TOUCH_COCKPIT_WIDTH,
             TOUCH_COCKPIT_HEIGHT,
-        ),
+        )
+    };
+    let objective = if portrait {
+        centered_bounds(
+            viewport.x,
+            PORTRAIT_OBJECTIVE_TOP,
+            (viewport.x - PORTRAIT_INSET * 2.0)
+                .max(0.0)
+                .min(PORTRAIT_OBJECTIVE_MAX_WIDTH),
+            TOUCH_OBJECTIVE_HEIGHT,
+        )
+    } else {
+        centered_bounds(
+            viewport.x,
+            TOUCH_OBJECTIVE_TOP,
+            TOUCH_OBJECTIVE_WIDTH,
+            TOUCH_OBJECTIVE_HEIGHT,
+        )
+    };
+    let timer_width = if portrait {
+        PORTRAIT_TIMER_WIDTH.min((viewport.x * (1.0 - PAUSE_RIGHT) - 20.0).max(96.0))
+    } else {
+        TOUCH_TIMER_WIDTH
+    };
+    let timer_right = if portrait {
+        PORTRAIT_INSET
+    } else {
+        TOUCH_TIMER_RIGHT
+    };
+    let minimap_size = if portrait {
+        if viewport.x < NARROW_PORTRAIT_WIDTH {
+            NARROW_PORTRAIT_MINIMAP_SIZE
+        } else {
+            PORTRAIT_MINIMAP_SIZE
+        }
+    } else {
+        TOUCH_MINIMAP_OUTER_SIZE
+    };
+    let minimap_right = if portrait {
+        PORTRAIT_INSET
+    } else {
+        TOUCH_MINIMAP_RIGHT
+    };
+    let minimap_top = if portrait {
+        PORTRAIT_MINIMAP_TOP
+    } else {
+        TOUCH_MINIMAP_TOP
+    };
+
+    [
+        cockpit,
         fixed_bounds(
             TOUCH_HEALTH_LEFT,
             TOUCH_HEALTH_TOP,
@@ -122,12 +206,7 @@ pub(crate) fn touch_hud_bounds(viewport: Vec2) -> [ScreenBounds; 10] {
             TOUCH_POWERUP_WIDTH,
             TOUCH_POWERUP_HEIGHT,
         ),
-        centered_bounds(
-            viewport.x,
-            TOUCH_OBJECTIVE_TOP,
-            TOUCH_OBJECTIVE_WIDTH,
-            TOUCH_OBJECTIVE_HEIGHT,
-        ),
+        objective,
         centered_bounds(viewport.x, 98.0, 144.0, 80.0),
         fixed_bounds(
             TOUCH_EVENT_LEFT,
@@ -136,16 +215,20 @@ pub(crate) fn touch_hud_bounds(viewport: Vec2) -> [ScreenBounds; 10] {
             TOUCH_EVENT_HEIGHT,
         ),
         fixed_bounds(
-            viewport.x - TOUCH_TIMER_RIGHT - TOUCH_TIMER_WIDTH,
-            TOUCH_TIMER_TOP,
-            TOUCH_TIMER_WIDTH,
+            viewport.x - timer_right - timer_width,
+            if portrait {
+                PORTRAIT_INSET
+            } else {
+                TOUCH_TIMER_TOP
+            },
+            timer_width,
             TOUCH_TIMER_HEIGHT,
         ),
         fixed_bounds(
-            viewport.x - TOUCH_MINIMAP_RIGHT - TOUCH_MINIMAP_OUTER_SIZE,
-            TOUCH_MINIMAP_TOP,
-            TOUCH_MINIMAP_OUTER_SIZE,
-            TOUCH_MINIMAP_OUTER_SIZE,
+            viewport.x - minimap_right - minimap_size,
+            minimap_top,
+            minimap_size,
+            minimap_size,
         ),
         fixed_bounds(
             viewport.x - TOUCH_LEVEL_RIGHT - TOUCH_LEVEL_WIDTH,
@@ -160,6 +243,22 @@ pub(crate) fn touch_hud_bounds(viewport: Vec2) -> [ScreenBounds; 10] {
             28.0,
         ),
     ]
+}
+
+pub(crate) fn touch_cockpit_bounds(viewport: Vec2) -> ScreenBounds {
+    touch_hud_bounds(viewport)[0]
+}
+
+pub(crate) fn touch_objective_bounds(viewport: Vec2) -> ScreenBounds {
+    touch_hud_bounds(viewport)[3]
+}
+
+pub(crate) fn touch_timer_bounds(viewport: Vec2) -> ScreenBounds {
+    touch_hud_bounds(viewport)[6]
+}
+
+pub(crate) fn touch_minimap_bounds(viewport: Vec2) -> ScreenBounds {
+    touch_hud_bounds(viewport)[7]
 }
 
 /// Painted bounds of the low-profile, full-width touch instruction band.
@@ -202,6 +301,12 @@ struct TouchHudRoot;
 
 #[derive(Component)]
 struct TouchGuidanceRoot;
+
+#[derive(Component)]
+struct TouchInstructionBand;
+
+#[derive(Component)]
+struct TouchInstructionLabel(usize);
 
 /// The first eligible live touch anywhere owns direction until it is
 /// released/cancelled. Other eligible touches supply the action role.
@@ -273,7 +378,12 @@ impl Plugin for TouchPlugin {
                 OnExit(GameState::GameOver),
                 despawn_marker::<TouchGuidanceRoot>,
             )
-            .add_systems(Update, update_touch_visibility.after(TouchStateSet));
+            .add_systems(
+                Update,
+                (update_touch_visibility, update_touch_hud_layout)
+                    .chain()
+                    .after(TouchStateSet),
+            );
     }
 }
 
@@ -658,7 +768,15 @@ fn reset_drive_touch_owner(
     }
 }
 
-fn spawn_touch_hud(mut commands: Commands, active: Res<TouchControlsActive>) {
+fn spawn_touch_hud(
+    mut commands: Commands,
+    active: Res<TouchControlsActive>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+) {
+    let portrait = windows
+        .single()
+        .ok()
+        .is_some_and(|window| is_touch_portrait(Vec2::new(window.width(), window.height())));
     commands
         .spawn((
             Node {
@@ -688,10 +806,15 @@ fn spawn_touch_hud(mut commands: Commands, active: Res<TouchControlsActive>) {
                     align_items: AlignItems::Center,
                     ..default()
                 },
-                BackgroundColor(Color::srgba(0.02, 0.02, 0.03, 0.22)),
+                BackgroundColor(if portrait {
+                    Color::srgba(0.015, 0.02, 0.035, 0.68)
+                } else {
+                    Color::srgba(0.02, 0.02, 0.03, 0.22)
+                }),
+                TouchInstructionBand,
             ))
             .with_children(|band| {
-                for label in ["1ST TOUCH: DRAG TO DRIVE", "2ND TOUCH: BRAKE / REVERSE"] {
+                for (index, label) in touch_instruction_labels(portrait).into_iter().enumerate() {
                     band.spawn((
                         Node {
                             width: Val::Percent(50.0),
@@ -702,10 +825,15 @@ fn spawn_touch_hud(mut commands: Commands, active: Res<TouchControlsActive>) {
                         },
                         Text::new(label),
                         TextFont {
-                            font_size: FontSize::Px(15.0),
+                            font_size: FontSize::Px(if portrait { 12.0 } else { 15.0 }),
                             ..default()
                         },
-                        TextColor(Color::srgba(1.0, 1.0, 1.0, 0.58)),
+                        TextColor(if portrait {
+                            Color::srgba(1.0, 1.0, 1.0, 0.9)
+                        } else {
+                            Color::srgba(1.0, 1.0, 1.0, 0.58)
+                        }),
+                        TouchInstructionLabel(index),
                     ));
                 }
             });
@@ -729,6 +857,54 @@ fn spawn_touch_hud(mut commands: Commands, active: Res<TouchControlsActive>) {
                 TextColor(Color::srgba(1.0, 1.0, 1.0, 0.58)),
             ));
         });
+}
+
+fn touch_instruction_labels(portrait: bool) -> [&'static str; 2] {
+    if portrait {
+        ["DRAG TO DRIVE\n1ST TOUCH", "BRAKE / REVERSE\n2ND TOUCH"]
+    } else {
+        ["1ST TOUCH: DRAG TO DRIVE", "2ND TOUCH: BRAKE / REVERSE"]
+    }
+}
+
+fn update_touch_hud_layout(
+    active: Res<TouchControlsActive>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    mut bands: Query<&mut BackgroundColor, With<TouchInstructionBand>>,
+    mut labels: Query<
+        (
+            &TouchInstructionLabel,
+            &mut Text,
+            &mut TextFont,
+            &mut TextColor,
+        ),
+        With<TouchInstructionLabel>,
+    >,
+) {
+    if !active.0 {
+        return;
+    }
+    let Some(window) = windows.single().ok() else {
+        return;
+    };
+    let portrait = is_touch_portrait(Vec2::new(window.width(), window.height()));
+    for mut background in &mut bands {
+        background.0 = if portrait {
+            Color::srgba(0.015, 0.02, 0.035, 0.68)
+        } else {
+            Color::srgba(0.02, 0.02, 0.03, 0.22)
+        };
+    }
+    let copy = touch_instruction_labels(portrait);
+    for (label, mut text, mut font, mut color) in &mut labels {
+        **text = copy[label.0].to_string();
+        font.font_size = FontSize::Px(if portrait { 12.0 } else { 15.0 });
+        color.0 = if portrait {
+            Color::srgba(1.0, 1.0, 1.0, 0.9)
+        } else {
+            Color::srgba(1.0, 1.0, 1.0, 0.58)
+        };
+    }
 }
 
 fn spawn_paused_guidance(mut commands: Commands, active: Res<TouchControlsActive>) {
@@ -879,6 +1055,43 @@ mod tests {
         assert_eq!(minimap, fixed_bounds(720.0, 60.0, 108.0, 108.0));
         assert_eq!(level, fixed_bounds(780.0, 180.0, 48.0, 26.0));
         assert_eq!(pause, fixed_bounds(371.36, 4.0, 101.28, 28.0));
+    }
+
+    #[test]
+    fn portrait_primary_hud_bounds_are_disjoint_and_inside_narrow_viewports() {
+        // These are the always-visible primary panels requested for portrait:
+        // cockpit, health, objective, timer, minimap, level, and pause.
+        const PRIMARY: [usize; 7] = [0, 1, 3, 6, 7, 8, 9];
+        for viewport in [Vec2::new(390.0, 844.0), Vec2::new(320.0, 700.0)] {
+            let bounds = touch_hud_bounds(viewport);
+            for (position, index) in PRIMARY.into_iter().enumerate() {
+                let panel = bounds[index];
+                assert!(panel.left >= 0.0 && panel.top >= 0.0, "{panel:?}");
+                assert!(
+                    panel.right <= viewport.x && panel.bottom <= viewport.y,
+                    "{panel:?}"
+                );
+                for other in PRIMARY.into_iter().skip(position + 1) {
+                    assert!(
+                        !panel.overlaps(bounds[other]),
+                        "{panel:?} overlaps {:?}",
+                        bounds[other]
+                    );
+                }
+            }
+        }
+
+        let wide = touch_hud_bounds(Vec2::new(390.0, 844.0));
+        let narrow = touch_hud_bounds(Vec2::new(320.0, 700.0));
+        assert_eq!(wide[7].width(), 96.0);
+        assert_eq!(narrow[7].width(), 88.0);
+        assert_eq!(wide[3].width(), 320.0);
+        assert_eq!(narrow[3].width(), 304.0);
+        assert!(wide[3].top > wide[0].bottom);
+        assert_eq!(
+            touch_instruction_labels(true),
+            ["DRAG TO DRIVE\n1ST TOUCH", "BRAKE / REVERSE\n2ND TOUCH"]
+        );
     }
 
     #[test]

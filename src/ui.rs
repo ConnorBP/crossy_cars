@@ -14,6 +14,7 @@ use crate::settings::Settings;
 use crate::touch::{
     TOUCH_COCKPIT_HEIGHT, TOUCH_COCKPIT_LEFT, TOUCH_COCKPIT_TOP, TOUCH_COCKPIT_WIDTH,
     TOUCH_TIMER_HEIGHT, TOUCH_TIMER_RIGHT, TOUCH_TIMER_TOP, TOUCH_TIMER_WIDTH, TouchControlsActive,
+    is_touch_portrait, touch_cockpit_bounds, touch_timer_bounds,
 };
 
 /// One shared breakpoint for every cross-plugin UI decision. Landscape phones
@@ -607,10 +608,15 @@ fn spawn_hud(
     mut commands: Commands,
     active_modifier: Res<ActiveModifier>,
     touch: Res<TouchControlsActive>,
+    windows: Query<&Window, With<PrimaryWindow>>,
 ) {
+    let viewport = windows
+        .single()
+        .ok()
+        .map(|window| Vec2::new(window.width(), window.height()));
     // --- Top-left cockpit cluster on a semi-transparent panel ---
     let mut cockpit = commands.spawn((
-        cockpit_root_node(touch.0),
+        cockpit_root_node(touch.0, viewport),
         BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.35)),
         HudRoot,
         CockpitRoot,
@@ -832,7 +838,7 @@ fn spawn_hud(
     // --- Timer (top-right) ---
     commands
         .spawn((
-            timer_root_node(touch.0),
+            timer_root_node(touch.0, viewport),
             BackgroundColor(Color::srgba(0.015, 0.02, 0.035, 0.72)),
             HudRoot,
             TimerRoot,
@@ -849,14 +855,18 @@ fn spawn_hud(
         ));
 }
 
-fn timer_root_node(touch_active: bool) -> Node {
+fn timer_root_node(touch_active: bool, viewport: Option<Vec2>) -> Node {
     if touch_active {
+        let portrait = viewport.filter(|viewport| is_touch_portrait(*viewport));
+        let bounds = portrait.map(touch_timer_bounds);
         Node {
             position_type: PositionType::Absolute,
-            top: px(TOUCH_TIMER_TOP),
-            right: px(TOUCH_TIMER_RIGHT),
-            width: px(TOUCH_TIMER_WIDTH),
-            height: px(TOUCH_TIMER_HEIGHT),
+            top: px(bounds.map_or(TOUCH_TIMER_TOP, |bounds| bounds.top)),
+            right: px(bounds.map_or(TOUCH_TIMER_RIGHT, |bounds| {
+                viewport.unwrap().x - bounds.right
+            })),
+            width: px(bounds.map_or(TOUCH_TIMER_WIDTH, |bounds| bounds.width())),
+            height: px(bounds.map_or(TOUCH_TIMER_HEIGHT, |bounds| bounds.height())),
             align_items: AlignItems::Center,
             justify_content: JustifyContent::Center,
             padding: UiRect::axes(px(6.0), px(4.0)),
@@ -892,14 +902,17 @@ fn cockpit_margin(size: f32, touch_active: bool) -> f32 {
     if touch_active { size * 0.3 } else { size }
 }
 
-fn cockpit_root_node(touch_active: bool) -> Node {
+fn cockpit_root_node(touch_active: bool, viewport: Option<Vec2>) -> Node {
     if touch_active {
+        let bounds = viewport
+            .filter(|viewport| is_touch_portrait(*viewport))
+            .map(touch_cockpit_bounds);
         Node {
             position_type: PositionType::Absolute,
-            top: px(TOUCH_COCKPIT_TOP),
-            left: px(TOUCH_COCKPIT_LEFT),
-            width: px(TOUCH_COCKPIT_WIDTH),
-            height: px(TOUCH_COCKPIT_HEIGHT),
+            top: px(bounds.map_or(TOUCH_COCKPIT_TOP, |bounds| bounds.top)),
+            left: px(bounds.map_or(TOUCH_COCKPIT_LEFT, |bounds| bounds.left)),
+            width: px(bounds.map_or(TOUCH_COCKPIT_WIDTH, |bounds| bounds.width())),
+            height: px(bounds.map_or(TOUCH_COCKPIT_HEIGHT, |bounds| bounds.height())),
             flex_direction: FlexDirection::Column,
             padding: UiRect::all(px(5.0)),
             ..default()
@@ -951,6 +964,7 @@ fn scale_cockpit_descendant(
 fn update_cockpit_layout(
     mut commands: Commands,
     touch: Res<TouchControlsActive>,
+    windows: Query<&Window, With<PrimaryWindow>>,
     roots: Query<(Entity, Option<&CompactCockpitApplied>), With<CockpitRoot>>,
     mut secondary_nodes: Query<&mut Node, With<CockpitSecondaryInfo>>,
     children: Query<&Children>,
@@ -960,12 +974,16 @@ fn update_cockpit_layout(
     if !touch.0 {
         return;
     }
+    let viewport = windows
+        .single()
+        .ok()
+        .map(|window| Vec2::new(window.width(), window.height()));
     for mut node in &mut secondary_nodes {
         node.display = Display::None;
     }
     for (entity, applied) in &roots {
         if let Ok(mut node) = nodes.get_mut(entity) {
-            *node = cockpit_root_node(true);
+            *node = cockpit_root_node(true, viewport);
         }
         if applied.is_none() {
             if let Ok(descendants) = children.get(entity) {
@@ -980,6 +998,7 @@ fn update_cockpit_layout(
 
 fn update_timer_layout(
     touch: Res<TouchControlsActive>,
+    windows: Query<&Window, With<PrimaryWindow>>,
     mut roots: Query<
         (&mut Node, &mut TextFont, &mut Text),
         (With<TimerRoot>, With<TimerLabel>, Without<TimerText>),
@@ -989,8 +1008,12 @@ fn update_timer_layout(
     if !touch.0 {
         return;
     }
+    let viewport = windows
+        .single()
+        .ok()
+        .map(|window| Vec2::new(window.width(), window.height()));
     for (mut node, mut font, mut text) in &mut roots {
-        *node = timer_root_node(true);
+        *node = timer_root_node(true, viewport);
         *font = timer_font(true);
         **text = "TIME ".to_string();
     }
@@ -1466,19 +1489,20 @@ fn update_hint(
 #[cfg(test)]
 mod tests {
     use super::{
-        CockpitCurrentScore, GAMEOVER_COMPACT_LAYOUT, GAMEOVER_DESKTOP_LAYOUT,
-        GAMEOVER_STATUS_STRIP_HEIGHT, MENU_CONTENT_HEIGHT, ScoreText, TimerUrgency,
+        CockpitCurrentScore, CockpitRoot, GAMEOVER_COMPACT_LAYOUT, GAMEOVER_DESKTOP_LAYOUT,
+        GAMEOVER_STATUS_STRIP_HEIGHT, MENU_CONTENT_HEIGHT, ScoreText, TimerRoot, TimerUrgency,
         condition_summary, gameover_core_bounds, gameover_layout, is_medal_upgrade,
         is_mobile_viewport, is_new_best, maximal_gameover_content_height,
         maximal_gameover_state_fits, medal_gallery_state, medal_points, menu_content_fits,
         pause_content_bounds, spawn_hud, terminal_condition_result, timer_motion_flags,
-        timer_style, update_score_text,
+        timer_style, update_cockpit_layout, update_score_text, update_timer_layout,
     };
     use crate::game::resources::{GameOverReason, Score};
     use crate::modifiers::{ActiveModifier, ModifierKind};
     use crate::persist::Medal;
     use crate::touch::TouchControlsActive;
     use bevy::prelude::*;
+    use bevy::window::PrimaryWindow;
 
     #[test]
     fn touch_cockpit_keeps_live_score_visible_and_updates_it() {
@@ -1502,6 +1526,51 @@ mod tests {
         let spans: Vec<_> = score_spans.iter(world).collect();
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].as_str(), "12");
+    }
+
+    #[test]
+    fn live_touch_hud_switches_only_when_viewport_becomes_portrait() {
+        let mut app = App::new();
+        app.insert_resource(ActiveModifier::default());
+        app.insert_resource(TouchControlsActive(true));
+        app.world_mut().spawn((
+            Window {
+                resolution: (844, 390).into(),
+                ..default()
+            },
+            PrimaryWindow,
+        ));
+        app.add_systems(Startup, spawn_hud)
+            .add_systems(Update, (update_cockpit_layout, update_timer_layout));
+        app.update();
+
+        let world = app.world_mut();
+        let mut cockpit_query = world.query_filtered::<&Node, With<CockpitRoot>>();
+        let cockpit = cockpit_query.single(world).unwrap();
+        assert_eq!(cockpit.left, px(14.0));
+        assert_eq!(cockpit.width, px(150.0));
+        let mut timer_query = world.query_filtered::<&Node, With<TimerRoot>>();
+        let timer = timer_query.single(world).unwrap();
+        assert_eq!(timer.right, px(16.0));
+        assert_eq!(timer.width, px(132.0));
+
+        let mut windows = world.query_filtered::<&mut Window, With<PrimaryWindow>>();
+        windows
+            .single_mut(world)
+            .unwrap()
+            .resolution
+            .set(390.0, 844.0);
+        app.update();
+
+        let world = app.world_mut();
+        let mut cockpit_query = world.query_filtered::<&Node, With<CockpitRoot>>();
+        let cockpit = cockpit_query.single(world).unwrap();
+        assert_eq!(cockpit.left, px(8.0));
+        assert_eq!(cockpit.width, px(120.0));
+        let mut timer_query = world.query_filtered::<&Node, With<TimerRoot>>();
+        let timer = timer_query.single(world).unwrap();
+        assert_eq!(timer.right, px(8.0));
+        assert_eq!(timer.width, px(110.0));
     }
 
     #[test]

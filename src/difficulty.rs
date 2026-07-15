@@ -641,7 +641,6 @@ fn manage_traffic(
     mut seed: Local<u32>,
     mut next_traffic_id: Local<u64>,
 ) {
-    ensure_seeded(&mut seed, 0x0BADC0DE);
     let Ok(car_t) = car.single() else {
         return;
     };
@@ -731,32 +730,42 @@ fn manage_traffic(
         commands.entity(*entity).despawn();
     }
 
-    let spawn_connectors = traffic_spawn_connectors(car_pos);
-    for _ in 0..target.saturating_sub(alive) {
-        let speed_roll = rand(&mut seed);
-        let speed =
-            traffic_speed_for_roll(difficulty.level, speed_roll, modifier_speed, event_speed);
-        let Some(candidate) =
-            traffic_spawn_candidate(car_pos, &spawn_connectors, &occupied, &mut seed)
-        else {
-            continue;
-        };
-        occupied.push((candidate.position, candidate.half_extents));
-        if *next_traffic_id == 0 {
-            *next_traffic_id = 1;
-        }
-        let traffic_id = *next_traffic_id;
-        *next_traffic_id = next_traffic_id.saturating_add(1);
-        spawn_one_traffic(
-            &mut commands,
-            &assets,
-            candidate,
-            speed,
-            speed_roll,
-            traffic_id,
-            &mut seed,
-        );
-    }
+    // Top-up work is deliberately deferred until survivor/despawn accounting
+    // is complete. At target this avoids both rebuilding the deterministic
+    // connector catalog and touching the spawn RNG. Below target, the bounded
+    // policy invokes exactly one candidate attempt, so even a jump from 0 to
+    // the hard cap adds at most one traffic hierarchy this frame.
+    let needed = traffic_top_up_needed(alive, target);
+    with_bounded_traffic_top_up(
+        needed,
+        || traffic_spawn_connectors(car_pos),
+        |spawn_connectors| {
+            ensure_seeded(&mut seed, 0x0BADC0DE);
+            let speed_roll = rand(&mut seed);
+            let speed =
+                traffic_speed_for_roll(difficulty.level, speed_roll, modifier_speed, event_speed);
+            let Some(candidate) =
+                traffic_spawn_candidate(car_pos, &spawn_connectors, &occupied, &mut seed)
+            else {
+                return;
+            };
+            occupied.push((candidate.position, candidate.half_extents));
+            if *next_traffic_id == 0 {
+                *next_traffic_id = 1;
+            }
+            let traffic_id = *next_traffic_id;
+            *next_traffic_id = next_traffic_id.saturating_add(1);
+            spawn_one_traffic(
+                &mut commands,
+                &assets,
+                candidate,
+                speed,
+                speed_roll,
+                traffic_id,
+                &mut seed,
+            );
+        },
+    );
 }
 
 /// Despawn every traffic car (e.g. on GameOver / Menu). Recursive despawn in
@@ -844,6 +853,26 @@ fn traffic_speed_for_roll(
 /// target. Kept pure so deferred ECS despawns never influence the accounting.
 fn traffic_surplus(alive: usize, target: usize) -> usize {
     alive.saturating_sub(target)
+}
+
+/// Number of successful spawns still needed after all survivor and deferred
+/// despawn accounting. Saturation makes a reduced target a zero-work top-up.
+fn traffic_top_up_needed(alive: usize, target: usize) -> usize {
+    target.saturating_sub(alive)
+}
+
+/// Run the expensive half of traffic top-up at most once per update. Keeping
+/// the zero-needed guard around both closures makes catalog construction and
+/// spawn-seed work observable and independently testable without an ECS world.
+fn with_bounded_traffic_top_up<C, R>(
+    needed: usize,
+    build_catalog: impl FnOnce() -> C,
+    attempt_spawn: impl FnOnce(C) -> R,
+) -> Option<R> {
+    if needed == 0 {
+        return None;
+    }
+    Some(attempt_spawn(build_catalog()))
 }
 
 /// Deterministic removal order: farther traffic first, then ascending entity
@@ -1491,6 +1520,66 @@ mod tests {
         let mut candidates: [(u64, f32); 4] = [(30, 25.0), (20, 100.0), (10, 25.0), (40, 4.0)];
         candidates.sort_by(|a, b| traffic_despawn_order(*a, *b));
         assert_eq!(candidates, [(20, 100.0), (10, 25.0), (30, 25.0), (40, 4.0)]);
+    }
+
+    #[test]
+    fn bounded_top_up_does_no_catalog_or_seed_work_at_or_above_target() {
+        for alive in [MAX_TRAFFIC, MAX_TRAFFIC + 1] {
+            let mut catalog_builds = 0;
+            let mut seed_work = 0;
+            let result = with_bounded_traffic_top_up(
+                traffic_top_up_needed(alive, MAX_TRAFFIC),
+                || catalog_builds += 1,
+                |_| seed_work += 1,
+            );
+            assert_eq!(result, None);
+            assert_eq!(catalog_builds, 0);
+            assert_eq!(seed_work, 0);
+        }
+    }
+
+    #[test]
+    fn bounded_top_up_reaches_zero_to_eight_one_per_update_without_overshoot() {
+        let mut alive = 0;
+        let mut catalog_builds = 0;
+        let mut seed_attempts = 0;
+
+        for expected_alive in 1..=MAX_TRAFFIC {
+            let spawned = with_bounded_traffic_top_up(
+                traffic_top_up_needed(alive, MAX_TRAFFIC),
+                || {
+                    catalog_builds += 1;
+                },
+                |_| {
+                    seed_attempts += 1;
+                    true
+                },
+            )
+            .unwrap_or(false);
+            alive += usize::from(spawned);
+            assert_eq!(alive, expected_alive);
+            assert_eq!(catalog_builds, expected_alive);
+            assert_eq!(seed_attempts, expected_alive);
+        }
+
+        // Further updates at target perform no work and cannot overshoot.
+        for _ in 0..3 {
+            let spawned = with_bounded_traffic_top_up(
+                traffic_top_up_needed(alive, MAX_TRAFFIC),
+                || {
+                    catalog_builds += 1;
+                },
+                |_| {
+                    seed_attempts += 1;
+                    true
+                },
+            )
+            .unwrap_or(false);
+            alive += usize::from(spawned);
+        }
+        assert_eq!(alive, MAX_TRAFFIC);
+        assert_eq!(catalog_builds, MAX_TRAFFIC);
+        assert_eq!(seed_attempts, MAX_TRAFFIC);
     }
 
     #[test]

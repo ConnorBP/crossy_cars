@@ -8,6 +8,7 @@
 
 use bevy::prelude::*;
 use bevy::text::FontSize;
+use bevy::window::PrimaryWindow;
 
 use crate::combos::Combo;
 use crate::game::SpawnSet;
@@ -18,6 +19,7 @@ use crate::game::state::GameState;
 use crate::modifiers::{ActiveModifier, ModifierKind};
 use crate::touch::{
     TOUCH_OBJECTIVE_HEIGHT, TOUCH_OBJECTIVE_TOP, TOUCH_OBJECTIVE_WIDTH, TouchControlsActive,
+    is_touch_portrait, touch_objective_bounds,
 };
 
 /// Score added once when the current objective is completed.
@@ -338,30 +340,52 @@ fn award_objective_bonus(
     }
 }
 
+fn objective_hud_copy(objective: &ActiveObjective, portrait: bool) -> String {
+    if portrait && objective.completed {
+        // `summary` already contains `COMPLETE +10`; repeating `BONUS +10`
+        // overflows the narrow portrait panel without adding information.
+        format!("MISSION | {}", objective.summary())
+    } else {
+        format!(
+            "MISSION | {} | BONUS +{OBJECTIVE_BONUS}",
+            objective.summary()
+        )
+    }
+}
+
 fn spawn_objective_hud(
     mut commands: Commands,
     objective: Res<ActiveObjective>,
     touch: Res<TouchControlsActive>,
+    windows: Query<&Window, With<PrimaryWindow>>,
 ) {
+    let viewport = windows
+        .single()
+        .ok()
+        .map(|window| Vec2::new(window.width(), window.height()));
+    let portrait = touch.0 && viewport.is_some_and(is_touch_portrait);
     commands
-        .spawn((objective_root_node(touch.0), ObjectiveHudRoot))
+        .spawn((objective_root_node(touch.0, viewport), ObjectiveHudRoot))
         .with_child((
-            Text::new(format!(
-                "MISSION | {} | BONUS +{OBJECTIVE_BONUS}",
-                objective.summary()
-            )),
-            objective_font(touch.0),
+            Text::new(objective_hud_copy(&objective, portrait)),
+            objective_font(touch.0, viewport),
             TextColor(Color::srgb(1.0, 0.86, 0.22)),
-            objective_panel_node(touch.0),
+            objective_panel_node(touch.0, viewport),
             BackgroundColor(Color::srgba(0.015, 0.02, 0.035, 0.72)),
             ObjectiveHudText,
         ));
 }
 
-fn objective_root_node(touch_active: bool) -> Node {
+fn objective_root_node(touch_active: bool, viewport: Option<Vec2>) -> Node {
+    let portrait = touch_active
+        .then_some(viewport)
+        .flatten()
+        .filter(|viewport| is_touch_portrait(*viewport));
     Node {
         position_type: PositionType::Absolute,
-        top: px(if touch_active {
+        top: px(if let Some(viewport) = portrait {
+            touch_objective_bounds(viewport).top
+        } else if touch_active {
             TOUCH_OBJECTIVE_TOP
         } else {
             54.0
@@ -373,11 +397,14 @@ fn objective_root_node(touch_active: bool) -> Node {
     }
 }
 
-fn objective_panel_node(touch_active: bool) -> Node {
+fn objective_panel_node(touch_active: bool, viewport: Option<Vec2>) -> Node {
     if touch_active {
+        let bounds = viewport
+            .filter(|viewport| is_touch_portrait(*viewport))
+            .map(touch_objective_bounds);
         Node {
-            width: px(TOUCH_OBJECTIVE_WIDTH),
-            height: px(TOUCH_OBJECTIVE_HEIGHT),
+            width: px(bounds.map_or(TOUCH_OBJECTIVE_WIDTH, |bounds| bounds.width())),
+            height: px(bounds.map_or(TOUCH_OBJECTIVE_HEIGHT, |bounds| bounds.height())),
             align_items: AlignItems::Center,
             justify_content: JustifyContent::Center,
             padding: UiRect::axes(px(6.0), px(3.0)),
@@ -391,39 +418,58 @@ fn objective_panel_node(touch_active: bool) -> Node {
     }
 }
 
-fn objective_font(touch_active: bool) -> TextFont {
+fn objective_font(touch_active: bool, viewport: Option<Vec2>) -> TextFont {
+    let portrait = touch_active && viewport.is_some_and(is_touch_portrait);
     TextFont {
-        font_size: FontSize::Px(if touch_active { 12.0 } else { 17.0 }),
+        // The completed mission is the longest form. Ten pixels keeps it on
+        // one line inside the 304px narrow-portrait panel; landscape touch
+        // retains its established 12px typography.
+        font_size: FontSize::Px(if portrait {
+            10.0
+        } else if touch_active {
+            12.0
+        } else {
+            17.0
+        }),
         ..default()
     }
 }
 
 fn update_objective_layout(
     touch: Res<TouchControlsActive>,
+    windows: Query<&Window, With<PrimaryWindow>>,
     mut roots: Query<&mut Node, (With<ObjectiveHudRoot>, Without<ObjectiveHudText>)>,
     mut labels: Query<(&mut Node, &mut TextFont), With<ObjectiveHudText>>,
 ) {
     if !touch.0 {
         return;
     }
+    let viewport = windows
+        .single()
+        .ok()
+        .map(|window| Vec2::new(window.width(), window.height()));
     for mut node in &mut roots {
-        *node = objective_root_node(true);
+        *node = objective_root_node(true, viewport);
     }
     for (mut node, mut font) in &mut labels {
-        *node = objective_panel_node(true);
-        *font = objective_font(true);
+        *node = objective_panel_node(true, viewport);
+        *font = objective_font(true, viewport);
     }
 }
 
 /// Change-filtered HUD refresh; no UI entity is rebuilt as progress advances.
 fn update_objective_hud(
     objective: Res<ActiveObjective>,
+    touch: Res<TouchControlsActive>,
+    windows: Query<&Window, With<PrimaryWindow>>,
     mut labels: Query<&mut Text, With<ObjectiveHudText>>,
 ) {
-    let summary = format!(
-        "MISSION | {} | BONUS +{OBJECTIVE_BONUS}",
-        objective.summary()
-    );
+    let portrait = touch.0
+        && windows
+            .single()
+            .ok()
+            .is_some_and(|window| is_touch_portrait(Vec2::new(window.width(), window.height())));
+    let summary = objective_hud_copy(&objective, portrait);
     for mut label in &mut labels {
         **label = summary.clone();
     }

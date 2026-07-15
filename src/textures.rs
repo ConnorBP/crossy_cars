@@ -26,10 +26,18 @@ const NORMAL_SIZE: u32 = 64;
 pub const FOLIAGE_VARIANTS: usize = 3;
 pub const HAY_VARIANTS: usize = 2;
 
+// Grass structure uses periods that divide the 64px tile. Flecks use 4px
+// candidate cells, but only a small hash-selected subset receives a fleck.
+const GRASS_MOTTLE_SCALE: u32 = 16;
+const GRASS_MOWING_BAND_HEIGHT: u32 = 16;
+const GRASS_FLECK_CELL_SIZE: u32 = 4;
+
 // A 64px tile contains only two long slabs across. Rows are staggered by half
 // a slab, and all dimensions divide TEX_SIZE to preserve the exact period.
 const SIDEWALK_SLAB_WIDTH: u32 = 32;
 const SIDEWALK_SLAB_HEIGHT: u32 = 16;
+const SIDEWALK_UV_REPEAT: f32 = 1.75;
+const SIDEWALK_JOINT_DARKENING: i32 = 10;
 
 // Base sRGB values matching crate::palette constants (see palette.rs).
 const GRASS_SRGB: [f32; 3] = [0.30, 0.60, 0.30]; // palette::GRASS_LIGHT
@@ -86,8 +94,8 @@ impl FromWorld for TextureAssets {
                 // Sidewalk gets a bumpy normal for concrete texture.
                 let sidewalk_normal = images.add(concrete_normal_map());
 
-                // GRASS — subtle deterministic mottle, mowing bands, and blade
-                // strokes; tile 16x with a matte blade-bump normal map.
+                // GRASS — subtle deterministic mottle, mowing bands, and sparse
+                // color flecks; tile 16x with a matte blade-bump normal map.
                 let grass = materials.add(StandardMaterial {
                     base_color: Color::WHITE,
                     base_color_texture: Some(images.add(grass_texture())),
@@ -120,7 +128,7 @@ impl FromWorld for TextureAssets {
                     perceptual_roughness: 0.88,
                     metallic: 0.0,
                     // Fewer repeats make the larger, staggered slabs legible.
-                    uv_transform: Affine2::from_scale(Vec2::splat(3.0)),
+                    uv_transform: Affine2::from_scale(Vec2::splat(SIDEWALK_UV_REPEAT)),
                     ..default()
                 });
 
@@ -268,11 +276,34 @@ where
 // Per-texture pixel builders
 // ---------------------------------------------------------------------------
 
-/// Grass: restrained tileable mottle plus tiny deterministic blade strokes.
-/// The blade cells and every band divide 64, and `grass_pixel` wraps incoming
-/// coordinates before hashing so callers see an exact 64px period.
+/// Grass: restrained tileable mottle plus sparse, jittered color flecks.
+/// Every structural scale divides 64, and `grass_pixel` wraps incoming
+/// coordinates before hashing so callers see an exact deterministic period.
 fn grass_texture() -> Image {
     make_image(grass_pixel)
+}
+
+/// Return 0 for ordinary grass, 1 for a cool-green fleck, and 2 for a muted
+/// straw-green fleck. A 4x4 cell is only a candidate: seven eighths of cells
+/// are empty, removing the old guaranteed, regularly spaced blade stamp.
+fn grass_fleck_kind(x: u32, y: u32) -> u8 {
+    let x = x % TEX_SIZE;
+    let y = y % TEX_SIZE;
+    let cell_x = x / GRASS_FLECK_CELL_SIZE;
+    let cell_y = y / GRASS_FLECK_CELL_SIZE;
+    let fleck_hash = noise2(cell_x, cell_y);
+
+    if (fleck_hash >> 8) & 7 != 0 {
+        return 0;
+    }
+
+    let origin_x = (fleck_hash >> 16) % GRASS_FLECK_CELL_SIZE;
+    let origin_y = (fleck_hash >> 18) % GRASS_FLECK_CELL_SIZE;
+    if x % GRASS_FLECK_CELL_SIZE != origin_x || y % GRASS_FLECK_CELL_SIZE != origin_y {
+        return 0;
+    }
+
+    1 + ((fleck_hash >> 28) & 1) as u8
 }
 
 fn grass_pixel(x: u32, y: u32) -> [u8; 4] {
@@ -280,29 +311,28 @@ fn grass_pixel(x: u32, y: u32) -> [u8; 4] {
     let y = y % TEX_SIZE;
     let b = srgb_base(GRASS_SRGB);
 
-    // Eight-by-eight clumps produce broad, quiet mottle rather than obvious
-    // per-texel static. Fine grain prevents the patches looking airbrushed.
-    let mottle = signed_noise2(x / 8, y / 8) * 13 / 128;
-    let fine = signed_noise(x, y) * 7 / 128;
-    let stripe = if (y / 16) % 2 == 0 { 3 } else { -3 };
+    // Broad 16px clumps and a 32px two-band mowing cycle keep the pattern
+    // quiet at the material's repeat scale. Fine grain prevents airbrushing.
+    let mottle = signed_noise2(x / GRASS_MOTTLE_SCALE, y / GRASS_MOTTLE_SCALE) * 8 / 128;
+    let fine = signed_noise(x, y) * 4 / 128;
+    let stripe = if (y / GRASS_MOWING_BAND_HEIGHT) % 2 == 0 {
+        2
+    } else {
+        -2
+    };
 
-    // One short blade per 4x4 cell. The hash picks its origin and lean; testing
-    // the preceding row draws a subtle two-pixel stroke instead of bright dots.
-    let cell_x = x / 4;
-    let cell_y = y / 4;
-    let blade_hash = noise2(cell_x, cell_y);
-    let origin_x = blade_hash & 3;
-    let origin_y = (blade_hash >> 2) & 3;
-    let local_x = x & 3;
-    let local_y = y & 3;
-    let blade = local_y == origin_y && local_x == origin_x
-        || local_y == (origin_y + 1) % 4 && local_x == (origin_x + ((blade_hash >> 4) & 1)) % 4;
-    let blade_light = if blade { 11 } else { 0 };
+    // Flecks retain two subtle color identities rather than becoming uniform
+    // bright dots: cool new growth and a restrained warm/straw note.
+    let fleck = match grass_fleck_kind(x, y) {
+        1 => [-1, 6, 1],
+        2 => [5, 3, -2],
+        _ => [0, 0, 0],
+    };
 
     [
-        clamp_byte(b[0] + mottle / 2 + fine / 2 + stripe / 2 + blade_light / 3),
-        clamp_byte(b[1] + mottle + fine + stripe + blade_light),
-        clamp_byte(b[2] + mottle / 3 + fine / 2 + stripe / 3 + blade_light / 4),
+        clamp_byte(b[0] + mottle / 2 + fine / 2 + stripe / 2 + fleck[0]),
+        clamp_byte(b[1] + mottle + fine + stripe + fleck[1]),
+        clamp_byte(b[2] + mottle / 3 + fine / 2 + stripe / 3 + fleck[2]),
         255,
     ]
 }
@@ -369,10 +399,15 @@ fn sidewalk_pixel(x: u32, y: u32) -> [u8; 4] {
     // texture boundary, so its tone remains continuous across U repeat.
     let slabs_per_row = TEX_SIZE / SIDEWALK_SLAB_WIDTH;
     let slab_x = ((x + stagger) / SIDEWALK_SLAB_WIDTH) % slabs_per_row;
-    let slab_tone = signed_noise2(slab_x, row) * 7 / 128;
-    let grain = signed_noise(x, y) * 8 / 128;
+    let slab_tone = signed_noise2(slab_x, row) * 5 / 128;
+    let grain = signed_noise(x, y) * 6 / 128;
     let brushed = if (x + 2 * y) % 11 == 0 { 2 } else { 0 };
-    let joint = if sidewalk_is_joint(x, y) { -17 } else { 0 };
+    // Expansion joints remain readable without becoming a near-black grid.
+    let joint = if sidewalk_is_joint(x, y) {
+        -SIDEWALK_JOINT_DARKENING
+    } else {
+        0
+    };
     let value = slab_tone + grain + brushed + joint;
 
     [
@@ -600,9 +635,15 @@ mod tests {
         assert_eq!(sampler.address_mode_v, ImageAddressMode::Repeat);
     }
 
+    fn luminance(pixel: [u8; 4]) -> u16 {
+        // Integer Rec. 709 weights, scaled by 256.
+        (54 * pixel[0] as u16 + 183 * pixel[1] as u16 + 19 * pixel[2] as u16) / 256
+    }
+
     #[test]
     fn organic_texture_generation_is_deterministic() {
         assert_eq!(pixels(&grass_texture()), pixels(&grass_texture()));
+        assert_eq!(pixels(&sidewalk_texture()), pixels(&sidewalk_texture()));
         for variant in 0..FOLIAGE_VARIANTS {
             assert_eq!(
                 pixels(&foliage_texture(variant)),
@@ -638,6 +679,56 @@ mod tests {
     }
 
     #[test]
+    fn grass_flecks_are_sparse_jittered_and_keep_both_color_identities() {
+        assert_eq!(TEX_SIZE % GRASS_MOTTLE_SCALE, 0);
+        assert_eq!(TEX_SIZE % GRASS_MOWING_BAND_HEIGHT, 0);
+        assert_eq!(TEX_SIZE % GRASS_FLECK_CELL_SIZE, 0);
+
+        let mut counts = [0usize; 3];
+        let mut occupied_cells = 0usize;
+        let cells_per_axis = TEX_SIZE / GRASS_FLECK_CELL_SIZE;
+        for cell_y in 0..cells_per_axis {
+            for cell_x in 0..cells_per_axis {
+                let mut cell_flecks = 0;
+                for local_y in 0..GRASS_FLECK_CELL_SIZE {
+                    for local_x in 0..GRASS_FLECK_CELL_SIZE {
+                        let x = cell_x * GRASS_FLECK_CELL_SIZE + local_x;
+                        let y = cell_y * GRASS_FLECK_CELL_SIZE + local_y;
+                        let kind = grass_fleck_kind(x, y) as usize;
+                        counts[kind] += 1;
+                        cell_flecks += usize::from(kind != 0);
+
+                        assert_eq!(grass_fleck_kind(x, y), grass_fleck_kind(x + TEX_SIZE, y));
+                        assert_eq!(grass_fleck_kind(x, y), grass_fleck_kind(x, y + TEX_SIZE));
+                    }
+                }
+                assert!(cell_flecks <= 1, "a candidate cell holds at most one fleck");
+                occupied_cells += usize::from(cell_flecks != 0);
+            }
+        }
+
+        let cell_count = (cells_per_axis * cells_per_axis) as usize;
+        assert!(occupied_cells > 0 && occupied_cells < cell_count / 4);
+        assert!(counts[1] > 0 && counts[2] > 0);
+        assert_eq!(counts[1] + counts[2], occupied_cells);
+    }
+
+    #[test]
+    fn polished_surface_luminance_is_bounded() {
+        let grass_luminance = (0..TEX_SIZE)
+            .flat_map(|y| (0..TEX_SIZE).map(move |x| luminance(grass_pixel(x, y))))
+            .collect::<Vec<_>>();
+        assert!(grass_luminance.iter().copied().min().unwrap() >= 120);
+        assert!(grass_luminance.iter().copied().max().unwrap() <= 145);
+
+        let sidewalk_luminance = (0..TEX_SIZE)
+            .flat_map(|y| (0..TEX_SIZE).map(move |x| luminance(sidewalk_pixel(x, y))))
+            .collect::<Vec<_>>();
+        assert!(sidewalk_luminance.iter().copied().min().unwrap() >= 160);
+        assert!(sidewalk_luminance.iter().copied().max().unwrap() <= 195);
+    }
+
+    #[test]
     fn procedural_pixel_functions_have_exact_tile_periods() {
         for y in 0..TEX_SIZE {
             for x in 0..TEX_SIZE {
@@ -664,13 +755,38 @@ mod tests {
     }
 
     #[test]
-    fn texture_resource_caches_five_distinct_organic_materials() {
+    fn texture_resource_caches_distinct_material_and_image_variants() {
         let mut app = App::new();
         app.init_resource::<Assets<Image>>()
             .init_resource::<Assets<StandardMaterial>>()
             .init_resource::<TextureAssets>();
 
         let textures = app.world().resource::<TextureAssets>();
+        assert_ne!(textures.grass.id(), textures.road.id());
+        assert_ne!(textures.grass.id(), textures.sidewalk.id());
+        assert_ne!(textures.road.id(), textures.sidewalk.id());
+
+        let surface_handles = [&textures.grass, &textures.road, &textures.sidewalk];
+        let materials = app.world().resource::<Assets<StandardMaterial>>();
+        let surface_image_ids = surface_handles.map(|handle| {
+            materials
+                .get(handle)
+                .and_then(|material| material.base_color_texture.as_ref())
+                .expect("cached surface material has a color texture")
+                .id()
+        });
+        assert_ne!(surface_image_ids[0], surface_image_ids[1]);
+        assert_ne!(surface_image_ids[0], surface_image_ids[2]);
+        assert_ne!(surface_image_ids[1], surface_image_ids[2]);
+
+        let sidewalk = materials
+            .get(&textures.sidewalk)
+            .expect("cached sidewalk material exists");
+        assert_eq!(
+            sidewalk.uv_transform,
+            Affine2::from_scale(Vec2::splat(SIDEWALK_UV_REPEAT))
+        );
+
         let handles = textures
             .foliage
             .iter()
@@ -682,7 +798,6 @@ mod tests {
             }
         }
 
-        let materials = app.world().resource::<Assets<StandardMaterial>>();
         let image_ids = handles
             .iter()
             .map(|handle| {
@@ -706,6 +821,8 @@ mod tests {
         assert!(SIDEWALK_SLAB_HEIGHT >= 16);
         assert_eq!(TEX_SIZE % SIDEWALK_SLAB_WIDTH, 0);
         assert_eq!(TEX_SIZE % SIDEWALK_SLAB_HEIGHT, 0);
+        assert!((1.5..=2.0).contains(&SIDEWALK_UV_REPEAT));
+        assert!(SIDEWALK_JOINT_DARKENING <= 10);
 
         // Every horizontal slab boundary is a seam. Vertical seams alternate
         // by half a slab, avoiding the old small 4x4 checker/grid repetition.
