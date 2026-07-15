@@ -7,7 +7,7 @@ use bevy::{camera::ScalingMode, prelude::*};
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::post_process::bloom::Bloom;
 
-use crate::car::{Car, DrivingSet};
+use crate::car::{Car, DrivingSet, ImportedCarReady, ImportedCarSceneRoot, PlayerCarVisual};
 use crate::game::SpawnSet;
 use crate::game::events::ObstacleHit;
 use crate::game::resources::{GameConfig, RoundActive};
@@ -15,10 +15,13 @@ use crate::game::state::GameState;
 use crate::settings::Settings;
 use crate::world::world_review_bounds;
 
-/// Gameplay width preserving the old 10-unit `FixedVertical` baseline at 16:9.
-const GAMEPLAY_BASELINE_WIDTH: f32 = 160.0 / 9.0;
-/// Gameplay width preserving the old 12-unit `FixedVertical` full-speed view at 16:9.
-const GAMEPLAY_MAX_WIDTH: f32 = 64.0 / 3.0;
+/// Aspect ratio around which gameplay framing balances horizontal and vertical
+/// coverage. At this ratio the former 10-to-12 unit vertical view is exact.
+const GAMEPLAY_REFERENCE_ASPECT: f32 = 16.0 / 9.0;
+const GAMEPLAY_BASELINE_HEIGHT: f32 = 10.0;
+const GAMEPLAY_MAX_HEIGHT: f32 = 12.0;
+const GAMEPLAY_MIN_ASPECT: f32 = 0.4;
+const GAMEPLAY_MAX_ASPECT: f32 = 2.5;
 /// Exponential smoothing rate for speed zoom (higher = snappier).
 const SMOOTH: f32 = 4.0;
 /// Direction and composition deliberately settle independently. Travel
@@ -49,6 +52,10 @@ struct GameplayCamera {
     travel_direction: Vec2,
     smoothed_car_xz: Vec2,
     smoothed_lead_ndc: Vec2,
+    /// Speed-driven height at the reference aspect. Keeping this independently
+    /// from the derived projection height prevents a resize from becoming a
+    /// false zoom input on the next frame.
+    reference_viewport_height: f32,
     initialized: bool,
 }
 
@@ -59,6 +66,7 @@ impl Default for GameplayCamera {
             travel_direction: Vec2::Y,
             smoothed_car_xz: Vec2::ZERO,
             smoothed_lead_ndc: Vec2::ZERO,
+            reference_viewport_height: GAMEPLAY_BASELINE_HEIGHT,
             initialized: false,
         }
     }
@@ -113,11 +121,46 @@ pub struct CarReviewCameraPlugin;
 
 impl Plugin for CarReviewCameraPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, (spawn_car_review_studio, mark_car_review_ready));
+        app.init_resource::<CarReviewReadyDelay>()
+            .add_systems(Startup, spawn_car_review_studio)
+            .add_systems(Update, mark_car_review_ready);
     }
 }
 
-fn mark_car_review_ready() {
+/// The imported glTF hierarchy is instantiated asynchronously. Require one
+/// complete ECS update after its semantic bindings become ready before the DOM
+/// marker lets the capture harness begin its own multi-frame render checks.
+#[derive(Resource, Default)]
+struct CarReviewReadyDelay {
+    observed_updates: u8,
+    marked: bool,
+}
+
+fn mark_car_review_ready(
+    visual: Res<PlayerCarVisual>,
+    imported_roots: Query<(), With<ImportedCarSceneRoot>>,
+    imported_ready: Query<(), (With<ImportedCarSceneRoot>, With<ImportedCarReady>)>,
+    cars: Query<(), With<Car>>,
+    mut delay: ResMut<CarReviewReadyDelay>,
+) {
+    if delay.marked {
+        return;
+    }
+    let visual_ready = match *visual {
+        PlayerCarVisual::ImportedConcept => {
+            imported_roots.iter().count() == 1 && imported_ready.iter().count() == 1
+        }
+        PlayerCarVisual::LegacyProcedural => cars.iter().count() == 1,
+    };
+    if !visual_ready {
+        delay.observed_updates = 0;
+        return;
+    }
+    delay.observed_updates = delay.observed_updates.saturating_add(1);
+    if delay.observed_updates < 2 {
+        return;
+    }
+
     #[cfg(target_arch = "wasm32")]
     if let Some(root) = web_sys::window()
         .and_then(|window| window.document())
@@ -125,6 +168,7 @@ fn mark_car_review_ready() {
     {
         let _ = root.set_attribute("data-roady-car-review-ready", "true");
     }
+    delay.marked = true;
 }
 
 #[derive(Clone, Copy)]
@@ -344,14 +388,14 @@ fn spawn_camera(mut commands: Commands) {
             ..Bloom::NATURAL
         },
         Projection::from(OrthographicProjection {
-            scaling_mode: ScalingMode::FixedHorizontal {
-                viewport_width: GAMEPLAY_BASELINE_WIDTH,
+            scaling_mode: ScalingMode::FixedVertical {
+                viewport_height: GAMEPLAY_BASELINE_HEIGHT,
             },
             ..OrthographicProjection::default_3d()
         }),
         // T7 fix preserved: the iso rotation is set ONCE here at spawn via
         // `looking_at(ZERO, Y)` and NEVER recomputed per frame. `follow_camera`
-        // only changes translation + the ortho viewport width (zoom).
+        // only changes translation + the ortho viewport height (zoom).
         Transform::from_xyz(12.0, 12.0, 12.0).looking_at(Vec3::ZERO, Vec3::Y),
         GameplayCamera::default(),
     ));
@@ -427,42 +471,32 @@ fn follow_camera(
         .map(|window| {
             gameplay_aspect_for_size(window.resolution.width(), window.resolution.height())
         })
-        .unwrap_or(16.0 / 9.0);
+        .unwrap_or(GAMEPLAY_REFERENCE_ASPECT);
     let speed_ratio = if settings.reduced_motion || cfg.max_speed <= 0.0 {
         0.0
     } else {
         (car.speed.abs() / cfg.max_speed).clamp(0.0, 1.0)
     };
-    // Resolve zoom before inverting the lead offset so composition uses the
-    // exact width rendered this frame, including during a smoothed transition.
-    let current_width = match &*proj {
-        Projection::Orthographic(o) => match o.scaling_mode {
-            ScalingMode::FixedHorizontal { viewport_width } => viewport_width,
-            _ => GAMEPLAY_BASELINE_WIDTH,
-        },
-        _ => GAMEPLAY_BASELINE_WIDTH,
-    };
-    let viewport_width = camera_viewport_width(
-        current_width,
+    // Smooth the speed scalar at the reference aspect, then derive both
+    // dimensions together. This keeps area constant across aspect changes and
+    // avoids feeding a resize-derived projection height back into speed zoom.
+    framing.reference_viewport_height = camera_reference_viewport_height(
+        framing.reference_viewport_height,
         car.speed,
         cfg.max_speed,
         t,
         settings.reduced_motion,
     );
+    let viewport = gameplay_viewport_size(framing.reference_viewport_height, aspect);
     let projected_travel =
-        projected_ground_direction(framing.travel_direction, cam_t.rotation, aspect);
+        projected_ground_direction(framing.travel_direction, cam_t.rotation, viewport);
     let desired_car_ndc = trailing_ndc_offset(projected_travel, TRAILING_NDC_LIMIT) * speed_ratio;
     framing.smoothed_lead_ndc = if settings.reduced_motion {
         Vec2::ZERO
     } else {
         damped_lead_ndc(framing.smoothed_lead_ndc, desired_car_ndc, dt)
     };
-    let ground_offset = ground_offset_for_ndc(
-        framing.smoothed_lead_ndc,
-        cam_t.rotation,
-        viewport_width,
-        aspect,
-    );
+    let ground_offset = ground_offset_for_ndc(framing.smoothed_lead_ndc, cam_t.rotation, viewport);
     let desired = camera_target_translation(
         Vec3::new(
             framing.smoothed_car_xz.x,
@@ -506,10 +540,13 @@ fn follow_camera(
         }
     }
 
-    // Speed zoom widens the horizontal viewport. Reduced motion pins it
-    // immediately to the baseline, with no residual smoothing from a fast frame.
+    // FixedVertical is updated from the fused dimensions each frame. Reduced
+    // motion pins the reference scalar immediately to 10, with no fast-frame
+    // smoothing residue.
     if let Projection::Orthographic(ref mut o) = *proj {
-        o.scaling_mode = ScalingMode::FixedHorizontal { viewport_width };
+        o.scaling_mode = ScalingMode::FixedVertical {
+            viewport_height: viewport.y,
+        };
     }
 }
 
@@ -535,8 +572,8 @@ fn next_trauma(current: f32, impact_speed: f32, reduced_motion: bool) -> f32 {
     }
 }
 
-/// Orthographic zoom transition shared with focused accessibility tests.
-fn camera_viewport_width(
+/// Speed-driven gameplay zoom scalar at the reference aspect.
+fn camera_reference_viewport_height(
     current: f32,
     speed: f32,
     max_speed: f32,
@@ -544,42 +581,65 @@ fn camera_viewport_width(
     reduced_motion: bool,
 ) -> f32 {
     if reduced_motion {
-        return GAMEPLAY_BASELINE_WIDTH;
+        return GAMEPLAY_BASELINE_HEIGHT;
     }
     let ratio = if max_speed.is_finite() && max_speed > 0.0 && speed.is_finite() {
         (speed.abs() / max_speed).clamp(0.0, 1.0)
     } else {
         0.0
     };
-    let target = GAMEPLAY_BASELINE_WIDTH + ratio * (GAMEPLAY_MAX_WIDTH - GAMEPLAY_BASELINE_WIDTH);
+    let target =
+        GAMEPLAY_BASELINE_HEIGHT + ratio * (GAMEPLAY_MAX_HEIGHT - GAMEPLAY_BASELINE_HEIGHT);
     let current = if current.is_finite() {
-        current.clamp(GAMEPLAY_BASELINE_WIDTH, GAMEPLAY_MAX_WIDTH)
+        current.clamp(GAMEPLAY_BASELINE_HEIGHT, GAMEPLAY_MAX_HEIGHT)
     } else {
-        GAMEPLAY_BASELINE_WIDTH
+        GAMEPLAY_BASELINE_HEIGHT
     };
     current + (target - current) * smoothing.clamp(0.0, 1.0)
 }
 
-fn gameplay_aspect_for_size(width: f32, height: f32) -> f32 {
-    if width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0 {
-        width / height
+fn sanitize_gameplay_aspect(aspect: f32) -> f32 {
+    if aspect.is_finite() && aspect > 0.0 {
+        aspect.clamp(GAMEPLAY_MIN_ASPECT, GAMEPLAY_MAX_ASPECT)
     } else {
-        16.0 / 9.0
+        GAMEPLAY_REFERENCE_ASPECT
     }
 }
 
-fn gameplay_viewport_size(width: f32, aspect: f32) -> Vec2 {
-    let width = if width.is_finite() && width > 0.0 {
-        width
+fn gameplay_aspect_for_size(width: f32, height: f32) -> f32 {
+    if width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0 {
+        sanitize_gameplay_aspect(width / height)
     } else {
-        GAMEPLAY_BASELINE_WIDTH
-    };
-    let aspect = if aspect.is_finite() && aspect > 0.0 {
-        aspect
+        GAMEPLAY_REFERENCE_ASPECT
+    }
+}
+
+/// Balanced constant-area fusion. Its area is always H²R, its width-to-height
+/// ratio is the sanitized display aspect, and at R it exactly reproduces the
+/// former fixed-vertical dimensions.
+fn gameplay_viewport_size(reference_height: f32, aspect: f32) -> Vec2 {
+    let reference_height = if reference_height.is_finite() {
+        reference_height.clamp(GAMEPLAY_BASELINE_HEIGHT, GAMEPLAY_MAX_HEIGHT)
     } else {
-        16.0 / 9.0
+        GAMEPLAY_BASELINE_HEIGHT
     };
-    Vec2::new(width, width / aspect)
+    let aspect = sanitize_gameplay_aspect(aspect);
+    if aspect == GAMEPLAY_REFERENCE_ASPECT {
+        return Vec2::new(
+            reference_height * GAMEPLAY_REFERENCE_ASPECT,
+            reference_height,
+        );
+    }
+    if aspect == GAMEPLAY_REFERENCE_ASPECT.recip() {
+        return Vec2::new(
+            reference_height,
+            reference_height * GAMEPLAY_REFERENCE_ASPECT,
+        );
+    }
+    Vec2::new(
+        reference_height * (GAMEPLAY_REFERENCE_ASPECT * aspect).sqrt(),
+        reference_height * (GAMEPLAY_REFERENCE_ASPECT / aspect).sqrt(),
+    )
 }
 
 fn travel_direction(heading: f32, drift: f32, speed: f32) -> Vec2 {
@@ -649,11 +709,15 @@ fn smoothed_direction(previous: Vec2, desired: Vec2, alpha: f32) -> Vec2 {
 }
 
 /// Project a world XZ travel vector into normalized screen direction.
-fn projected_ground_direction(travel: Vec2, rotation: Quat, aspect: f32) -> Vec2 {
+fn projected_ground_direction(travel: Vec2, rotation: Quat, viewport: Vec2) -> Vec2 {
     let travel = Vec3::new(travel.x, 0.0, travel.y);
     let right = rotation * Vec3::X;
     let up = rotation * Vec3::Y;
-    Vec2::new(travel.dot(right) / aspect.max(0.001), travel.dot(up)).normalize_or_zero()
+    Vec2::new(
+        travel.dot(right) / viewport.x.max(0.001),
+        travel.dot(up) / viewport.y.max(0.001),
+    )
+    .normalize_or_zero()
 }
 
 /// Put the car on the opposite edge of an inset NDC rectangle from travel.
@@ -669,10 +733,9 @@ fn trailing_ndc_offset(projected_travel: Vec2, limit: f32) -> Vec2 {
 
 /// Invert the fixed camera's ground-XZ to NDC projection. The result is the
 /// horizontal world offset added to the camera, relative to a centered follow.
-fn ground_offset_for_ndc(ndc: Vec2, rotation: Quat, width: f32, aspect: f32) -> Vec2 {
+fn ground_offset_for_ndc(ndc: Vec2, rotation: Quat, viewport: Vec2) -> Vec2 {
     let right = rotation * Vec3::X;
     let up = rotation * Vec3::Y;
-    let viewport = gameplay_viewport_size(width, aspect);
     let target_x = -ndc.x * viewport.x * 0.5;
     let target_y = -ndc.y * viewport.y * 0.5;
     let a = right.x;
@@ -693,13 +756,14 @@ fn ground_offset_for_ndc(ndc: Vec2, rotation: Quat, width: f32, aspect: f32) -> 
 mod tests {
     use super::{
         ANCHOR_MAX_SPEED, CameraObstacleFeedbackSet, CarReviewView, DIRECTION_SMOOTH,
-        GAMEPLAY_BASELINE_WIDTH, GAMEPLAY_MAX_WIDTH, GameplayCamera, LEAD_VERTICAL_NDC_PER_SECOND,
-        TRAILING_NDC_LIMIT, camera_target_translation, camera_viewport_width, capped_anchor_step,
-        car_review_camera_position, car_review_view, configure_obstacle_feedback_order,
-        damped_lead_ndc, exp_smoothing_alpha, gameplay_aspect_for_size, gameplay_viewport_size,
-        ground_offset_for_ndc, next_trauma, projected_ground_direction,
-        reset_camera_framing_for_fresh_round, review_projection_for_bounds, smoothed_direction,
-        trailing_ndc_offset, travel_direction,
+        GAMEPLAY_BASELINE_HEIGHT, GAMEPLAY_MAX_ASPECT, GAMEPLAY_MAX_HEIGHT, GAMEPLAY_MIN_ASPECT,
+        GAMEPLAY_REFERENCE_ASPECT, GameplayCamera, LEAD_VERTICAL_NDC_PER_SECOND,
+        TRAILING_NDC_LIMIT, camera_reference_viewport_height, camera_target_translation,
+        capped_anchor_step, car_review_camera_position, car_review_view,
+        configure_obstacle_feedback_order, damped_lead_ndc, exp_smoothing_alpha,
+        gameplay_aspect_for_size, gameplay_viewport_size, ground_offset_for_ndc, next_trauma,
+        projected_ground_direction, reset_camera_framing_for_fresh_round,
+        review_projection_for_bounds, smoothed_direction, trailing_ndc_offset, travel_direction,
     };
     use crate::{car::DrivingSet, game::resources::RoundActive, world::world_review_bounds};
     use bevy::prelude::*;
@@ -792,58 +856,81 @@ mod tests {
     }
 
     #[test]
-    fn production_gameplay_width_is_equal_at_equal_speed_across_aspects() {
-        let width = camera_viewport_width(GAMEPLAY_BASELINE_WIDTH, 8.0, 12.0, 1.0, false);
-        for aspect in [16.0 / 9.0, 4.0 / 3.0, 9.0 / 16.0] {
-            let viewport = gameplay_viewport_size(width, aspect);
-            assert_eq!(viewport.x, width);
-            assert!((viewport.y - width / aspect).abs() < 1e-6);
-        }
-    }
-
-    #[test]
-    fn gameplay_widths_preserve_the_old_16_by_9_vertical_view() {
-        let aspect = 16.0 / 9.0;
+    fn reference_aspect_preserves_exact_former_rest_and_max_dimensions() {
         assert_eq!(
-            gameplay_viewport_size(GAMEPLAY_BASELINE_WIDTH, aspect),
-            Vec2::new(GAMEPLAY_BASELINE_WIDTH, 10.0)
+            gameplay_viewport_size(GAMEPLAY_BASELINE_HEIGHT, GAMEPLAY_REFERENCE_ASPECT),
+            Vec2::new(160.0 / 9.0, 10.0)
         );
         assert_eq!(
-            gameplay_viewport_size(GAMEPLAY_MAX_WIDTH, aspect),
-            Vec2::new(GAMEPLAY_MAX_WIDTH, 12.0)
+            gameplay_viewport_size(GAMEPLAY_MAX_HEIGHT, GAMEPLAY_REFERENCE_ASPECT),
+            Vec2::new(64.0 / 3.0, 12.0)
         );
     }
 
     #[test]
-    fn portrait_keeps_horizontal_width_and_adds_vertical_coverage() {
-        for width in [GAMEPLAY_BASELINE_WIDTH, GAMEPLAY_MAX_WIDTH] {
-            let landscape = gameplay_viewport_size(width, 16.0 / 9.0);
-            let portrait = gameplay_viewport_size(width, 9.0 / 16.0);
-            assert_eq!(portrait.x, landscape.x);
-            assert!(portrait.y > landscape.y);
+    fn reciprocal_aspects_swap_viewport_dimensions() {
+        for height in [GAMEPLAY_BASELINE_HEIGHT, GAMEPLAY_MAX_HEIGHT] {
+            let landscape = gameplay_viewport_size(height, GAMEPLAY_REFERENCE_ASPECT);
+            let portrait = gameplay_viewport_size(height, GAMEPLAY_REFERENCE_ASPECT.recip());
+            assert_eq!(portrait, Vec2::new(landscape.y, landscape.x));
         }
     }
 
     #[test]
-    fn production_gameplay_resize_and_aspect_handling_stays_finite() {
+    fn fused_viewport_has_equal_area_across_supported_aspects() {
+        for height in [GAMEPLAY_BASELINE_HEIGHT, GAMEPLAY_MAX_HEIGHT] {
+            let expected = height * height * GAMEPLAY_REFERENCE_ASPECT;
+            for aspect in [
+                GAMEPLAY_REFERENCE_ASPECT,
+                4.0 / 3.0,
+                1.0,
+                GAMEPLAY_REFERENCE_ASPECT.recip(),
+            ] {
+                let viewport = gameplay_viewport_size(height, aspect);
+                assert!((viewport.x * viewport.y - expected).abs() < 1e-4);
+                assert!((viewport.x / viewport.y - aspect).abs() < 1e-6);
+            }
+        }
+    }
+
+    #[test]
+    fn fusion_interpolates_monotonically_between_landscape_and_portrait() {
+        let aspects = [
+            GAMEPLAY_REFERENCE_ASPECT.recip(),
+            1.0,
+            4.0 / 3.0,
+            GAMEPLAY_REFERENCE_ASPECT,
+        ];
+        let mut previous = gameplay_viewport_size(GAMEPLAY_BASELINE_HEIGHT, aspects[0]);
+        for aspect in aspects.into_iter().skip(1) {
+            let next = gameplay_viewport_size(GAMEPLAY_BASELINE_HEIGHT, aspect);
+            assert!(next.x > previous.x);
+            assert!(next.y < previous.y);
+            previous = next;
+        }
+    }
+
+    #[test]
+    fn gameplay_aspect_falls_back_and_clamps_pathological_sizes() {
         for (width, height) in [
-            (1280.0, 720.0),
             (0.0, 720.0),
             (1280.0, 0.0),
             (f32::NAN, 720.0),
             (1280.0, f32::INFINITY),
             (f32::INFINITY, f32::NAN),
         ] {
-            let aspect = gameplay_aspect_for_size(width, height);
-            let viewport = gameplay_viewport_size(GAMEPLAY_BASELINE_WIDTH, aspect);
-            let projected = projected_ground_direction(Vec2::X, gameplay_rotation(), aspect);
-            let offset = ground_offset_for_ndc(
-                Vec2::new(0.2, -0.2),
-                gameplay_rotation(),
-                GAMEPLAY_BASELINE_WIDTH,
-                aspect,
+            assert_eq!(
+                gameplay_aspect_for_size(width, height),
+                GAMEPLAY_REFERENCE_ASPECT
             );
-            assert!(aspect.is_finite() && aspect > 0.0);
+        }
+        assert_eq!(gameplay_aspect_for_size(1.0, 1000.0), GAMEPLAY_MIN_ASPECT);
+        assert_eq!(gameplay_aspect_for_size(1000.0, 1.0), GAMEPLAY_MAX_ASPECT);
+
+        for aspect in [f32::NAN, 0.0, -1.0, f32::INFINITY, 0.01, 100.0] {
+            let viewport = gameplay_viewport_size(GAMEPLAY_BASELINE_HEIGHT, aspect);
+            let projected = projected_ground_direction(Vec2::X, gameplay_rotation(), viewport);
+            let offset = ground_offset_for_ndc(Vec2::new(0.2, -0.2), gameplay_rotation(), viewport);
             assert!(viewport.is_finite() && viewport.min_element() > 0.0);
             assert!(projected.is_finite());
             assert!(offset.is_finite());
@@ -851,18 +938,18 @@ mod tests {
     }
 
     #[test]
-    fn reduced_motion_uses_unchanged_width_at_every_speed() {
+    fn reduced_motion_pins_reference_height_at_every_speed() {
         assert_eq!(
-            camera_viewport_width(GAMEPLAY_MAX_WIDTH, 12.0, 12.0, 0.1, true),
-            GAMEPLAY_BASELINE_WIDTH
+            camera_reference_viewport_height(GAMEPLAY_MAX_HEIGHT, 12.0, 12.0, 0.1, true),
+            GAMEPLAY_BASELINE_HEIGHT
         );
         assert_eq!(
-            camera_viewport_width(9.0, 0.0, 12.0, 0.9, true),
-            GAMEPLAY_BASELINE_WIDTH
+            camera_reference_viewport_height(9.0, 0.0, 12.0, 0.9, true),
+            GAMEPLAY_BASELINE_HEIGHT
         );
         assert!(
-            camera_viewport_width(GAMEPLAY_BASELINE_WIDTH, 12.0, 12.0, 0.5, false)
-                > GAMEPLAY_BASELINE_WIDTH
+            camera_reference_viewport_height(GAMEPLAY_BASELINE_HEIGHT, 12.0, 12.0, 0.5, false)
+                > GAMEPLAY_BASELINE_HEIGHT
         );
     }
 
@@ -873,22 +960,19 @@ mod tests {
     }
 
     #[test]
-    fn full_speed_framing_uses_reduced_bounded_trailing_lead() {
+    fn full_speed_lead_inversion_uses_actual_landscape_square_and_portrait_viewports() {
         let rotation = gameplay_rotation();
-        for (width, height) in [
-            (844.0, 390.0),
-            (960.0, 480.0),
-            (1280.0, 720.0),
-            (390.0, 844.0),
+        for aspect in [
+            GAMEPLAY_REFERENCE_ASPECT,
+            1.0,
+            GAMEPLAY_REFERENCE_ASPECT.recip(),
         ] {
-            let aspect = width / height;
+            let viewport = gameplay_viewport_size(GAMEPLAY_MAX_HEIGHT, aspect);
             for travel in [Vec2::X, Vec2::Y, Vec2::new(1.0, 1.0).normalize()] {
-                let projected = projected_ground_direction(travel, rotation, aspect);
+                let projected = projected_ground_direction(travel, rotation, viewport);
                 let desired_ndc = trailing_ndc_offset(projected, TRAILING_NDC_LIMIT);
-                let ground_offset =
-                    ground_offset_for_ndc(desired_ndc, rotation, GAMEPLAY_MAX_WIDTH, aspect);
-                let actual_ndc =
-                    projected_car_ndc(ground_offset, rotation, GAMEPLAY_MAX_WIDTH, aspect);
+                let ground_offset = ground_offset_for_ndc(desired_ndc, rotation, viewport);
+                let actual_ndc = projected_car_ndc(ground_offset, rotation, viewport);
                 assert!((actual_ndc - desired_ndc).length() < 1e-4);
                 assert!(actual_ndc.x.abs() <= 0.4201 && actual_ndc.y.abs() <= 0.4201);
                 assert!(
@@ -899,11 +983,10 @@ mod tests {
         }
     }
 
-    fn projected_car_ndc(offset: Vec2, rotation: Quat, width: f32, aspect: f32) -> Vec2 {
+    fn projected_car_ndc(offset: Vec2, rotation: Quat, viewport: Vec2) -> Vec2 {
         let relative = Vec3::new(-offset.x, 0.0, -offset.y);
         let right = rotation * Vec3::X;
         let up = rotation * Vec3::Y;
-        let viewport = gameplay_viewport_size(width, aspect);
         Vec2::new(
             relative.dot(right) / (viewport.x * 0.5),
             relative.dot(up) / (viewport.y * 0.5),
@@ -917,6 +1000,7 @@ mod tests {
             travel_direction: -Vec2::Y,
             smoothed_car_xz: Vec2::new(3.0, 0.0),
             smoothed_lead_ndc: Vec2::new(0.3, -0.2),
+            reference_viewport_height: GAMEPLAY_MAX_HEIGHT,
             initialized: true,
         };
         let mut app = App::new();
@@ -928,17 +1012,20 @@ mod tests {
         let framing = app.world().get::<GameplayCamera>(camera).unwrap();
         assert!(!framing.initialized);
         assert_eq!(framing.smoothed_lead_ndc, Vec2::ZERO);
+        assert_eq!(framing.reference_viewport_height, GAMEPLAY_BASELINE_HEIGHT);
 
         app.world_mut().resource_mut::<RoundActive>().0 = true;
         {
             let mut framing = app.world_mut().get_mut::<GameplayCamera>(camera).unwrap();
             framing.initialized = true;
             framing.smoothed_lead_ndc = Vec2::new(0.2, 0.1);
+            framing.reference_viewport_height = 11.25;
         }
         app.update();
         let framing = app.world().get::<GameplayCamera>(camera).unwrap();
         assert!(framing.initialized);
         assert_eq!(framing.smoothed_lead_ndc, Vec2::new(0.2, 0.1));
+        assert_eq!(framing.reference_viewport_height, 11.25);
     }
 
     #[test]
@@ -1050,33 +1137,41 @@ mod tests {
     }
 
     #[test]
-    fn production_speed_zoom_width_is_symmetric_and_bounded() {
-        let forward = camera_viewport_width(GAMEPLAY_BASELINE_WIDTH, 12.0, 12.0, 1.0, false);
+    fn production_speed_zoom_height_is_symmetric_smooth_and_bounded() {
+        let forward =
+            camera_reference_viewport_height(GAMEPLAY_BASELINE_HEIGHT, 12.0, 12.0, 1.0, false);
         assert_eq!(
             forward,
-            camera_viewport_width(GAMEPLAY_BASELINE_WIDTH, -12.0, 12.0, 1.0, false)
+            camera_reference_viewport_height(GAMEPLAY_BASELINE_HEIGHT, -12.0, 12.0, 1.0, false)
         );
         assert_eq!(
             forward,
-            camera_viewport_width(GAMEPLAY_BASELINE_WIDTH, 120.0, 12.0, 1.0, false)
+            camera_reference_viewport_height(GAMEPLAY_BASELINE_HEIGHT, 120.0, 12.0, 1.0, false)
         );
         assert_eq!(
-            camera_viewport_width(GAMEPLAY_BASELINE_WIDTH, 0.0, 12.0, 1.0, false),
-            GAMEPLAY_BASELINE_WIDTH
+            camera_reference_viewport_height(GAMEPLAY_BASELINE_HEIGHT, 0.0, 12.0, 1.0, false),
+            GAMEPLAY_BASELINE_HEIGHT
         );
-        assert_eq!(forward, GAMEPLAY_MAX_WIDTH);
+        assert_eq!(forward, GAMEPLAY_MAX_HEIGHT);
+
+        let mut current = GAMEPLAY_BASELINE_HEIGHT;
+        for _ in 0..20 {
+            let next = camera_reference_viewport_height(current, 12.0, 12.0, 0.2, false);
+            assert!(next > current && next <= GAMEPLAY_MAX_HEIGHT);
+            current = next;
+        }
 
         for current in [
             f32::NEG_INFINITY,
             -100.0,
-            GAMEPLAY_BASELINE_WIDTH,
-            GAMEPLAY_MAX_WIDTH,
+            GAMEPLAY_BASELINE_HEIGHT,
+            GAMEPLAY_MAX_HEIGHT,
             100.0,
             f32::INFINITY,
         ] {
-            let width = camera_viewport_width(current, 6.0, 12.0, 0.5, false);
-            assert!(width.is_finite());
-            assert!((GAMEPLAY_BASELINE_WIDTH..=GAMEPLAY_MAX_WIDTH).contains(&width));
+            let height = camera_reference_viewport_height(current, 6.0, 12.0, 0.5, false);
+            assert!(height.is_finite());
+            assert!((GAMEPLAY_BASELINE_HEIGHT..=GAMEPLAY_MAX_HEIGHT).contains(&height));
         }
     }
 }
