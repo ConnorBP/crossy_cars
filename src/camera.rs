@@ -6,6 +6,11 @@ use bevy::{camera::ScalingMode, prelude::*};
 // (default `TonyMcMapface`) but we set it explicitly to make the intent clear.
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::post_process::bloom::Bloom;
+#[cfg(not(target_arch = "wasm32"))]
+use bevy::{
+    anti_alias::fxaa::Fxaa,
+    pbr::{ContactShadows, ScreenSpaceAmbientOcclusion, ScreenSpaceAmbientOcclusionQualityLevel},
+};
 
 use crate::car::{Car, DrivingSet, ImportedCarReady, ImportedCarSceneRoot, PlayerCarVisual};
 use crate::game::SpawnSet;
@@ -312,9 +317,8 @@ fn review_projection_for_bounds(min: Vec2, max: Vec2, aspect: f32) -> (f32, f32,
 fn spawn_world_review_camera(mut commands: Commands) {
     let (min, max) = world_review_bounds();
     let (viewport_height, center_x, center_z) = review_projection_for_bounds(min, max, 4.0 / 3.0);
-    commands.spawn((
+    let mut camera = commands.spawn((
         Camera3d::default(),
-        Msaa::Sample4,
         Tonemapping::TonyMcMapface,
         Projection::from(OrthographicProjection {
             scaling_mode: ScalingMode::FixedVertical { viewport_height },
@@ -323,6 +327,7 @@ fn spawn_world_review_camera(mut commands: Commands) {
         Transform::from_xyz(center_x, 400.0, center_z)
             .looking_at(Vec3::new(center_x, 0.0, center_z), Vec3::NEG_Z),
     ));
+    configure_platform_safe_camera(&mut camera);
 }
 
 fn fit_world_review_camera(
@@ -370,12 +375,8 @@ impl Plugin for CameraPlugin {
 }
 
 fn spawn_camera(mut commands: Commands) {
-    commands.spawn((
+    let mut camera = commands.spawn((
         Camera3d::default(),
-        // T9: MSAA 4× for edge anti-aliasing. In Bevy 0.19 `Msaa` is a camera
-        // component (not a resource). Works on both native and WebGL2
-        // (WebGL2 supports up to 4× MSAA via renderable sample counts).
-        Msaa::Sample4,
         // T9: tonemapping — TonyMcMapface is a neutral, filmic display transform
         // that desaturates brights cleanly. Pairs well with bloom.
         Tonemapping::TonyMcMapface,
@@ -401,6 +402,30 @@ fn spawn_camera(mut commands: Commands) {
         Transform::from_xyz(12.0, 12.0, 12.0).looking_at(Vec3::ZERO, Vec3::Y),
         GameplayCamera::default(),
     ));
+    configure_platform_safe_camera(&mut camera);
+}
+
+/// SSAO is unavailable on WebGL2 and is incompatible with multisampling.
+/// Native cameras therefore pair medium SSAO with FXAA, while browser cameras
+/// retain their established four-sample MSAA profile.
+fn configure_platform_safe_camera(camera: &mut EntityCommands) {
+    #[cfg(not(target_arch = "wasm32"))]
+    camera.insert((
+        Msaa::Off,
+        ContactShadows {
+            linear_steps: 8,
+            thickness: 0.1,
+            length: 0.3,
+        },
+        ScreenSpaceAmbientOcclusion {
+            quality_level: ScreenSpaceAmbientOcclusionQualityLevel::Medium,
+            ..default()
+        },
+        Fxaa::default(),
+    ));
+
+    #[cfg(target_arch = "wasm32")]
+    camera.insert(Msaa::Sample4);
 }
 
 fn reset_camera_framing_for_fresh_round(
@@ -765,10 +790,17 @@ mod tests {
         configure_obstacle_feedback_order, damped_lead_ndc, exp_smoothing_alpha,
         gameplay_aspect_for_size, gameplay_viewport_size, ground_offset_for_ndc, next_trauma,
         projected_ground_direction, reset_camera_framing_for_fresh_round,
-        review_projection_for_bounds, smoothed_direction, trailing_ndc_offset, travel_direction,
+        review_projection_for_bounds, smoothed_direction, spawn_camera, spawn_world_review_camera,
+        trailing_ndc_offset, travel_direction,
     };
     use crate::{car::DrivingSet, game::resources::RoundActive, world::world_review_bounds};
+    use bevy::pbr::ContactShadows;
     use bevy::prelude::*;
+    #[cfg(not(target_arch = "wasm32"))]
+    use bevy::{
+        anti_alias::fxaa::Fxaa,
+        pbr::{ScreenSpaceAmbientOcclusion, ScreenSpaceAmbientOcclusionQualityLevel},
+    };
 
     #[derive(Resource, Default)]
     struct ExecutionOrder(Vec<&'static str>);
@@ -779,6 +811,70 @@ mod tests {
 
     fn record_feedback(mut order: ResMut<ExecutionOrder>) {
         order.0.push("camera feedback");
+    }
+
+    fn assert_platform_safe_camera(world: &mut World, entity: Entity) {
+        let msaa = world.get::<Msaa>(entity).unwrap();
+        assert_eq!(
+            *msaa,
+            if cfg!(target_arch = "wasm32") {
+                Msaa::Sample4
+            } else {
+                Msaa::Off
+            }
+        );
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let contact = world.get::<ContactShadows>(entity).unwrap();
+            assert_eq!(contact.linear_steps, 8);
+            assert_eq!(contact.thickness, 0.1);
+            assert_eq!(contact.length, 0.3);
+            assert_eq!(
+                world
+                    .get::<ScreenSpaceAmbientOcclusion>(entity)
+                    .unwrap()
+                    .quality_level,
+                ScreenSpaceAmbientOcclusionQualityLevel::Medium
+            );
+            assert!(world.get::<Fxaa>(entity).unwrap().enabled);
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            assert!(world.get::<ContactShadows>(entity).is_none());
+            assert!(
+                world
+                    .get::<bevy::pbr::ScreenSpaceAmbientOcclusion>(entity)
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn gameplay_camera_uses_platform_safe_ao_aa_and_contact_shadows() {
+        let mut app = App::new();
+        app.add_systems(Startup, spawn_camera);
+        app.update();
+        let world = app.world_mut();
+        let entity = world
+            .query_filtered::<Entity, With<GameplayCamera>>()
+            .single(world)
+            .unwrap();
+        assert_platform_safe_camera(world, entity);
+    }
+
+    #[test]
+    fn world_review_camera_uses_platform_safe_ao_aa_and_contact_shadows() {
+        let mut app = App::new();
+        app.add_systems(Startup, spawn_world_review_camera);
+        app.update();
+        let world = app.world_mut();
+        let entity = world
+            .query_filtered::<Entity, With<Camera3d>>()
+            .single(world)
+            .unwrap();
+        assert_platform_safe_camera(world, entity);
     }
 
     #[test]

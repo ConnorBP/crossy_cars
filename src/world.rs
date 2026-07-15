@@ -37,6 +37,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use bevy::color::LinearRgba;
+#[cfg(not(target_arch = "wasm32"))]
+use bevy::light::CascadeShadowConfigBuilder;
 use bevy::math::primitives::Circle;
 use bevy::prelude::*;
 use serde::Serialize;
@@ -48,7 +50,7 @@ use crate::game::resources::{RoundActive, Score, TimeLeft};
 use crate::game::state::GameState;
 use crate::palette;
 use crate::shaders::WaterMaterial;
-use crate::textures::{FOLIAGE_VARIANTS, GROUND_VARIANTS, TextureAssets};
+use crate::textures::{GROUND_VARIANTS, TextureAssets};
 
 /// Gate real-time shadows off on WebGL2 for performance.
 const SHADOWS: bool = cfg!(not(target_arch = "wasm32"));
@@ -82,6 +84,19 @@ pub struct Collider {
 /// Tag for a building obstacle (collidable, read-only by other tasks).
 #[derive(Component)]
 pub struct Building;
+
+/// Known thin procedural footprint shadow beneath an imported building.
+/// Transparency fading excludes this ground-only mesh even while imported
+/// scene primitive AABBs are still being initialized.
+#[derive(Component)]
+pub(crate) struct BuildingGroundShadow;
+
+/// Long, world-fixed projected building shadow used when WebGL2 has no real
+/// shadow maps. It also carries [`BuildingGroundShadow`] so transparency
+/// fading always excludes this procedural ground-only mesh.
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Component)]
+pub(crate) struct BuildingCastShadow;
 /// Tag for a tree obstacle (collidable).
 #[derive(Component)]
 pub struct Tree;
@@ -156,13 +171,8 @@ struct GroundCircleShadow;
 struct TreeShadow;
 #[derive(Component)]
 struct HydrantShadow;
-
-/// Visual-only world dressing markers. Their entities never carry gameplay
-/// collision components; streamed blocks only clone cached mesh/material handles.
-#[derive(Component, Clone, Copy, Debug, PartialEq)]
-struct TreeFoliage {
-    variant: usize,
-}
+#[derive(Component)]
+struct BenchShadow;
 #[derive(Component)]
 struct HayFieldStrip;
 #[derive(Component, Clone, Copy, Debug, PartialEq)]
@@ -171,14 +181,6 @@ struct HayBaleVisual {
 }
 #[derive(Component)]
 struct HaySprig;
-#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
-struct HouseStyle(u8);
-#[derive(Component)]
-struct HouseDoor;
-#[derive(Component)]
-struct HouseRoof;
-#[derive(Component)]
-struct HouseChimney;
 #[derive(Component)]
 struct Mailbox;
 #[derive(Component)]
@@ -373,36 +375,6 @@ fn marking_approaches(sock: [Edge; 4]) -> [bool; 4] {
         road(S) && road(W),
         road(S) && road(E),
     ]
-}
-
-const WINDOW_ROW_BOTTOM: f32 = 0.9;
-const WINDOW_ROW_TOP_MARGIN: f32 = 0.9;
-const WINDOW_ROW_SPACING: f32 = 2.0;
-const MAX_WINDOW_ROWS: usize = 3;
-
-/// A bounded, low-detail set of window-strip center heights. Buildings in
-/// this module are 4–9u tall, yielding two or three rows; malformed or tiny
-/// heights yield no rows. Keeping this pure makes the entity-count and facade
-/// bounds independently testable.
-fn window_row_heights(height: f32) -> Vec<f32> {
-    if !height.is_finite() {
-        return Vec::new();
-    }
-    let upper = height - WINDOW_ROW_TOP_MARGIN;
-    if upper < WINDOW_ROW_BOTTOM {
-        return Vec::new();
-    }
-    let count = (((upper - WINDOW_ROW_BOTTOM) / WINDOW_ROW_SPACING).floor() as usize)
-        .saturating_add(1)
-        .min(MAX_WINDOW_ROWS);
-    if count == 1 {
-        return vec![(WINDOW_ROW_BOTTOM + upper) * 0.5];
-    }
-    (0..count)
-        .map(|row| {
-            WINDOW_ROW_BOTTOM + (upper - WINDOW_ROW_BOTTOM) * row as f32 / (count - 1) as f32
-        })
-        .collect()
 }
 
 /// Stable review/catalog order for every production tile kind. This complete
@@ -1400,12 +1372,107 @@ pub struct Block {
     pub family: DistrictFamily,
 }
 
-/// Shared fixed-dimension meshes and materials used by streamed blocks.
-/// Dimension-varying building meshes remain per-instance.
+/// Shared fixed-dimension procedural meshes and materials used by streamed blocks.
 #[derive(Resource)]
 pub struct WorldAssets {
     meshes: WorldMeshAssets,
     materials: WorldMaterialAssets,
+}
+
+/// The four audited building scenes used by deterministic urban generation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) enum BuildingAssetKind {
+    Cottage,
+    PorchedHouse,
+    Townhouse,
+    Apartment,
+}
+
+/// Audited dimensions and unrotated collider half-extents for one building.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct BuildingAssetDimensions {
+    footprint: Vec2,
+    height: f32,
+    collider: Vec2,
+}
+
+impl BuildingAssetKind {
+    const fn dimensions(self) -> BuildingAssetDimensions {
+        match self {
+            Self::Cottage => BuildingAssetDimensions {
+                footprint: Vec2::new(4.2, 4.0),
+                height: 4.85,
+                collider: Vec2::new(2.10, 2.00),
+            },
+            Self::PorchedHouse => BuildingAssetDimensions {
+                footprint: Vec2::new(4.6, 4.4),
+                height: 6.15,
+                collider: Vec2::new(2.30, 2.20),
+            },
+            Self::Townhouse => BuildingAssetDimensions {
+                footprint: Vec2::new(4.7, 4.3),
+                height: 7.25,
+                collider: Vec2::new(2.35, 2.15),
+            },
+            Self::Apartment => BuildingAssetDimensions {
+                footprint: Vec2::new(4.95, 4.8),
+                height: 8.55,
+                collider: Vec2::new(2.48, 2.40),
+            },
+        }
+    }
+}
+
+/// Stable metadata on every procedural building root. Consumers can inspect
+/// the selected imported asset without traversing Bevy's scene descendants.
+#[derive(Component, Clone, Copy, Debug, PartialEq)]
+pub(crate) struct BuildingVisualProfile {
+    pub(crate) kind: BuildingAssetKind,
+    pub(crate) height: f32,
+}
+
+/// All nine world-kit scenes. Handles are loaded once when this resource is
+/// initialized and cloned by every streamed/review block thereafter.
+#[derive(Resource)]
+#[allow(dead_code)] // Prop handles are intentionally preloaded for the c2 integration.
+pub(crate) struct WorldSceneAssets {
+    cottage: Handle<WorldAsset>,
+    porched_house: Handle<WorldAsset>,
+    townhouse: Handle<WorldAsset>,
+    apartment: Handle<WorldAsset>,
+    pub(crate) tree: Handle<WorldAsset>,
+    pub(crate) streetlamp: Handle<WorldAsset>,
+    pub(crate) bench: Handle<WorldAsset>,
+    pub(crate) mailbox: Handle<WorldAsset>,
+    pub(crate) hydrant: Handle<WorldAsset>,
+}
+
+impl WorldSceneAssets {
+    fn building(&self, kind: BuildingAssetKind) -> Handle<WorldAsset> {
+        match kind {
+            BuildingAssetKind::Cottage => self.cottage.clone(),
+            BuildingAssetKind::PorchedHouse => self.porched_house.clone(),
+            BuildingAssetKind::Townhouse => self.townhouse.clone(),
+            BuildingAssetKind::Apartment => self.apartment.clone(),
+        }
+    }
+}
+
+impl FromWorld for WorldSceneAssets {
+    fn from_world(world: &mut World) -> Self {
+        let assets = world.resource::<AssetServer>();
+        Self {
+            cottage: assets.load("models/world/isometric/house_cottage_gabled.glb#Scene0"),
+            porched_house: assets.load("models/world/isometric/house_porched_blue.glb#Scene0"),
+            townhouse: assets.load("models/world/isometric/townhouse_brick.glb#Scene0"),
+            apartment: assets.load("models/world/isometric/apartment_modern_balconies.glb#Scene0"),
+            tree: assets.load("models/world/isometric/tree_urban_blocky.glb#Scene0"),
+            streetlamp: assets.load("models/world/isometric/streetlamp_classic.glb#Scene0"),
+            bench: assets.load("models/world/isometric/bench_park.glb#Scene0"),
+            mailbox: assets.load("models/world/isometric/mailbox_residential.glb#Scene0"),
+            hydrant: assets.load("models/world/isometric/hydrant_city.glb#Scene0"),
+        }
+    }
 }
 
 // Rural prop mesh dimensions. Their roots receive arbitrary yaw, so collision
@@ -1415,11 +1482,95 @@ const HAY_BALE_RADIUS: f32 = 0.7;
 const HAY_BALE_LENGTH: f32 = 1.1;
 const FARM_CRATE_SIDE: f32 = 1.1;
 const FARM_CRATE_HEIGHT: f32 = 0.7;
-const TREE_VISUAL_SCALE_MIN: f32 = 0.88;
-const TREE_VISUAL_SCALE_MAX: f32 = 1.12;
 const HAY_BALE_SCALE_MIN: f32 = 0.86;
 const HAY_BALE_SCALE_MAX: f32 = 1.0;
 const MAX_HAY_SPRIGS: usize = 12;
+
+/// Keep classical WebGL building shadows locked to the same world-space sun
+/// vector used by `spawn_production_sun`.
+const PRODUCTION_SUN_SOURCE: Vec3 = Vec3::new(30.0, 25.0, 15.0);
+#[cfg(any(target_arch = "wasm32", test))]
+const BUILDING_CAST_LENGTH_MIN: f32 = 2.0;
+#[cfg(any(target_arch = "wasm32", test))]
+const BUILDING_CAST_LENGTH_MAX: f32 = 12.0;
+const BUILDING_CONTACT_FOOTPRINT_SCALE: f32 = 1.08;
+#[cfg(any(target_arch = "wasm32", test))]
+const BUILDING_CAST_SHADOW_HEIGHT: f32 = 0.03;
+#[cfg(any(target_arch = "wasm32", test))]
+const BUILDING_CAST_SHADOW_THICKNESS: f32 = 0.02;
+
+/// Build a ground card whose local +Z axis points away from the sun in world
+/// XZ. `collider_half` is the already-rotated, conservative collider AABB.
+/// Building roots carry translation only, so this child transform remains
+/// world-fixed without compensating for a parent rotation.
+#[cfg(any(target_arch = "wasm32", test))]
+fn building_cast_shadow_transform(
+    collider_half: Vec2,
+    audited_height: f32,
+    sun_source: Vec3,
+) -> Transform {
+    let horizontal = Vec2::new(sun_source.x, sun_source.z);
+    let horizontal_length = if horizontal.is_finite() {
+        horizontal.length()
+    } else {
+        0.0
+    };
+    let cast_direction = if horizontal_length > f32::EPSILON {
+        -horizontal / horizontal_length
+    } else {
+        // Degenerate input is not used in production, but a deterministic
+        // fallback keeps this pure geometry helper finite and testable.
+        Vec2::NEG_X
+    };
+
+    let height = if audited_height.is_finite() {
+        audited_height.max(0.0)
+    } else {
+        0.0
+    };
+    let vertical = if sun_source.y.is_finite() {
+        sun_source.y.abs()
+    } else {
+        0.0
+    };
+    let projected_length = if vertical > f32::EPSILON {
+        height * horizontal_length / vertical
+    } else {
+        BUILDING_CAST_LENGTH_MAX
+    };
+    let projected_length = if projected_length.is_finite() {
+        projected_length.clamp(BUILDING_CAST_LENGTH_MIN, BUILDING_CAST_LENGTH_MAX)
+    } else {
+        BUILDING_CAST_LENGTH_MAX
+    };
+
+    let half = Vec2::new(
+        if collider_half.x.is_finite() {
+            collider_half.x.abs()
+        } else {
+            0.0
+        },
+        if collider_half.y.is_finite() {
+            collider_half.y.abs()
+        } else {
+            0.0
+        },
+    );
+    let perpendicular = Vec2::new(-cast_direction.y, cast_direction.x);
+    let card_width =
+        (2.0 * (half.x * perpendicular.x.abs() + half.y * perpendicular.y.abs())).max(0.01);
+    let center = cast_direction * (projected_length * 0.5);
+    let yaw = cast_direction.x.atan2(cast_direction.y);
+
+    Transform::from_xyz(center.x, BUILDING_CAST_SHADOW_HEIGHT, center.y)
+        .with_rotation(Quat::from_rotation_y(yaw))
+        .with_scale(Vec3::new(
+            card_width,
+            BUILDING_CAST_SHADOW_THICKNESS,
+            projected_length,
+        ))
+}
+
 const MAX_HOME_DECOR: usize = 9;
 
 /// Bevy's `Circle` primitive is authored in XY. This is the sole transform
@@ -1429,25 +1580,21 @@ fn ground_circle_transform(height: f32) -> Transform {
         .with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2))
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct TreeVisualPlan {
-    variant: usize,
-    yaw: f32,
-    scale: f32,
-}
-
-fn tree_visual_plan(seed: u32, ordinal: usize) -> TreeVisualPlan {
+/// Deterministic visual-only tree yaw. This hashes the layout identity and
+/// never advances the placement LCG.
+fn tree_visual_yaw(seed: u32, ordinal: usize) -> f32 {
     let hash = district_hash(
         seed as i32,
         ordinal as i32,
         0x7aee_51a1 ^ (ordinal as u32).wrapping_mul(0x9e37_79b1),
     );
-    let unit = |bits: u32| (bits & 0xffff) as f32 / u16::MAX as f32;
-    TreeVisualPlan {
-        variant: hash as usize % FOLIAGE_VARIANTS,
-        yaw: unit(hash >> 8) * std::f32::consts::TAU,
-        scale: TREE_VISUAL_SCALE_MIN
-            + unit(hash >> 16) * (TREE_VISUAL_SCALE_MAX - TREE_VISUAL_SCALE_MIN),
+    (hash & 0xffff) as f32 / u16::MAX as f32 * std::f32::consts::TAU
+}
+
+fn bench_cardinal_facing(layout_seed: u32, obstacle_ordinal: usize) -> CardinalRoadFacing {
+    CardinalRoadFacing {
+        quarter_turns: (district_hash(layout_seed as i32, obstacle_ordinal as i32, 0xb3ac_4a11) % 4)
+            as u8,
     }
 }
 
@@ -1481,23 +1628,12 @@ struct WorldMeshAssets {
     crosswalk_z: Handle<Mesh>,
     stop_line_x: Handle<Mesh>,
     stop_line_z: Handle<Mesh>,
-    trunk: Handle<Mesh>,
-    foliage: Handle<Mesh>,
-    tree_shadow: Handle<Mesh>,
-    pole: Handle<Mesh>,
-    arm: Handle<Mesh>,
-    lamp: Handle<Mesh>,
     coin: Handle<Mesh>,
     cone_body: Handle<Mesh>,
     cone_base: Handle<Mesh>,
     cone_shadow: Handle<Mesh>,
-    hydrant_body: Handle<Mesh>,
-    hydrant_dome: Handle<Mesh>,
-    hydrant_nub: Handle<Mesh>,
+    tree_shadow: Handle<Mesh>,
     hydrant_shadow: Handle<Mesh>,
-    bench_seat: Handle<Mesh>,
-    bench_leg: Handle<Mesh>,
-    bench_back: Handle<Mesh>,
     bench_shadow: Handle<Mesh>,
     hedge_box: Handle<Mesh>,
     hedge_shadow: Handle<Mesh>,
@@ -1506,19 +1642,14 @@ struct WorldMeshAssets {
 struct WorldMaterialAssets {
     line: Handle<StandardMaterial>,
     shadow: Handle<StandardMaterial>,
+    building_contact_shadow: Handle<StandardMaterial>,
+    #[allow(dead_code)] // Consumed only by WebGL spawning and native contract tests.
+    building_cast_shadow: Handle<StandardMaterial>,
     field_furrow: Handle<StandardMaterial>,
     farm_wood: Handle<StandardMaterial>,
-    trunk: Handle<StandardMaterial>,
-    building_body: [Handle<StandardMaterial>; 3],
-    building_roof: [Handle<StandardMaterial>; 3],
-    building_window: Handle<StandardMaterial>,
     road_marking: Handle<StandardMaterial>,
-    metal: Handle<StandardMaterial>,
-    lamp: Handle<StandardMaterial>,
     coin: Handle<StandardMaterial>,
     cone: Handle<StandardMaterial>,
-    hydrant: Handle<StandardMaterial>,
-    bench: Handle<StandardMaterial>,
     hedge: Handle<StandardMaterial>,
     pond_shore: Handle<StandardMaterial>,
     pond_reed: Handle<StandardMaterial>,
@@ -1569,23 +1700,12 @@ impl FromWorld for WorldAssets {
             crosswalk_z: a.add(Cuboid::new(0.20, 0.025, 5.4)),
             stop_line_x: a.add(Cuboid::new(5.4, 0.025, 0.12)),
             stop_line_z: a.add(Cuboid::new(0.12, 0.025, 5.4)),
-            trunk: a.add(Cylinder::new(0.18, 0.9)),
-            foliage: a.add(Sphere::new(0.75).mesh().uv(12, 8)),
-            tree_shadow: a.add(Circle::new(0.9)),
-            pole: a.add(Cylinder::new(0.07, POLE_HEIGHT)),
-            arm: a.add(Cuboid::new(ARM_LEN, ARM_THICK, ARM_THICK)),
-            lamp: a.add(Sphere::new(LAMP_RADIUS).mesh().uv(8, 6)),
             coin: a.add(Cylinder::new(0.3, 0.08)),
             cone_body: a.add(bevy::math::primitives::Cone::new(0.18, 0.4)),
             cone_base: a.add(Cuboid::new(0.4, 0.04, 0.4)),
             cone_shadow: a.add(Circle::new(0.3)),
-            hydrant_body: a.add(Cylinder::new(0.12, 0.3)),
-            hydrant_dome: a.add(Sphere::new(0.1).mesh().uv(10, 6)),
-            hydrant_nub: a.add(Cylinder::new(0.05, 0.12)),
+            tree_shadow: a.add(Circle::new(0.9)),
             hydrant_shadow: a.add(Circle::new(0.35)),
-            bench_seat: a.add(Cuboid::new(0.9, 0.1, 0.3)),
-            bench_leg: a.add(Cuboid::new(0.08, 0.45, 0.28)),
-            bench_back: a.add(Cuboid::new(0.9, 0.3, 0.06)),
             bench_shadow: a.add(Plane3d::default().mesh().size(1.1, 0.45)),
             hedge_box: a.add(Cuboid::new(1.2, 0.5, 0.4)),
             hedge_shadow: a.add(Plane3d::default().mesh().size(1.4, 0.55)),
@@ -1602,6 +1722,18 @@ impl FromWorld for WorldAssets {
                         alpha_mode: AlphaMode::Blend,
                         ..default()
                     }),
+                    building_contact_shadow: a.add(StandardMaterial {
+                        base_color: Color::srgba(0.0, 0.0, 0.0, 0.20),
+                        alpha_mode: AlphaMode::Blend,
+                        unlit: true,
+                        ..default()
+                    }),
+                    building_cast_shadow: a.add(StandardMaterial {
+                        base_color: Color::srgba(0.0, 0.0, 0.0, 0.18),
+                        alpha_mode: AlphaMode::Blend,
+                        unlit: true,
+                        ..default()
+                    }),
                     field_furrow: a.add(StandardMaterial {
                         base_color: Color::srgb(0.31, 0.23, 0.09),
                         perceptual_roughness: 1.0,
@@ -1612,65 +1744,9 @@ impl FromWorld for WorldAssets {
                         perceptual_roughness: 0.95,
                         ..default()
                     }),
-                    trunk: a.add(StandardMaterial {
-                        base_color: Color::srgb(0.34, 0.21, 0.11),
-                        perceptual_roughness: 0.9,
-                        ..default()
-                    }),
-                    building_body: [
-                        a.add(StandardMaterial {
-                            base_color: Color::srgb(0.92, 0.88, 0.78),
-                            perceptual_roughness: 0.8,
-                            ..default()
-                        }),
-                        a.add(StandardMaterial {
-                            base_color: Color::srgb(0.45, 0.55, 0.68),
-                            perceptual_roughness: 0.8,
-                            ..default()
-                        }),
-                        a.add(StandardMaterial {
-                            base_color: Color::srgb(0.65, 0.35, 0.28),
-                            perceptual_roughness: 0.8,
-                            ..default()
-                        }),
-                    ],
-                    building_roof: [
-                        a.add(StandardMaterial {
-                            base_color: Color::srgb(0.64, 0.62, 0.55),
-                            perceptual_roughness: 0.85,
-                            ..default()
-                        }),
-                        a.add(StandardMaterial {
-                            base_color: Color::srgb(0.32, 0.39, 0.48),
-                            perceptual_roughness: 0.85,
-                            ..default()
-                        }),
-                        a.add(StandardMaterial {
-                            base_color: Color::srgb(0.46, 0.25, 0.20),
-                            perceptual_roughness: 0.85,
-                            ..default()
-                        }),
-                    ],
-                    building_window: a.add(StandardMaterial {
-                        base_color: Color::srgb(0.045, 0.09, 0.13),
-                        metallic: 0.35,
-                        perceptual_roughness: 0.2,
-                        ..default()
-                    }),
                     road_marking: a.add(StandardMaterial {
                         base_color: palette::LANE_WHITE,
                         perceptual_roughness: 0.75,
-                        ..default()
-                    }),
-                    metal: a.add(StandardMaterial {
-                        base_color: Color::srgb(0.15, 0.15, 0.16),
-                        metallic: 0.8,
-                        perceptual_roughness: 0.4,
-                        ..default()
-                    }),
-                    lamp: a.add(StandardMaterial {
-                        base_color: Color::srgb(1.0, 0.85, 0.4),
-                        emissive: LinearRgba::new(1.5, 1.2, 0.5, 1.0),
                         ..default()
                     }),
                     coin: a.add(StandardMaterial {
@@ -1684,17 +1760,6 @@ impl FromWorld for WorldAssets {
                         base_color: Color::srgb(0.95, 0.45, 0.05),
                         perceptual_roughness: 0.7,
                         emissive: LinearRgba::rgb(0.25, 0.08, 0.0),
-                        ..default()
-                    }),
-                    hydrant: a.add(StandardMaterial {
-                        base_color: Color::srgb(0.85, 0.12, 0.1),
-                        perceptual_roughness: 0.6,
-                        emissive: LinearRgba::rgb(0.18, 0.02, 0.0),
-                        ..default()
-                    }),
-                    bench: a.add(StandardMaterial {
-                        base_color: Color::srgb(0.45, 0.28, 0.14),
-                        perceptual_roughness: 0.9,
                         ..default()
                     }),
                     hedge: a.add(StandardMaterial {
@@ -1778,6 +1843,7 @@ impl Plugin for WorldReviewPlugin {
         app.insert_resource(WorldReviewMode)
             .init_resource::<GridConfig>()
             .init_resource::<WorldAssets>()
+            .init_resource::<WorldSceneAssets>()
             .add_systems(Startup, spawn_review_world)
             // This marker means only that the ECS scene and metadata exist.
             // Pixel/render readiness is deliberately owned by the capture tool.
@@ -1791,6 +1857,7 @@ impl Plugin for WorldPlugin {
             .init_resource::<LastRecycledCell>()
             .init_resource::<PendingRecycle>()
             .init_resource::<WorldAssets>()
+            .init_resource::<WorldSceneAssets>()
             .add_systems(Startup, (spawn_production_sun, spawn_initial_grid))
             // Coin spin + pickup still live here (coins are environment now).
             .add_systems(
@@ -1821,16 +1888,31 @@ impl Plugin for WorldPlugin {
 /// Spawn the production world's only sun. It is Startup-only and persists;
 /// grid resets and streaming never create another directional light.
 fn spawn_production_sun(mut commands: Commands) {
-    commands.spawn((
+    #[allow(unused_mut, unused_variables)] // Used only by native cascade insertion below.
+    let mut sun = commands.spawn((
         DirectionalLight {
             color: Color::srgb(1.0, 0.94, 0.82),
-            illuminance: 25_000.0,
+            illuminance: 10_000.0,
             shadow_maps_enabled: SHADOWS,
+            contact_shadows_enabled: true,
             ..default()
         },
-        Transform::from_xyz(30.0, 25.0, 15.0).looking_at(Vec3::ZERO, Vec3::Y),
+        Transform::from_translation(PRODUCTION_SUN_SOURCE).looking_at(Vec3::ZERO, Vec3::Y),
         ProductionSun,
     ));
+
+    // Bound native cascades to the local gameplay view. WebGL2 keeps both its
+    // disabled shadow maps and Bevy's single-cascade-compatible default.
+    #[cfg(not(target_arch = "wasm32"))]
+    sun.insert(
+        CascadeShadowConfigBuilder {
+            num_cascades: 3,
+            first_cascade_far_bound: 12.0,
+            maximum_distance: 45.0,
+            ..default()
+        }
+        .build(),
+    );
 }
 
 /// Spawn the initial count×count grid of blocks centered on the origin (for
@@ -1841,9 +1923,17 @@ fn spawn_initial_grid(
     mut meshes: ResMut<Assets<Mesh>>,
     textures: Res<TextureAssets>,
     world_assets: Res<WorldAssets>,
+    scene_assets: Res<WorldSceneAssets>,
     mut last_recycled_cell: ResMut<LastRecycledCell>,
 ) {
-    spawn_grid_window(&mut commands, &cfg, &mut meshes, &textures, &world_assets);
+    spawn_grid_window(
+        &mut commands,
+        &cfg,
+        &mut meshes,
+        &textures,
+        &world_assets,
+        &scene_assets,
+    );
     last_recycled_cell.record_completed((0, 0));
 }
 
@@ -1862,6 +1952,7 @@ fn spawn_grid_window(
     meshes: &mut Assets<Mesh>,
     textures: &TextureAssets,
     world_assets: &WorldAssets,
+    scene_assets: &WorldSceneAssets,
 ) {
     let block = cfg.block;
     for (gx, gz) in desired_grid_coords((0, 0), cfg.count) {
@@ -1886,6 +1977,7 @@ fn spawn_grid_window(
             meshes,
             textures,
             world_assets,
+            scene_assets,
             root,
             gx,
             gz,
@@ -2051,12 +2143,14 @@ fn spawn_review_world(
     mut meshes: ResMut<Assets<Mesh>>,
     textures: Res<TextureAssets>,
     world_assets: Res<WorldAssets>,
+    scene_assets: Res<WorldSceneAssets>,
 ) {
     commands.spawn((
         DirectionalLight {
             color: Color::srgb(1.0, 0.94, 0.82),
             illuminance: 10_000.0,
             shadow_maps_enabled: false,
+            contact_shadows_enabled: true,
             ..default()
         },
         Transform::from_xyz(-100.0, 180.0, -80.0).looking_at(Vec3::ZERO, Vec3::Y),
@@ -2068,6 +2162,7 @@ fn spawn_review_world(
             &mut meshes,
             &textures,
             &world_assets,
+            &scene_assets,
             Vec3::new(
                 gx as f32 * REVIEW_BLOCK_SIZE,
                 0.0,
@@ -2090,6 +2185,7 @@ fn spawn_review_world(
             &mut meshes,
             &textures,
             &world_assets,
+            &scene_assets,
             Vec3::new(
                 (column as f32 - 4.5) * REVIEW_ATLAS_PITCH,
                 0.0,
@@ -2112,6 +2208,7 @@ fn spawn_review_world(
             &mut meshes,
             &textures,
             &world_assets,
+            &scene_assets,
             Vec3::new(
                 (column as f32 - 4.5) * REVIEW_ATLAS_PITCH,
                 0.0,
@@ -2134,6 +2231,7 @@ fn spawn_review_tile(
     meshes: &mut Assets<Mesh>,
     textures: &TextureAssets,
     world_assets: &WorldAssets,
+    scene_assets: &WorldSceneAssets,
     position: Vec3,
     gx: i32,
     gz: i32,
@@ -2167,6 +2265,7 @@ fn spawn_review_tile(
         meshes,
         textures,
         world_assets,
+        scene_assets,
         root,
         gx,
         gz,
@@ -2354,141 +2453,51 @@ fn publish_review_json(json: &str) {
     println!("ROADY_WORLD_REVIEW_READY=1");
 }
 
-// ---------------------------------------------------------------------------
-// Street-lamp geometry helpers (pure — no ECS, unit-testable in isolation)
-// ---------------------------------------------------------------------------
-//
-// The lamp post is a 3-part assembly parented to the `LampPost` block child:
-//   1. POLE  — vertical cylinder rooted at ground (y = 0), height POLE_HEIGHT.
-//   2. ARM   — horizontal bar attached to the pole top, extending ARM_LEN
-//              toward the nearest road edge.
-//   3. LAMP  — emissive sphere hanging from the arm's outer end.
-// These pure helpers compute the road-pointing direction and the three
-// local Transforms from the cached mesh dimensions, so the geometry
-// contract (pole roots at ground, arm connected + oriented toward the road,
-// lamp hanging at the arm end, no gaps / no floating parts) is unit-testable
-// without spinning up a Bevy ECS world. They are the single source of truth
-// for `populate_block`'s lamp-post spawning.
+/// A road-facing cardinal orientation. Quarter turns are measured about +Y
+/// from the imported assets' local front (`-Z`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CardinalRoadFacing {
+    quarter_turns: u8,
+}
 
-/// Cached pole mesh: `Cylinder::new(0.07, POLE_HEIGHT)` (radius 0.07, height
-/// `POLE_HEIGHT`) — a cylinder centered on its midpoint, so placing its
-/// center at `POLE_HEIGHT / 2` roots it at the ground (y = 0) with its top at
-/// `POLE_HEIGHT`. Only the height is needed for vertical placement, so the
-/// radius is not promoted to a named constant.
-const POLE_HEIGHT: f32 = 3.2;
+impl CardinalRoadFacing {
+    fn yaw(self) -> f32 {
+        self.quarter_turns as f32 * std::f32::consts::FRAC_PI_2
+    }
 
-/// Cached arm mesh: `Cuboid::new(ARM_LEN, ARM_THICK, ARM_THICK)` — a bar long
-/// along local +X and thin in Y/Z. It is rotated π/2 about Y only when the
-/// arm points along Z, so its long axis always tracks the road direction.
-const ARM_LEN: f32 = 0.8;
-const ARM_THICK: f32 = 0.06;
+    fn rotated_half_extents(self, fixed: Vec2) -> Vec2 {
+        if self.quarter_turns % 2 == 0 {
+            fixed
+        } else {
+            Vec2::new(fixed.y, fixed.x)
+        }
+    }
+}
 
-/// Cached lamp mesh: `Sphere::new(LAMP_RADIUS)`.
-const LAMP_RADIUS: f32 = 0.14;
-
-/// Unit horizontal direction the lamp arm should point, toward the nearest
-/// `Road` edge of the block from the post's local position `(lx, lz)` within
-/// a block of half-size `half`. Only edges that are actually roads are
-/// considered — a non-road edge is never chosen even if it is closer. Returns
-/// `(0.0, 0.0)` when no edge is a road; callers fall back to a default. The
-/// result is always axis-aligned with exactly one nonzero component of
-/// magnitude 1.0 (or both zero).
-fn lamp_arm_direction(
-    road_w: bool,
-    road_e: bool,
-    road_s: bool,
-    road_n: bool,
-    lx: f32,
-    lz: f32,
+/// Choose the nearest active road edge, with W/E/S/N tie order. If no edge is
+/// active, `fallback` deterministically selects one of the four cardinals.
+/// This is shared by imported building/prop integrations.
+pub(crate) fn cardinal_road_facing(
+    sock: [Edge; 4],
+    position: Vec2,
     half: f32,
-) -> (f32, f32) {
-    let mut best = (0.0_f32, 0.0_f32);
-    let mut best_dist = f32::MAX;
-    // Order W, E, S, N — the first (closest) declared road edge wins ties.
-    if road_w {
-        let d = (-half - lx).abs();
-        if d < best_dist {
-            best_dist = d;
-            best = (-1.0, 0.0);
+    fallback: u32,
+) -> CardinalRoadFacing {
+    let candidates = [
+        (W, (-half - position.x).abs(), 1),
+        (E, (half - position.x).abs(), 3),
+        (S, (-half - position.y).abs(), 0),
+        (N, (half - position.y).abs(), 2),
+    ];
+    let mut quarter_turns = (fallback % 4) as u8;
+    let mut best_distance = f32::MAX;
+    for (side, distance, turns) in candidates {
+        if sock[side] == Edge::Road && distance < best_distance {
+            best_distance = distance;
+            quarter_turns = turns;
         }
     }
-    if road_e {
-        let d = (half - lx).abs();
-        if d < best_dist {
-            best_dist = d;
-            best = (1.0, 0.0);
-        }
-    }
-    if road_s {
-        let d = (-half - lz).abs();
-        if d < best_dist {
-            best_dist = d;
-            best = (0.0, -1.0);
-        }
-    }
-    if road_n && (half - lz).abs() < best_dist {
-        best = (0.0, 1.0);
-    }
-    best
-}
-
-/// Local Transform of the pole: a vertical cylinder rooted at the ground.
-/// The mesh is centered on its midpoint, so center.y = `POLE_HEIGHT / 2`
-/// makes it span exactly `0 .. POLE_HEIGHT` (bottom at ground, top at
-/// `POLE_HEIGHT`). No horizontal offset — the pole sits at the post's XZ
-/// origin.
-fn lamp_pole_transform() -> Transform {
-    Transform::from_xyz(0.0, POLE_HEIGHT / 2.0, 0.0)
-}
-
-/// Local Transform of the arm: a horizontal bar connected to the pole top,
-/// extending `ARM_LEN` toward `(dir_x, dir_z)`. The arm's inner end sits at
-/// the pole (XZ origin) and its outer end at `(dir_x * ARM_LEN, _,
-/// dir_z * ARM_LEN)`. The mesh is long along local +X, so it is rotated π/2
-/// about Y only when the direction is along Z (`dir_x == 0`); the direction's
-/// sign is carried by the translation because the bar is symmetric about its
-/// center. The arm's Y is the pole top, so it overlaps the pole top —
-/// connected, no gap.
-fn lamp_arm_transform(dir_x: f32, dir_z: f32) -> Transform {
-    let rot = if dir_x == 0.0 {
-        Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)
-    } else {
-        Quat::IDENTITY
-    };
-    Transform::from_xyz(dir_x * ARM_LEN / 2.0, POLE_HEIGHT, dir_z * ARM_LEN / 2.0)
-        .with_rotation(rot)
-}
-
-/// Local Transform of the lamp (fixture/bulb): hangs from the arm's outer
-/// end, just below the arm so the bulb's top touches the arm's bottom —
-/// connected, not floating. Same XZ as the arm outer end.
-fn lamp_fixture_transform(dir_x: f32, dir_z: f32) -> Transform {
-    let arm_bottom = POLE_HEIGHT - ARM_THICK / 2.0;
-    Transform::from_xyz(dir_x * ARM_LEN, arm_bottom - LAMP_RADIUS, dir_z * ARM_LEN)
-}
-
-/// Half-extents of the arm's axis-aligned bounding box in the `LampPost`
-/// local frame, derived from the actual orientation in `lamp_arm_transform`.
-/// The long axis (`ARM_LEN`) ends up along the chosen direction and the thin
-/// axes (`ARM_THICK`) along the other two — i.e. the arm is oriented ALONG
-/// the road direction, not across it. Pure; used by the geometry tests to
-/// verify connection (inner end at the pole, outer end toward the road) and
-/// orientation (long along the road, thin across it).
-#[cfg(test)]
-fn lamp_arm_aabb_half_extents(dir_x: f32, dir_z: f32) -> Vec3 {
-    let rot = lamp_arm_transform(dir_x, dir_z).rotation;
-    // Local half-extents of the arm mesh (long along X, thin in Y/Z).
-    let h = Vec3::new(ARM_LEN / 2.0, ARM_THICK / 2.0, ARM_THICK / 2.0);
-    // World-space directions of the local X / Y / Z axes after rotation.
-    let bx = rot * Vec3::X;
-    let by = rot * Vec3::Y;
-    let bz = rot * Vec3::Z;
-    // AABB half-extents = sum over local axes of |world component| * local half.
-    Vec3::new(
-        bx.x.abs() * h.x + by.x.abs() * h.y + bz.x.abs() * h.z,
-        bx.y.abs() * h.x + by.y.abs() * h.y + bz.y.abs() * h.z,
-        bx.z.abs() * h.x + by.z.abs() * h.y + bz.z.abs() * h.z,
-    )
+    CardinalRoadFacing { quarter_turns }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -2500,12 +2509,29 @@ struct BuildingPlacement {
 
 const MAX_FAMILY_BUILDINGS: usize = 5;
 
-/// Family-specific urban massing. Positions are deliberately authored rather
-/// than sampled from topology: `try_place` remains the final authority and may
-/// omit a mass under road pressure. Small seeded height variation gives
-/// neighbouring members of one family variety without changing its silhouette.
-fn home_style(seed: u32, ordinal: usize) -> u8 {
-    ((district_hash(seed as i32, 0, 0x403e_57a1) as usize + ordinal) % 3) as u8
+/// Pure building-scene selection. It hashes only the family layout seed and
+/// authored ordinal, so it never consumes or reorders the placement LCG.
+fn building_asset_kind(
+    layout_seed: u32,
+    building_ordinal: usize,
+    authored_height: f32,
+) -> BuildingAssetKind {
+    if authored_height < 6.0 {
+        let hash = district_hash(
+            layout_seed as i32,
+            building_ordinal as i32,
+            0xb017_d1a5 ^ (building_ordinal as u32).wrapping_mul(0x9e37_79b1),
+        );
+        if hash & 1 == 0 {
+            BuildingAssetKind::Cottage
+        } else {
+            BuildingAssetKind::PorchedHouse
+        }
+    } else if authored_height < 10.0 {
+        BuildingAssetKind::Townhouse
+    } else {
+        BuildingAssetKind::Apartment
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2521,8 +2547,17 @@ struct HomeDecorPlacement {
     kind: HomeDecorKind,
 }
 
-/// Bounded visual-only yard dressing. Fixed candidates are seed-rotated; the
-/// shared placement path remains authoritative when roads/buildings occupy one.
+/// Select zero or one of the three authored roadside mailbox candidates.
+/// Exactly one quarter of hash buckets qualify, and this pure selector never
+/// consumes the placement LCG used by blocks or fences.
+fn residential_mailbox_candidate(seed: u32) -> Option<usize> {
+    let hash = district_hash(seed as i32, (seed >> 16) as i32, 0x4d41_11b0);
+    (hash & 3 == 0).then_some(((hash >> 2) % 3) as usize)
+}
+
+/// Bounded yard dressing. Fixed candidates are seed-rotated; mailbox
+/// frequency is applied separately so the complete picket-fence plan remains
+/// independent from mailbox selection.
 fn home_decor_layout(seed: u32) -> [HomeDecorPlacement; MAX_HOME_DECOR] {
     let mut s = seed ^ 0x51de_7a11;
     let yaw = if rand(&mut s) < 0.5 {
@@ -2955,6 +2990,7 @@ pub fn populate_block(
     _meshes: &mut Assets<Mesh>,
     textures: &TextureAssets,
     world_assets: &WorldAssets,
+    scene_assets: &WorldSceneAssets,
     root: Entity,
     gx: i32,
     gz: i32,
@@ -3219,33 +3255,14 @@ pub fn populate_block(
         // --- Shared obstacle assets ---
         let a = world_assets;
         let unit_box_mesh = a.meshes.unit_box.clone();
-        let trunk_mesh = a.meshes.trunk.clone();
-        let trunk_mat = a.materials.trunk.clone();
-        let foliage_mesh = a.meshes.foliage.clone();
-        let tree_shadow_mesh = a.meshes.tree_shadow.clone();
-        let body_mats = &a.materials.building_body;
-        let roof_mats = &a.materials.building_roof;
-        let window_mat = a.materials.building_window.clone();
-        let pole_mesh = a.meshes.pole.clone();
-        let arm_mesh = a.meshes.arm.clone();
-        let metal_mat = a.materials.metal.clone();
-        let lamp_mesh = a.meshes.lamp.clone();
-        let lamp_mat = a.materials.lamp.clone();
         let coin_mesh = a.meshes.coin.clone();
         let coin_mat = a.materials.coin.clone();
         let cone_body_mesh = a.meshes.cone_body.clone();
         let cone_base_mesh = a.meshes.cone_base.clone();
         let cone_mat = a.materials.cone.clone();
         let cone_shadow_mesh = a.meshes.cone_shadow.clone();
-        let hydrant_body_mesh = a.meshes.hydrant_body.clone();
-        let hydrant_dome_mesh = a.meshes.hydrant_dome.clone();
-        let hydrant_nub_mesh = a.meshes.hydrant_nub.clone();
-        let hydrant_mat = a.materials.hydrant.clone();
+        let tree_shadow_mesh = a.meshes.tree_shadow.clone();
         let hydrant_shadow_mesh = a.meshes.hydrant_shadow.clone();
-        let bench_seat_mesh = a.meshes.bench_seat.clone();
-        let bench_leg_mesh = a.meshes.bench_leg.clone();
-        let bench_back_mesh = a.meshes.bench_back.clone();
-        let bench_mat = a.materials.bench.clone();
         let bench_shadow_mesh = a.meshes.bench_shadow.clone();
         let hedge_box_mesh = a.meshes.hedge_box.clone();
         let hedge_mat = a.materials.hedge.clone();
@@ -3254,6 +3271,9 @@ pub fn populate_block(
         let hay_sprig_mesh = a.meshes.hay_sprig.clone();
         let farm_crate_mesh = a.meshes.farm_crate.clone();
         let farm_wood_mat = a.materials.farm_wood.clone();
+        let building_contact_shadow_mat = a.materials.building_contact_shadow.clone();
+        #[cfg(target_arch = "wasm32")]
+        let building_cast_shadow_mat = a.materials.building_cast_shadow.clone();
 
         // --- Deterministic per-block LCG for placement variety ---
         let mut s = seed;
@@ -3332,13 +3352,10 @@ pub fn populate_block(
                     p,
                     tx,
                     tz,
-                    &trunk_mesh,
-                    &trunk_mat,
-                    &foliage_mesh,
-                    &textures.foliage,
+                    &scene_assets.tree,
                     &tree_shadow_mesh,
                     &shadow_mat,
-                    tree_visual_plan(layout_seed, tree_ordinal),
+                    tree_visual_yaw(layout_seed, tree_ordinal),
                 );
             }
             // Meadow's open axis is marked by low, non-colliding path strips;
@@ -3470,13 +3487,10 @@ pub fn populate_block(
                     p,
                     tree_x,
                     tree_z,
-                    &trunk_mesh,
-                    &trunk_mat,
-                    &foliage_mesh,
-                    &textures.foliage,
+                    &scene_assets.tree,
                     &tree_shadow_mesh,
                     &shadow_mat,
-                    tree_visual_plan(layout_seed, tree_ordinal),
+                    tree_visual_yaw(layout_seed, tree_ordinal),
                 );
             }
         } else {
@@ -3489,14 +3503,21 @@ pub fn populate_block(
                 .take(building_count.min(policy.buildings))
                 .enumerate()
             {
-                let w = building.size.x;
-                let d = building.size.y;
                 let h = building.height;
+                let asset_kind = building_asset_kind(layout_seed, building_ordinal, h);
+                let dimensions = asset_kind.dimensions();
+                let facing = cardinal_road_facing(
+                    sock,
+                    building.position,
+                    half,
+                    district_hash(layout_seed as i32, building_ordinal as i32, 0xfa11_bacc),
+                );
+                let collider_half = facing.rotated_half_extents(dimensions.collider);
                 let Some((bx, bz)) = try_place(
                     &mut placed,
                     &mut family_seed,
-                    w / 2.0,
-                    d / 2.0,
+                    collider_half.x,
+                    collider_half.y,
                     building.position.x,
                     building.position.x,
                     building.position.y,
@@ -3506,93 +3527,51 @@ pub fn populate_block(
                 ) else {
                     continue;
                 };
-                let style = if visual_family == DistrictFamily::LowHomesYards {
-                    home_style(layout_seed, building_ordinal)
-                } else {
-                    family as u8 % 3
-                };
-                let ci = style as usize;
-                let window_rows = window_row_heights(h);
                 p.spawn((
                     Transform::from_xyz(bx, 0.0, bz),
                     Visibility::default(),
                     Collider {
-                        half_x: w / 2.0,
-                        half_z: d / 2.0,
+                        half_x: collider_half.x,
+                        half_z: collider_half.y,
                     },
                     Building,
-                    HouseStyle(style),
+                    BuildingVisualProfile {
+                        kind: asset_kind,
+                        height: dimensions.height,
+                    },
                 ))
                 .with_children(|bp| {
                     bp.spawn((
-                        Mesh3d(unit_box_mesh.clone()),
-                        MeshMaterial3d(body_mats[ci].clone()),
-                        Transform::from_xyz(0.0, h / 2.0, 0.0).with_scale(Vec3::new(w, h, d)),
+                        WorldAssetRoot(scene_assets.building(asset_kind)),
+                        Transform::from_rotation(Quat::from_rotation_y(facing.yaw())),
                     ));
-                    let roof_scale = match style {
-                        0 => Vec3::new(w * 1.12, 0.4, d * 1.12),
-                        1 => Vec3::new(w * 1.18, 0.55, d * 0.92),
-                        _ => Vec3::new(w * 0.92, 0.7, d * 1.18),
-                    };
+                    // Subtle contact AO hugs the audited, rotated collider
+                    // footprint and reuses the cached unit box/material.
                     bp.spawn((
                         Mesh3d(unit_box_mesh.clone()),
-                        MeshMaterial3d(roof_mats[ci].clone()),
-                        Transform::from_xyz(0.0, h + roof_scale.y * 0.5, 0.0)
-                            .with_scale(roof_scale),
-                        HouseRoof,
-                    ));
-                    if visual_family == DistrictFamily::LowHomesYards {
-                        let door_x = [-w * 0.23, 0.0, w * 0.23][ci];
-                        bp.spawn((
-                            Mesh3d(unit_box_mesh.clone()),
-                            MeshMaterial3d(roof_mats[(ci + 1) % 3].clone()),
-                            Transform::from_xyz(door_x, 1.0, -d / 2.0 - 0.055)
-                                .with_scale(Vec3::new(0.8, 2.0, 0.1)),
-                            HouseDoor,
-                        ));
-                        if style != 0 {
-                            bp.spawn((
-                                Mesh3d(unit_box_mesh.clone()),
-                                MeshMaterial3d(roof_mats[2].clone()),
-                                Transform::from_xyz(w * 0.27, h + 0.75, d * 0.18)
-                                    .with_scale(Vec3::new(0.55, 1.5, 0.55)),
-                                HouseChimney,
-                            ));
-                        }
-                    }
-                    bp.spawn((
-                        Mesh3d(unit_box_mesh.clone()),
-                        MeshMaterial3d(shadow_mat.clone()),
+                        MeshMaterial3d(building_contact_shadow_mat.clone()),
                         Transform::from_xyz(0.0, 0.025, 0.0).with_scale(Vec3::new(
-                            w * 1.4,
+                            collider_half.x * 2.0 * BUILDING_CONTACT_FOOTPRINT_SCALE,
                             0.025,
-                            d * 1.4,
+                            collider_half.y * 2.0 * BUILDING_CONTACT_FOOTPRINT_SCALE,
                         )),
+                        BuildingGroundShadow,
                     ));
-                    for &row_y in &window_rows {
-                        for z in [-d / 2.0 - 0.045, d / 2.0 + 0.045] {
-                            bp.spawn((
-                                Mesh3d(unit_box_mesh.clone()),
-                                MeshMaterial3d(window_mat.clone()),
-                                Transform::from_xyz(0.0, row_y, z).with_scale(Vec3::new(
-                                    w * 0.72,
-                                    0.55,
-                                    0.08,
-                                )),
-                            ));
-                        }
-                        for x in [-w / 2.0 - 0.045, w / 2.0 + 0.045] {
-                            bp.spawn((
-                                Mesh3d(unit_box_mesh.clone()),
-                                MeshMaterial3d(window_mat.clone()),
-                                Transform::from_xyz(x, row_y, 0.0).with_scale(Vec3::new(
-                                    0.08,
-                                    0.55,
-                                    d * 0.72,
-                                )),
-                            ));
-                        }
-                    }
+                    // Native builds use directional shadow maps. WebGL2 gets
+                    // exactly one classical projected card instead, with no
+                    // per-building mesh or material allocation.
+                    #[cfg(target_arch = "wasm32")]
+                    bp.spawn((
+                        Mesh3d(unit_box_mesh.clone()),
+                        MeshMaterial3d(building_cast_shadow_mat.clone()),
+                        building_cast_shadow_transform(
+                            collider_half,
+                            dimensions.height,
+                            PRODUCTION_SUN_SOURCE,
+                        ),
+                        BuildingGroundShadow,
+                        BuildingCastShadow,
+                    ));
                 });
             }
             spawn_family_strips(
@@ -3625,13 +3604,10 @@ pub fn populate_block(
                     p,
                     tx,
                     tz,
-                    &trunk_mesh,
-                    &trunk_mat,
-                    &foliage_mesh,
-                    &textures.foliage,
+                    &scene_assets.tree,
                     &tree_shadow_mesh,
                     &shadow_mat,
-                    tree_visual_plan(layout_seed, tree_ordinal),
+                    tree_visual_yaw(layout_seed, tree_ordinal),
                 );
             }
 
@@ -3651,13 +3627,12 @@ pub fn populate_block(
                 ) else {
                     continue;
                 };
-                // Arm points toward the nearest Road edge. Only actual road
-                // edges are considered; with no road, preserve the -X default.
-                let (mut dir_x, dir_z) =
-                    lamp_arm_direction(road_w, road_e, road_s, road_n, lx, lz, half);
-                if dir_x == 0.0 && dir_z == 0.0 {
-                    dir_x = -1.0;
-                }
+                let facing = cardinal_road_facing(
+                    sock,
+                    Vec2::new(lx, lz),
+                    half,
+                    district_hash(layout_seed as i32, lx.to_bits() as i32, lz.to_bits()),
+                );
                 p.spawn((
                     Transform::from_xyz(lx, 0.0, lz),
                     Visibility::default(),
@@ -3669,33 +3644,26 @@ pub fn populate_block(
                 ))
                 .with_children(|lp| {
                     lp.spawn((
-                        Mesh3d(pole_mesh.clone()),
-                        MeshMaterial3d(metal_mat.clone()),
-                        lamp_pole_transform(),
-                    ));
-                    lp.spawn((
-                        Mesh3d(arm_mesh.clone()),
-                        MeshMaterial3d(metal_mat.clone()),
-                        lamp_arm_transform(dir_x, dir_z),
-                    ));
-                    lp.spawn((
-                        Mesh3d(lamp_mesh.clone()),
-                        MeshMaterial3d(lamp_mat.clone()),
-                        lamp_fixture_transform(dir_x, dir_z),
+                        WorldAssetRoot(scene_assets.streetlamp.clone()),
+                        Transform::from_rotation(Quat::from_rotation_y(facing.yaw())),
                     ));
                 });
             }
 
             // --- Scatter 2-4 T12 obstacles (mix of four types, overlap-rejected) ---
             let n_obs = policy.obstacles;
-            for _ in 0..n_obs {
+            for obstacle_ordinal in 0..n_obs {
                 let kind = (rand(&mut s) * 4.0) as usize % 4; // 0=cone,1=hydrant,2=bench,3=hedge
-                // Footprint half-extents per kind (matches the Collider below).
+                // Bench orientation is a pure ordinal hash: it cannot perturb
+                // obstacle selection or the shared placement LCG.
+                let bench_facing = bench_cardinal_facing(layout_seed, obstacle_ordinal);
+                let bench_half = bench_facing.rotated_half_extents(Vec2::new(0.90, 0.33));
+                // Footprint half-extents exactly match the root Collider below.
                 let (half_x, half_z) = match kind {
                     0 => (0.2, 0.2),   // cone
                     1 => (0.25, 0.25), // hydrant
-                    2 => (0.5, 0.18),  // bench
-                    _ => (0.6, 0.25),  // hedge
+                    2 => (bench_half.x, bench_half.y),
+                    _ => (0.6, 0.25), // hedge
                 };
                 let Some((ox, oz)) = try_place(
                     &mut placed,
@@ -3747,7 +3715,6 @@ pub fn populate_block(
                         });
                     }
                     1 => {
-                        // Fire hydrant: short cylinder body, dome cap, two side nubs.
                         p.spawn((
                             Transform::from_xyz(ox, 0.0, oz),
                             Visibility::default(),
@@ -3758,32 +3725,9 @@ pub fn populate_block(
                             Hydrant,
                         ))
                         .with_children(|hp| {
-                            // Cylinder centered on midpoint: 0.3 tall -> y=0.15.
                             hp.spawn((
-                                Mesh3d(hydrant_body_mesh.clone()),
-                                MeshMaterial3d(hydrant_mat.clone()),
-                                Transform::from_xyz(0.0, 0.15, 0.0),
-                            ));
-                            // Dome caps the top (cylinder top at y=0.3).
-                            hp.spawn((
-                                Mesh3d(hydrant_dome_mesh.clone()),
-                                MeshMaterial3d(hydrant_mat.clone()),
-                                Transform::from_xyz(0.0, 0.34, 0.0),
-                            ));
-                            // Side nubs: rotate cylinder axis from Y to X.
-                            hp.spawn((
-                                Mesh3d(hydrant_nub_mesh.clone()),
-                                MeshMaterial3d(hydrant_mat.clone()),
-                                Transform::from_xyz(0.15, 0.18, 0.0).with_rotation(
-                                    Quat::from_rotation_z(std::f32::consts::FRAC_PI_2),
-                                ),
-                            ));
-                            hp.spawn((
-                                Mesh3d(hydrant_nub_mesh.clone()),
-                                MeshMaterial3d(hydrant_mat.clone()),
-                                Transform::from_xyz(-0.15, 0.18, 0.0).with_rotation(
-                                    Quat::from_rotation_z(std::f32::consts::FRAC_PI_2),
-                                ),
+                                WorldAssetRoot(scene_assets.hydrant.clone()),
+                                Transform::IDENTITY,
                             ));
                             hp.spawn((
                                 Mesh3d(hydrant_shadow_mesh.clone()),
@@ -3795,44 +3739,27 @@ pub fn populate_block(
                         });
                     }
                     2 => {
-                        // Bench: long seat on two legs + a backrest, wood/brown.
                         p.spawn((
                             Transform::from_xyz(ox, 0.0, oz),
                             Visibility::default(),
                             Collider {
-                                half_x: 0.5,
-                                half_z: 0.18,
+                                half_x: bench_half.x,
+                                half_z: bench_half.y,
                             },
                             Bench,
                         ))
                         .with_children(|bp| {
-                            // Seat at sitting height ~0.45.
                             bp.spawn((
-                                Mesh3d(bench_seat_mesh.clone()),
-                                MeshMaterial3d(bench_mat.clone()),
-                                Transform::from_xyz(0.0, 0.45, 0.0),
-                            ));
-                            // Two legs supporting the seat.
-                            bp.spawn((
-                                Mesh3d(bench_leg_mesh.clone()),
-                                MeshMaterial3d(bench_mat.clone()),
-                                Transform::from_xyz(0.35, 0.225, 0.0),
-                            ));
-                            bp.spawn((
-                                Mesh3d(bench_leg_mesh.clone()),
-                                MeshMaterial3d(bench_mat.clone()),
-                                Transform::from_xyz(-0.35, 0.225, 0.0),
-                            ));
-                            // Backrest along the back edge of the seat.
-                            bp.spawn((
-                                Mesh3d(bench_back_mesh.clone()),
-                                MeshMaterial3d(bench_mat.clone()),
-                                Transform::from_xyz(0.0, 0.65, -0.12),
+                                WorldAssetRoot(scene_assets.bench.clone()),
+                                Transform::from_rotation(Quat::from_rotation_y(bench_facing.yaw())),
                             ));
                             bp.spawn((
                                 Mesh3d(bench_shadow_mesh.clone()),
                                 MeshMaterial3d(shadow_mat.clone()),
-                                Transform::from_xyz(0.0, 0.05, 0.0),
+                                Transform::from_xyz(0.0, 0.05, 0.0)
+                                    .with_rotation(Quat::from_rotation_y(bench_facing.yaw()))
+                                    .with_scale(Vec3::new(1.8 / 1.1, 1.0, 0.65 / 0.45)),
+                                BenchShadow,
                             ));
                         });
                     }
@@ -3871,9 +3798,10 @@ pub fn populate_block(
                     p,
                     &placed,
                     layout_seed,
+                    sock,
                     &unit_box_mesh,
                     &farm_wood_mat,
-                    &metal_mat,
+                    &scene_assets.mailbox,
                 );
             }
         }
@@ -3944,18 +3872,14 @@ fn spawn_pond(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn spawn_tree_root(
     parent: &mut ChildSpawnerCommands,
     x: f32,
     z: f32,
-    trunk_mesh: &Handle<Mesh>,
-    trunk_mat: &Handle<StandardMaterial>,
-    foliage_mesh: &Handle<Mesh>,
-    foliage_mats: &[Handle<StandardMaterial>; FOLIAGE_VARIANTS],
+    scene: &Handle<WorldAsset>,
     shadow_mesh: &Handle<Mesh>,
     shadow_mat: &Handle<StandardMaterial>,
-    visual: TreeVisualPlan,
+    visual_yaw: f32,
 ) {
     parent
         .spawn((
@@ -3969,19 +3893,8 @@ fn spawn_tree_root(
         ))
         .with_children(|tree| {
             tree.spawn((
-                Mesh3d(trunk_mesh.clone()),
-                MeshMaterial3d(trunk_mat.clone()),
-                Transform::from_xyz(0.0, 0.45, 0.0),
-            ));
-            tree.spawn((
-                Mesh3d(foliage_mesh.clone()),
-                MeshMaterial3d(foliage_mats[visual.variant].clone()),
-                Transform::from_xyz(0.0, 1.35 * visual.scale, 0.0)
-                    .with_rotation(Quat::from_rotation_y(visual.yaw))
-                    .with_scale(Vec3::splat(visual.scale)),
-                TreeFoliage {
-                    variant: visual.variant,
-                },
+                WorldAssetRoot(scene.clone()),
+                Transform::from_rotation(Quat::from_rotation_y(visual_yaw)),
             ));
             tree.spawn((
                 Mesh3d(shadow_mesh.clone()),
@@ -4091,21 +4004,28 @@ fn spawn_home_decor(
     parent: &mut ChildSpawnerCommands,
     placed: &[[f32; 4]],
     seed: u32,
+    sock: [Edge; 4],
     mesh: &Handle<Mesh>,
     wood: &Handle<StandardMaterial>,
-    metal: &Handle<StandardMaterial>,
+    mailbox_scene: &Handle<WorldAsset>,
 ) {
-    let mut decor_seed = seed ^ 0xdeca_7e11;
+    let layout = home_decor_layout(seed);
+    // Fences are admitted first with their own local seed. Mailbox selection
+    // therefore cannot alter fence generation or the block placement LCG.
     let mut decor_placed = placed.to_vec();
-    for decor in home_decor_layout(seed) {
-        let (half_x, half_z) = match decor.kind {
-            HomeDecorKind::Mailbox => (0.25, 0.25),
-            HomeDecorKind::Fence if decor.rotation == 0.0 => (2.0, 0.12),
-            HomeDecorKind::Fence => (0.12, 2.0),
+    let mut fence_seed = seed ^ 0xdeca_7e11;
+    for decor in layout
+        .into_iter()
+        .filter(|decor| decor.kind == HomeDecorKind::Fence)
+    {
+        let (half_x, half_z) = if decor.rotation == 0.0 {
+            (2.0, 0.12)
+        } else {
+            (0.12, 2.0)
         };
         if try_place(
             &mut decor_placed,
-            &mut decor_seed,
+            &mut fence_seed,
             half_x,
             half_z,
             decor.position.x,
@@ -4115,47 +4035,65 @@ fn spawn_home_decor(
             0.15,
             1,
         )
-        .is_none()
+        .is_some()
         {
-            continue;
-        }
-        match decor.kind {
-            HomeDecorKind::Mailbox => {
-                parent
-                    .spawn((
-                        Transform::from_xyz(decor.position.x, 0.0, decor.position.y),
-                        Visibility::default(),
-                        Collider { half_x, half_z },
-                        Mailbox,
-                    ))
-                    .with_children(|mailbox| {
-                        mailbox.spawn((
-                            Mesh3d(mesh.clone()),
-                            MeshMaterial3d(metal.clone()),
-                            Transform::from_xyz(0.0, 0.55, 0.0)
-                                .with_scale(Vec3::new(0.09, 1.1, 0.09)),
-                        ));
-                        mailbox.spawn((
-                            Mesh3d(mesh.clone()),
-                            MeshMaterial3d(wood.clone()),
-                            Transform::from_xyz(0.0, 1.08, 0.0)
-                                .with_scale(Vec3::new(0.48, 0.36, 0.34)),
-                        ));
-                    });
-            }
-            HomeDecorKind::Fence => {
-                parent.spawn((
-                    Mesh3d(mesh.clone()),
-                    MeshMaterial3d(wood.clone()),
-                    Transform::from_xyz(decor.position.x, 0.45, decor.position.y)
-                        .with_rotation(Quat::from_rotation_y(decor.rotation))
-                        .with_scale(Vec3::new(4.0, 0.9, 0.12)),
-                    Collider { half_x, half_z },
-                    PicketFencePanel,
-                ));
-            }
+            parent.spawn((
+                Mesh3d(mesh.clone()),
+                MeshMaterial3d(wood.clone()),
+                Transform::from_xyz(decor.position.x, 0.45, decor.position.y)
+                    .with_rotation(Quat::from_rotation_y(decor.rotation))
+                    .with_scale(Vec3::new(4.0, 0.9, 0.12)),
+                Collider { half_x, half_z },
+                PicketFencePanel,
+            ));
         }
     }
+
+    let Some(selected) = residential_mailbox_candidate(seed) else {
+        return;
+    };
+    let Some(decor) = layout
+        .into_iter()
+        .filter(|decor| decor.kind == HomeDecorKind::Mailbox)
+        .nth(selected)
+    else {
+        return;
+    };
+    let facing = cardinal_road_facing(sock, decor.position, ROAD_BLOCK_SIZE * 0.5, seed);
+    let collider_half = facing.rotated_half_extents(Vec2::new(0.30, 0.24));
+    let mut mailbox_seed = seed ^ 0x4d41_1b0a;
+    if try_place(
+        &mut decor_placed,
+        &mut mailbox_seed,
+        collider_half.x,
+        collider_half.y,
+        decor.position.x,
+        decor.position.x,
+        decor.position.y,
+        decor.position.y,
+        0.15,
+        1,
+    )
+    .is_none()
+    {
+        return;
+    }
+    parent
+        .spawn((
+            Transform::from_xyz(decor.position.x, 0.0, decor.position.y),
+            Visibility::default(),
+            Collider {
+                half_x: collider_half.x,
+                half_z: collider_half.y,
+            },
+            Mailbox,
+        ))
+        .with_children(|mailbox| {
+            mailbox.spawn((
+                WorldAssetRoot(mailbox_scene.clone()),
+                Transform::from_rotation(Quat::from_rotation_y(facing.yaw())),
+            ));
+        });
 }
 
 /// Marker for collidable field dressing. `Collider` also keeps these props on
@@ -4382,6 +4320,7 @@ fn recycle_grid(
     mut meshes: ResMut<Assets<Mesh>>,
     textures: Res<TextureAssets>,
     world_assets: Res<WorldAssets>,
+    scene_assets: Res<WorldSceneAssets>,
     car: Query<&Transform, (With<Car>, Without<Block>)>,
     blocks: Query<(Entity, &Block, Option<&PendingBlock>)>,
     mut last_recycled_cell: ResMut<LastRecycledCell>,
@@ -4476,6 +4415,7 @@ fn recycle_grid(
                     &mut meshes,
                     &textures,
                     &world_assets,
+                    &scene_assets,
                     block_size,
                     gx,
                     gz,
@@ -4544,6 +4484,7 @@ fn spawn_block_at(
     meshes: &mut Assets<Mesh>,
     textures: &TextureAssets,
     world_assets: &WorldAssets,
+    scene_assets: &WorldSceneAssets,
     block: f32,
     gx: i32,
     gz: i32,
@@ -4569,6 +4510,7 @@ fn spawn_block_at(
         meshes,
         textures,
         world_assets,
+        scene_assets,
         root,
         gx,
         gz,
@@ -4591,6 +4533,7 @@ fn reset_grid(
     mut meshes: ResMut<Assets<Mesh>>,
     textures: Res<TextureAssets>,
     world_assets: Res<WorldAssets>,
+    scene_assets: Res<WorldSceneAssets>,
     blocks: Query<Entity, With<Block>>,
     round_active: Res<RoundActive>,
     mut last_recycled_cell: ResMut<LastRecycledCell>,
@@ -4608,7 +4551,14 @@ fn reset_grid(
     for e in &blocks {
         commands.entity(e).despawn();
     }
-    spawn_grid_window(&mut commands, &cfg, &mut meshes, &textures, &world_assets);
+    spawn_grid_window(
+        &mut commands,
+        &cfg,
+        &mut meshes,
+        &textures,
+        &world_assets,
+        &scene_assets,
+    );
     last_recycled_cell.record_completed((0, 0));
 }
 
@@ -4849,9 +4799,20 @@ mod tests {
         assert_eq!(suns.len(), 1);
         let (_, light, transform) = suns[0];
         assert_eq!(light.color, Color::srgb(1.0, 0.94, 0.82));
-        assert_eq!(light.illuminance, 25_000.0);
+        assert_eq!(light.illuminance, 10_000.0);
         assert_eq!(light.shadow_maps_enabled, SHADOWS);
+        assert!(light.contact_shadows_enabled);
         assert_eq!(transform.translation, Vec3::new(30.0, 25.0, 15.0));
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let mut cascades =
+                world.query_filtered::<&bevy::light::CascadeShadowConfig, With<ProductionSun>>();
+            let cascade = cascades.single(world).unwrap();
+            assert_eq!(cascade.bounds.len(), 3);
+            assert!((cascade.bounds[0] - 12.0).abs() < 1e-5);
+            assert!((cascade.bounds[2] - 45.0).abs() < 1e-5);
+        }
 
         let mut all_directional_lights = world.query::<&DirectionalLight>();
         assert_eq!(all_directional_lights.iter(world).count(), 1);
@@ -5150,12 +5111,17 @@ mod tests {
 
     fn recycle_test_app(count: i32) -> App {
         let mut app = App::new();
-        app.init_resource::<Assets<Mesh>>()
+        app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()));
+        app.init_asset::<WorldAsset>()
+            .init_resource::<Assets<Mesh>>()
             .init_resource::<Assets<Image>>()
             .init_resource::<Assets<StandardMaterial>>()
             .init_resource::<Assets<WaterMaterial>>()
             .init_resource::<TextureAssets>()
-            .init_resource::<WorldAssets>()
+            .init_resource::<WorldAssets>();
+        app.finish();
+        app.cleanup();
+        app.init_resource::<WorldSceneAssets>()
             .insert_resource(GridConfig {
                 block: ROAD_BLOCK_SIZE,
                 count,
@@ -5417,6 +5383,80 @@ mod tests {
             desired_grid_coords((0, 0), 3)
         );
         assert!(snapshot.values().all(|&count| count == 1));
+    }
+
+    #[test]
+    fn recycling_despawns_imported_scene_wrapper_descendants_recursively() {
+        let mut app = recycle_test_app(1);
+        let outgoing_root = {
+            let world = app.world_mut();
+            let mut blocks = world.query_filtered::<Entity, With<Block>>();
+            blocks.single(world).unwrap()
+        };
+        let prop_scenes = {
+            let scenes = app.world().resource::<WorldSceneAssets>();
+            [
+                scenes.tree.clone(),
+                scenes.streetlamp.clone(),
+                scenes.hydrant.clone(),
+                scenes.bench.clone(),
+                scenes.mailbox.clone(),
+            ]
+        };
+        let mut descendants = Vec::new();
+        for scene in prop_scenes {
+            let prop = app.world_mut().spawn(Transform::default()).id();
+            let wrapper = app
+                .world_mut()
+                .spawn((WorldAssetRoot(scene), Transform::default()))
+                .id();
+            let instantiated_descendant = app.world_mut().spawn(Transform::default()).id();
+            app.world_mut()
+                .entity_mut(wrapper)
+                .add_child(instantiated_descendant);
+            app.world_mut().entity_mut(prop).add_child(wrapper);
+            app.world_mut().entity_mut(outgoing_root).add_child(prop);
+            descendants.extend([prop, wrapper, instantiated_descendant]);
+        }
+
+        set_car_cell(&mut app, (1, 0));
+        run_until_recycled(&mut app, (1, 0), 20);
+        assert!(app.world().get_entity(outgoing_root).is_err());
+        assert!(
+            descendants
+                .into_iter()
+                .all(|entity| app.world().get_entity(entity).is_err())
+        );
+        assert_eq!(root_snapshot(&mut app), BTreeMap::from([((1, 0), 1)]));
+
+        // Fresh-round reset uses the same recursive block retirement contract.
+        let reset_root = {
+            let world = app.world_mut();
+            let mut blocks = world.query_filtered::<Entity, With<Block>>();
+            blocks.single(world).unwrap()
+        };
+        let reset_prop = app.world_mut().spawn(Transform::default()).id();
+        let reset_scene = app.world().resource::<WorldSceneAssets>().tree.clone();
+        let reset_wrapper = app
+            .world_mut()
+            .spawn((WorldAssetRoot(reset_scene), Transform::default()))
+            .id();
+        let reset_descendant = app.world_mut().spawn(Transform::default()).id();
+        app.world_mut()
+            .entity_mut(reset_wrapper)
+            .add_child(reset_descendant);
+        app.world_mut()
+            .entity_mut(reset_prop)
+            .add_child(reset_wrapper);
+        app.world_mut().entity_mut(reset_root).add_child(reset_prop);
+        app.insert_resource(RoundActive(false));
+        set_car_cell(&mut app, (0, 0));
+        app.add_systems(Update, reset_grid.after(recycle_grid));
+        app.update();
+        assert!(app.world().get_entity(reset_root).is_err());
+        assert!(app.world().get_entity(reset_prop).is_err());
+        assert!(app.world().get_entity(reset_wrapper).is_err());
+        assert!(app.world().get_entity(reset_descendant).is_err());
     }
 
     #[test]
@@ -5700,16 +5740,85 @@ mod tests {
     }
 
     #[test]
+    fn building_cast_shadow_projects_away_from_production_sun() {
+        let height = 6.15;
+        let transform =
+            building_cast_shadow_transform(Vec2::new(2.30, 2.20), height, PRODUCTION_SUN_SOURCE);
+        let expected_direction =
+            -Vec2::new(PRODUCTION_SUN_SOURCE.x, PRODUCTION_SUN_SOURCE.z).normalize();
+        let expected_length = (height
+            * Vec2::new(PRODUCTION_SUN_SOURCE.x, PRODUCTION_SUN_SOURCE.z).length()
+            / PRODUCTION_SUN_SOURCE.y)
+            .clamp(BUILDING_CAST_LENGTH_MIN, BUILDING_CAST_LENGTH_MAX);
+
+        assert!((transform.scale.z - expected_length).abs() <= 1e-6);
+        let center = Vec2::new(transform.translation.x, transform.translation.z);
+        assert!(center.normalize().abs_diff_eq(expected_direction, 1e-6));
+        assert!((center.length() - expected_length * 0.5).abs() <= 1e-6);
+        let card_direction = transform.rotation * Vec3::Z;
+        assert!(
+            Vec2::new(card_direction.x, card_direction.z).abs_diff_eq(expected_direction, 1e-6)
+        );
+        assert_eq!(transform.translation.y, BUILDING_CAST_SHADOW_HEIGHT);
+        assert_eq!(transform.scale.y, BUILDING_CAST_SHADOW_THICKNESS);
+    }
+
+    #[test]
+    fn building_cast_shadow_length_is_height_monotonic_and_clamped() {
+        let half = Vec2::new(2.4, 2.1);
+        let short = building_cast_shadow_transform(half, 1.0, PRODUCTION_SUN_SOURCE);
+        let medium = building_cast_shadow_transform(half, 5.0, PRODUCTION_SUN_SOURCE);
+        let tall = building_cast_shadow_transform(half, 20.0, PRODUCTION_SUN_SOURCE);
+
+        assert_eq!(short.scale.z, BUILDING_CAST_LENGTH_MIN);
+        assert!(medium.scale.z > short.scale.z);
+        assert!(tall.scale.z >= medium.scale.z);
+        assert_eq!(tall.scale.z, BUILDING_CAST_LENGTH_MAX);
+    }
+
+    #[test]
+    fn building_cast_shadow_transform_stays_finite_for_degenerate_inputs() {
+        for (half, height, sun) in [
+            (Vec2::ZERO, 0.0, Vec3::ZERO),
+            (Vec2::splat(f32::NAN), f32::NAN, Vec3::splat(f32::NAN)),
+            (Vec2::splat(f32::INFINITY), f32::INFINITY, Vec3::Y),
+        ] {
+            let transform = building_cast_shadow_transform(half, height, sun);
+            assert!(transform.translation.is_finite());
+            assert!(transform.scale.is_finite());
+            assert!(
+                transform
+                    .rotation
+                    .to_array()
+                    .into_iter()
+                    .all(f32::is_finite)
+            );
+            assert!(
+                (BUILDING_CAST_LENGTH_MIN..=BUILDING_CAST_LENGTH_MAX).contains(&transform.scale.z)
+            );
+            assert!(transform.scale.x > 0.0);
+        }
+    }
+
+    #[test]
+    fn building_cast_shadow_width_conservatively_covers_rotated_footprint() {
+        let direction = -Vec2::new(PRODUCTION_SUN_SOURCE.x, PRODUCTION_SUN_SOURCE.z).normalize();
+        let perpendicular = Vec2::new(-direction.y, direction.x);
+        for half in [Vec2::new(2.3, 2.2), Vec2::new(2.2, 2.3)] {
+            let transform = building_cast_shadow_transform(half, 6.15, PRODUCTION_SUN_SOURCE);
+            let required_width =
+                2.0 * (half.x * perpendicular.x.abs() + half.y * perpendicular.y.abs());
+            assert!(transform.scale.x + 1e-6 >= required_width);
+        }
+    }
+
+    #[test]
     fn organic_visual_plans_are_deterministic_bounded_and_collider_safe() {
-        let mut variants = BTreeSet::new();
         for seed in 0..256 {
             for ordinal in 0..12 {
-                let tree = tree_visual_plan(seed, ordinal);
-                assert_eq!(tree, tree_visual_plan(seed, ordinal));
-                assert!(tree.variant < FOLIAGE_VARIANTS);
-                assert!((0.0..=std::f32::consts::TAU).contains(&tree.yaw));
-                assert!((TREE_VISUAL_SCALE_MIN..=TREE_VISUAL_SCALE_MAX).contains(&tree.scale));
-                variants.insert(tree.variant);
+                let tree_yaw = tree_visual_yaw(seed, ordinal);
+                assert_eq!(tree_yaw, tree_visual_yaw(seed, ordinal));
+                assert!((0.0..=std::f32::consts::TAU).contains(&tree_yaw));
 
                 let bale = hay_bale_visual_scale(seed, ordinal);
                 assert_eq!(bale, hay_bale_visual_scale(seed, ordinal));
@@ -5724,33 +5833,127 @@ mod tests {
                 }
             }
         }
-        assert_eq!(variants.len(), FOLIAGE_VARIANTS);
     }
 
     #[test]
-    fn home_styles_and_visual_decor_plans_are_deterministic_and_bounded() {
-        for seed in 0..128 {
-            let styles = [
-                home_style(seed, 0),
-                home_style(seed, 1),
-                home_style(seed, 2),
-            ];
+    fn building_variants_are_deterministic_reachable_and_match_audit() {
+        use BuildingAssetKind::*;
+        let expected = [
+            (Cottage, Vec2::new(4.2, 4.0), 4.85, Vec2::new(2.10, 2.00)),
+            (
+                PorchedHouse,
+                Vec2::new(4.6, 4.4),
+                6.15,
+                Vec2::new(2.30, 2.20),
+            ),
+            (Townhouse, Vec2::new(4.7, 4.3), 7.25, Vec2::new(2.35, 2.15)),
+            (Apartment, Vec2::new(4.95, 4.8), 8.55, Vec2::new(2.48, 2.40)),
+        ];
+        for (kind, footprint, height, collider) in expected {
             assert_eq!(
-                styles,
-                [
-                    home_style(seed, 0),
-                    home_style(seed, 1),
-                    home_style(seed, 2)
-                ]
+                kind.dimensions(),
+                BuildingAssetDimensions {
+                    footprint,
+                    height,
+                    collider,
+                }
             );
-            assert_eq!(styles.into_iter().collect::<BTreeSet<_>>().len(), 3);
+        }
 
+        let mut reached = BTreeSet::new();
+        for seed in 0..256 {
+            for (ordinal, height) in [(0, 4.0), (1, 5.999), (2, 6.0), (3, 9.999), (4, 10.0)] {
+                let selected = building_asset_kind(seed, ordinal, height);
+                assert_eq!(selected, building_asset_kind(seed, ordinal, height));
+                reached.insert(selected);
+            }
+        }
+        assert_eq!(
+            reached,
+            [Cottage, PorchedHouse, Townhouse, Apartment].into()
+        );
+        assert!(matches!(building_asset_kind(7, 0, 6.0), Townhouse));
+        assert!(matches!(building_asset_kind(7, 0, 10.0), Apartment));
+    }
+
+    #[test]
+    fn building_selection_does_not_advance_placement_lcg() {
+        let mut actual = seed_for(11, -7);
+        let mut expected = actual;
+        for ordinal in 0..64 {
+            let _ = building_asset_kind(actual, ordinal, 4.0 + ordinal as f32 * 0.25);
+        }
+        assert_eq!(actual, expected);
+        assert_eq!(rand(&mut actual), rand(&mut expected));
+    }
+
+    #[test]
+    fn cardinal_facing_rotates_front_and_fixed_extents_exactly() {
+        let fixed = Vec2::new(2.35, 2.15);
+        let position = Vec2::new(17.0, -16.0);
+        for (side, expected_direction, expected_turns) in [
+            (W, Vec3::NEG_X, 1),
+            (E, Vec3::X, 3),
+            (S, Vec3::NEG_Z, 0),
+            (N, Vec3::Z, 2),
+        ] {
+            let mut sock = [Edge::None; 4];
+            sock[side] = Edge::Road;
+            let facing = cardinal_road_facing(sock, position, 20.0, 0);
+            assert_eq!(facing.quarter_turns, expected_turns);
+            let front = Quat::from_rotation_y(facing.yaw()) * Vec3::NEG_Z;
+            assert!(front.abs_diff_eq(expected_direction, 1e-6));
+            let expected_half = if expected_turns % 2 == 0 {
+                fixed
+            } else {
+                Vec2::new(fixed.y, fixed.x)
+            };
+            assert_eq!(facing.rotated_half_extents(fixed), expected_half);
+        }
+        assert_eq!(
+            cardinal_road_facing([Edge::None; 4], Vec2::ZERO, 20.0, 7).quarter_turns,
+            3
+        );
+    }
+
+    #[test]
+    fn home_visual_decor_plans_are_deterministic_and_bounded() {
+        let mut qualifying = 0;
+        for seed in 0..4096 {
             let decor = home_decor_layout(seed);
             assert_eq!(decor, home_decor_layout(seed));
             assert_eq!(decor.len(), MAX_HOME_DECOR);
+            assert_eq!(
+                decor
+                    .iter()
+                    .filter(|item| item.kind == HomeDecorKind::Mailbox)
+                    .count(),
+                3
+            );
+            assert_eq!(
+                decor
+                    .iter()
+                    .filter(|item| item.kind == HomeDecorKind::Fence)
+                    .count(),
+                6
+            );
+            let fences_before: Vec<_> = decor
+                .iter()
+                .filter(|item| item.kind == HomeDecorKind::Fence)
+                .copied()
+                .collect();
+            let mailbox = residential_mailbox_candidate(seed);
+            assert_eq!(mailbox, residential_mailbox_candidate(seed));
+            assert!(mailbox.is_none_or(|candidate| candidate < 3));
+            let fences_after: Vec<_> = home_decor_layout(seed)
+                .into_iter()
+                .filter(|item| item.kind == HomeDecorKind::Fence)
+                .collect();
+            assert_eq!(fences_after, fences_before);
+            qualifying += usize::from(mailbox.is_some());
             for item in decor {
                 let half = match item.kind {
-                    HomeDecorKind::Mailbox => Vec2::splat(0.25),
+                    HomeDecorKind::Mailbox => Vec2::new(0.30, 0.24),
                     HomeDecorKind::Fence if item.rotation == 0.0 => Vec2::new(2.0, 0.12),
                     HomeDecorKind::Fence => Vec2::new(0.12, 2.0),
                 };
@@ -5758,6 +5961,21 @@ mod tests {
                 assert!(item.position.y.abs() + half.y <= 20.0);
             }
         }
+        // Broad-range sanity bound around the intended one-block-in-four rate.
+        assert!(
+            (800..=1250).contains(&qualifying),
+            "qualifying={qualifying}"
+        );
+
+        // Pure mailbox selection and layout do not advance a caller's LCG.
+        let mut actual = seed_for(13, -8);
+        let mut expected = actual;
+        for seed in 0..256 {
+            let _ = residential_mailbox_candidate(seed);
+            let _ = home_decor_layout(seed);
+        }
+        assert_eq!(actual, expected);
+        assert_eq!(rand(&mut actual), rand(&mut expected));
     }
 
     #[test]
@@ -6036,100 +6254,371 @@ mod tests {
 
     fn review_test_app() -> App {
         let mut app = App::new();
-        app.init_resource::<Assets<Mesh>>()
-            .init_resource::<Assets<Image>>()
-            .init_resource::<Assets<StandardMaterial>>()
-            .init_resource::<Assets<WaterMaterial>>()
-            .init_resource::<TextureAssets>()
-            .insert_resource(WorldReviewMode)
-            .init_resource::<WorldAssets>()
-            .add_systems(Startup, spawn_review_world);
-        app.update();
-        app
-    }
-
-    #[test]
-    fn spawned_visual_integration_reuses_cached_assets_and_preserves_tree_cardinality() {
-        let mut app = review_test_app();
-        let foliage_ids = app
-            .world()
-            .resource::<TextureAssets>()
-            .foliage
-            .each_ref()
-            .map(|handle| handle.id());
-        let hay_ids = app
-            .world()
-            .resource::<TextureAssets>()
-            .hay
-            .each_ref()
-            .map(|handle| handle.id());
-        let world = app.world_mut();
-
-        let tree_count = {
-            let mut query = world.query::<&Tree>();
-            query.iter(world).count()
-        };
-        let foliage_count = {
-            let mut query = world.query::<(&TreeFoliage, &MeshMaterial3d<StandardMaterial>)>();
-            query
-                .iter(world)
-                .map(|(marker, material)| {
-                    assert!(marker.variant < FOLIAGE_VARIANTS);
-                    assert_eq!(material.0.id(), foliage_ids[marker.variant]);
-                })
-                .count()
-        };
-        let tree_shadow_count = {
-            let mut query = world.query::<(&TreeShadow, &GroundCircleShadow, &Transform)>();
-            query
-                .iter(world)
-                .map(|(_, _, transform)| {
-                    assert!((transform.rotation * Vec3::Z).abs_diff_eq(Vec3::Y, 1e-6));
-                })
-                .count()
-        };
-        assert_eq!(foliage_count, tree_count);
-        assert_eq!(tree_shadow_count, tree_count);
-
-        let hay_strip_count = {
-            let mut query = world.query::<(&HayFieldStrip, &MeshMaterial3d<StandardMaterial>)>();
-            query
-                .iter(world)
-                .map(|(_, material)| assert_eq!(material.0.id(), hay_ids[0]))
-                .count()
-        };
-        let bale_count = {
-            let mut query = world.query::<(&HayBaleVisual, &MeshMaterial3d<StandardMaterial>)>();
-            query
-                .iter(world)
-                .map(|(bale, material)| {
-                    assert_eq!(material.0.id(), hay_ids[1]);
-                    assert!((HAY_BALE_SCALE_MIN..=HAY_BALE_SCALE_MAX).contains(&bale.scale));
-                })
-                .count()
-        };
-        let sprig_count = {
-            let mut query = world.query::<(&HaySprig, &MeshMaterial3d<StandardMaterial>)>();
-            query
-                .iter(world)
-                .map(|(_, material)| assert_eq!(material.0.id(), hay_ids[0]))
-                .count()
-        };
-        assert!(hay_strip_count > 0);
-        assert!(bale_count > 0);
-        assert!(sprig_count > 0);
-    }
-
-    #[test]
-    fn review_grounds_reuse_shared_mesh_and_cached_presentation_materials() {
-        let mut app = App::new();
-        app.init_resource::<Assets<Mesh>>()
+        app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()));
+        app.init_asset::<WorldAsset>()
+            .init_resource::<Assets<Mesh>>()
             .init_resource::<Assets<Image>>()
             .init_resource::<Assets<StandardMaterial>>()
             .init_resource::<Assets<WaterMaterial>>()
             .init_resource::<TextureAssets>()
             .insert_resource(WorldReviewMode)
             .init_resource::<WorldAssets>();
+        app.finish();
+        app.cleanup();
+        app.init_resource::<WorldSceneAssets>()
+            .add_systems(Startup, spawn_review_world);
+        app.update();
+        app
+    }
+
+    #[test]
+    fn review_light_enables_contact_shadows_but_keeps_shadow_maps_disabled() {
+        let mut app = review_test_app();
+        let world = app.world_mut();
+        let lights: Vec<_> = world.query::<&DirectionalLight>().iter(world).collect();
+        assert_eq!(lights.len(), 1);
+        assert_eq!(lights[0].illuminance, 10_000.0);
+        assert!(!lights[0].shadow_maps_enabled);
+        assert!(lights[0].contact_shadows_enabled);
+    }
+
+    #[test]
+    fn imported_prop_roots_have_one_cached_wrapper_and_preserve_gameplay_contracts() {
+        let mut app = review_test_app();
+        let (tree_scene, lamp_scene, hydrant_scene, bench_scene, mailbox_scene) = {
+            let scenes = app.world().resource::<WorldSceneAssets>();
+            (
+                scenes.tree.id(),
+                scenes.streetlamp.id(),
+                scenes.hydrant.id(),
+                scenes.bench.id(),
+                scenes.mailbox.id(),
+            )
+        };
+        let world = app.world_mut();
+
+        let roots: Vec<_> = world
+            .query::<(Entity, &Collider, &Children)>()
+            .iter(world)
+            .filter_map(|(entity, collider, children)| {
+                let expected = if world.get::<Tree>(entity).is_some() {
+                    Some((tree_scene, "tree"))
+                } else if world.get::<LampPost>(entity).is_some() {
+                    Some((lamp_scene, "lamp"))
+                } else if world.get::<Hydrant>(entity).is_some() {
+                    Some((hydrant_scene, "hydrant"))
+                } else if world.get::<Bench>(entity).is_some() {
+                    Some((bench_scene, "bench"))
+                } else if world.get::<Mailbox>(entity).is_some() {
+                    Some((mailbox_scene, "mailbox"))
+                } else {
+                    None
+                }?;
+                Some((
+                    entity,
+                    Vec2::new(collider.half_x, collider.half_z),
+                    children.iter().collect::<Vec<_>>(),
+                    expected,
+                ))
+            })
+            .collect();
+        assert!(roots.iter().any(|root| root.3.1 == "tree"));
+        assert!(roots.iter().any(|root| root.3.1 == "lamp"));
+        assert!(roots.iter().any(|root| root.3.1 == "hydrant"));
+        assert!(roots.iter().any(|root| root.3.1 == "bench"));
+        assert!(roots.iter().any(|root| root.3.1 == "mailbox"));
+
+        for (entity, collider, children, (expected_scene, kind)) in roots {
+            assert_eq!(world.get::<Transform>(entity).unwrap().translation.y, 0.0);
+            let wrappers: Vec<_> = children
+                .iter()
+                .filter_map(|&child| {
+                    world
+                        .get::<WorldAssetRoot>(child)
+                        .map(|root| (child, root.0.id(), *world.get::<Transform>(child).unwrap()))
+                })
+                .collect();
+            assert_eq!(wrappers.len(), 1, "{kind} wrapper cardinality");
+            assert_eq!(wrappers[0].1, expected_scene, "{kind} cached handle");
+            assert_eq!(wrappers[0].2.translation, Vec3::ZERO);
+            assert_eq!(wrappers[0].2.scale, Vec3::ONE, "{kind} must not be scaled");
+            assert!(world.get::<Collider>(wrappers[0].0).is_none());
+
+            match kind {
+                "tree" => {
+                    assert_eq!(collider, Vec2::splat(0.3));
+                    assert_eq!(
+                        children
+                            .iter()
+                            .filter(|&&child| world.get::<TreeShadow>(child).is_some())
+                            .count(),
+                        1
+                    );
+                }
+                "lamp" => {
+                    assert_eq!(collider, Vec2::splat(0.15));
+                    assert_eq!(children.len(), 1);
+                }
+                "hydrant" => {
+                    assert_eq!(collider, Vec2::splat(0.25));
+                    assert_eq!(
+                        children
+                            .iter()
+                            .filter(|&&child| world.get::<HydrantShadow>(child).is_some())
+                            .count(),
+                        1
+                    );
+                }
+                "bench" => {
+                    let front = wrappers[0].2.rotation * Vec3::NEG_Z;
+                    let expected = if front.z.abs() > 0.5 {
+                        Vec2::new(0.90, 0.33)
+                    } else {
+                        Vec2::new(0.33, 0.90)
+                    };
+                    assert_eq!(collider, expected);
+                    let shadow = children
+                        .iter()
+                        .find(|&&child| world.get::<BenchShadow>(child).is_some())
+                        .copied()
+                        .unwrap();
+                    let shadow_front =
+                        world.get::<Transform>(shadow).unwrap().rotation * Vec3::NEG_Z;
+                    assert!(shadow_front.abs_diff_eq(front, 1e-6));
+                }
+                "mailbox" => {
+                    let front = wrappers[0].2.rotation * Vec3::NEG_Z;
+                    let expected = if front.z.abs() > 0.5 {
+                        Vec2::new(0.30, 0.24)
+                    } else {
+                        Vec2::new(0.24, 0.30)
+                    };
+                    assert_eq!(collider, expected);
+                    assert_eq!(children.len(), 1);
+                }
+                _ => unreachable!(),
+            }
+
+            // Procedural prop geometry is gone. Remaining Mesh3d children are
+            // only the explicitly retained ground-shadow wrappers.
+            for &child in &children {
+                if world.get::<Mesh3d>(child).is_some() {
+                    assert!(
+                        world.get::<TreeShadow>(child).is_some()
+                            || world.get::<HydrantShadow>(child).is_some()
+                            || world.get::<BenchShadow>(child).is_some()
+                    );
+                }
+            }
+        }
+
+        let mut real_lights = world.query::<EntityRef>();
+        assert!(
+            real_lights.iter(world).all(|entity| {
+                !entity.contains::<PointLight>() && !entity.contains::<SpotLight>()
+            })
+        );
+    }
+
+    #[test]
+    fn spawned_buildings_keep_procedural_roots_and_one_cached_scene_visual() {
+        let mut app = review_test_app();
+        let cached_buildings: BTreeSet<_> = {
+            let scenes = app.world().resource::<WorldSceneAssets>();
+            [
+                scenes.cottage.id(),
+                scenes.porched_house.id(),
+                scenes.townhouse.id(),
+                scenes.apartment.id(),
+            ]
+            .into_iter()
+            .collect()
+        };
+        assert_eq!(cached_buildings.len(), 4);
+
+        let (unit_box_id, contact_material_id, cast_material_id) = {
+            let assets = app.world().resource::<WorldAssets>();
+            (
+                assets.meshes.unit_box.id(),
+                assets.materials.building_contact_shadow.id(),
+                assets.materials.building_cast_shadow.id(),
+            )
+        };
+        let world = app.world_mut();
+        let buildings: Vec<_> = world
+            .query_filtered::<(
+                Entity,
+                &Transform,
+                &Collider,
+                &BuildingVisualProfile,
+                &ChildOf,
+                &Children,
+            ), With<Building>>()
+            .iter(world)
+            .map(|(entity, transform, collider, profile, parent, children)| {
+                (
+                    entity,
+                    *transform,
+                    Vec2::new(collider.half_x, collider.half_z),
+                    *profile,
+                    parent.parent(),
+                    children.iter().collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+        assert!(!buildings.is_empty());
+
+        for (entity, root_transform, collider, profile, block_entity, children) in buildings {
+            let block = world
+                .get::<Block>(block_entity)
+                .expect("every building must be a direct block descendant");
+            assert_eq!(root_transform.translation.y, 0.0);
+            assert_eq!(root_transform.rotation, Quat::IDENTITY);
+            assert_eq!(root_transform.scale, Vec3::ONE);
+            assert_eq!(world.get::<Collider>(entity).is_some(), true);
+
+            let dimensions = profile.kind.dimensions();
+            assert_eq!(profile.height, dimensions.height);
+            assert!(
+                collider == dimensions.collider
+                    || collider == Vec2::new(dimensions.collider.y, dimensions.collider.x)
+            );
+            let center = Vec2::new(root_transform.translation.x, root_transform.translation.z);
+            assert!(center.x.abs() + collider.x <= ROAD_BLOCK_SIZE / 2.0);
+            assert!(center.y.abs() + collider.y <= ROAD_BLOCK_SIZE / 2.0);
+            assert!(!footprint_overlaps_road(
+                sockets(block.kind),
+                center,
+                collider,
+                0.0
+            ));
+
+            let scene_children: Vec<_> = children
+                .iter()
+                .filter_map(|&child| {
+                    world.get::<WorldAssetRoot>(child).map(|scene| {
+                        (
+                            scene.0.id(),
+                            world.get::<Transform>(child).copied().unwrap(),
+                        )
+                    })
+                })
+                .collect();
+            assert_eq!(scene_children.len(), 1);
+            let (scene_id, visual_transform) = scene_children[0];
+            assert!(cached_buildings.contains(&scene_id));
+            assert_eq!(visual_transform.translation, Vec3::ZERO);
+            assert_eq!(visual_transform.scale, Vec3::ONE);
+            let front = visual_transform.rotation * Vec3::NEG_Z;
+            assert!(
+                [Vec3::NEG_X, Vec3::X, Vec3::NEG_Z, Vec3::Z]
+                    .into_iter()
+                    .any(|cardinal| front.abs_diff_eq(cardinal, 1e-6))
+            );
+
+            // Every platform has exactly one compact contact card; WebGL2,
+            // where real shadow maps are disabled, adds exactly one projected
+            // cast card. Both reuse the unit box and cached materials.
+            let ground_shadows: Vec<_> = children
+                .iter()
+                .copied()
+                .filter(|&child| world.get::<BuildingGroundShadow>(child).is_some())
+                .collect();
+            let cast_shadows: Vec<_> = ground_shadows
+                .iter()
+                .copied()
+                .filter(|&child| world.get::<BuildingCastShadow>(child).is_some())
+                .collect();
+            assert_eq!(
+                ground_shadows.len(),
+                1 + usize::from(cfg!(target_arch = "wasm32"))
+            );
+            assert_eq!(
+                cast_shadows.len(),
+                usize::from(cfg!(target_arch = "wasm32"))
+            );
+
+            let contact = ground_shadows
+                .iter()
+                .copied()
+                .find(|&child| world.get::<BuildingCastShadow>(child).is_none())
+                .expect("one contact shadow per building");
+            let contact_transform = world.get::<Transform>(contact).unwrap();
+            assert!(contact_transform.scale.abs_diff_eq(
+                Vec3::new(
+                    collider.x * 2.0 * BUILDING_CONTACT_FOOTPRINT_SCALE,
+                    0.025,
+                    collider.y * 2.0 * BUILDING_CONTACT_FOOTPRINT_SCALE,
+                ),
+                1e-6,
+            ));
+            assert_eq!(world.get::<Mesh3d>(contact).unwrap().0.id(), unit_box_id);
+            assert_eq!(
+                world
+                    .get::<MeshMaterial3d<StandardMaterial>>(contact)
+                    .unwrap()
+                    .0
+                    .id(),
+                contact_material_id
+            );
+            for cast in cast_shadows {
+                assert_eq!(world.get::<Mesh3d>(cast).unwrap().0.id(), unit_box_id);
+                assert_eq!(
+                    world
+                        .get::<MeshMaterial3d<StandardMaterial>>(cast)
+                        .unwrap()
+                        .0
+                        .id(),
+                    cast_material_id
+                );
+            }
+
+            // Imported visual geometry arrives through WorldAssetRoot rather
+            // than old elevated body/roof/window procedural children.
+            for &child in &children {
+                assert!(world.get::<Collider>(child).is_none());
+                if world.get::<Mesh3d>(child).is_some() {
+                    assert!(world.get::<Transform>(child).unwrap().translation.y < 0.1);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn world_scene_cache_contains_nine_distinct_reusable_handles() {
+        let app = review_test_app();
+        let scenes = app.world().resource::<WorldSceneAssets>();
+        let ids: BTreeSet<_> = [
+            scenes.cottage.id(),
+            scenes.porched_house.id(),
+            scenes.townhouse.id(),
+            scenes.apartment.id(),
+            scenes.tree.id(),
+            scenes.streetlamp.id(),
+            scenes.bench.id(),
+            scenes.mailbox.id(),
+            scenes.hydrant.id(),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(ids.len(), 9);
+    }
+
+    #[test]
+    fn review_grounds_reuse_shared_mesh_and_cached_presentation_materials() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()));
+        app.init_asset::<WorldAsset>()
+            .init_resource::<Assets<Mesh>>()
+            .init_resource::<Assets<Image>>()
+            .init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<Assets<WaterMaterial>>()
+            .init_resource::<TextureAssets>()
+            .insert_resource(WorldReviewMode)
+            .init_resource::<WorldAssets>();
+        app.finish();
+        app.cleanup();
+        app.init_resource::<WorldSceneAssets>();
         let meshes_before = app.world().resource::<Assets<Mesh>>().len();
         let materials_before = app.world().resource::<Assets<StandardMaterial>>().len();
         app.add_systems(Startup, spawn_review_world);
@@ -6193,8 +6682,8 @@ mod tests {
         let mut mailbox_count = 0;
         for collider in mailboxes.iter(world) {
             mailbox_count += 1;
-            assert!((collider.half_x - 0.25).abs() < 1e-6);
-            assert!((collider.half_z - 0.25).abs() < 1e-6);
+            let extents = Vec2::new(collider.half_x, collider.half_z);
+            assert!(extents == Vec2::new(0.30, 0.24) || extents == Vec2::new(0.24, 0.30));
         }
         assert!(mailbox_count > 0);
 
@@ -6209,23 +6698,6 @@ mod tests {
             assert!(horizontal || vertical);
         }
         assert!(fence_count > 0);
-
-        macro_rules! assert_visual_child {
-            ($marker:ty) => {{
-                let mut all = world.query_filtered::<Entity, With<$marker>>();
-                assert!(
-                    all.iter(world).count() > 0,
-                    "missing {}",
-                    stringify!($marker)
-                );
-                let mut colliding =
-                    world.query_filtered::<Entity, (With<$marker>, With<Collider>)>();
-                assert_eq!(colliding.iter(world).count(), 0);
-            }};
-        }
-        assert_visual_child!(HouseDoor);
-        assert_visual_child!(HouseRoof);
-        assert_visual_child!(HouseChimney);
     }
 
     #[test]
@@ -6251,7 +6723,9 @@ mod tests {
     #[test]
     fn normal_world_plugin_has_no_review_mode_or_review_archetypes() {
         let mut app = App::new();
-        app.init_resource::<Assets<Mesh>>()
+        app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()));
+        app.init_asset::<WorldAsset>()
+            .init_resource::<Assets<Mesh>>()
             .init_resource::<Assets<Image>>()
             .init_resource::<Assets<StandardMaterial>>()
             .init_resource::<Assets<WaterMaterial>>()
@@ -6338,6 +6812,11 @@ mod tests {
         assert!(first.blocks.iter().any(|block| block.counts.markings > 0));
         assert!(first.blocks.iter().any(|block| block.counts.buildings > 0));
         assert!(first.blocks.iter().any(|block| block.counts.trees > 0));
+        assert!(first.blocks.iter().all(|block| {
+            block.counts.trees <= ORCHARD_TREE_COUNT
+                && block.counts.lamps <= 2
+                && block.counts.obstacles <= 4
+        }));
         assert!(first.blocks.iter().any(|block| block.counts.farm_props > 0));
         let water_atlas: Vec<_> = family_atlas
             .iter()
@@ -6760,29 +7239,6 @@ mod tests {
         }
     }
 
-    /// Facade strips stay bounded within the usable wall height and are
-    /// capped at three rows, including at the full generated 4–9u range.
-    #[test]
-    fn window_rows_have_sensible_count_and_vertical_bounds() {
-        assert!(window_row_heights(f32::NAN).is_empty());
-        assert!(window_row_heights(1.7).is_empty());
-        assert_eq!(window_row_heights(4.0), vec![0.9, 3.1]);
-        assert_eq!(window_row_heights(9.0), vec![0.9, 4.5, 8.1]);
-
-        for step in 0..=100 {
-            let height = 4.0 + step as f32 * 0.05;
-            let rows = window_row_heights(height);
-            assert!((2..=MAX_WINDOW_ROWS).contains(&rows.len()));
-            assert!(rows.windows(2).all(|pair| pair[0] < pair[1]));
-            assert!(
-                rows.iter().all(|&row| {
-                    row >= WINDOW_ROW_BOTTOM && row <= height - WINDOW_ROW_TOP_MARGIN
-                })
-            );
-            assert_eq!(rows, window_row_heights(height));
-        }
-    }
-
     /// `seed_for` is deterministic: the same (gx, gz) always yields the same
     /// seed (stable across recycles — a block re-spawned at the same coords
     /// reproduces its layout). Pure function of (gx, gz).
@@ -7058,262 +7514,39 @@ mod tests {
         });
     }
 
-    // --- Street-lamp geometry (pure helpers; no ECS hierarchy) ---
-
-    /// The arm points toward the nearest Road edge, and only Road edges are
-    /// candidates — a closer non-road edge is never chosen.
     #[test]
-    fn lamp_arm_direction_picks_nearest_road_edge() {
-        // All four roads: the closest edge by distance wins.
-        assert_eq!(
-            lamp_arm_direction(true, true, true, true, -18.0, 0.0, 20.0),
-            (-1.0, 0.0),
-            "near W -> W"
-        );
-        assert_eq!(
-            lamp_arm_direction(true, true, true, true, 18.0, 0.0, 20.0),
-            (1.0, 0.0),
-            "near E -> E"
-        );
-        assert_eq!(
-            lamp_arm_direction(true, true, true, true, 0.0, -18.0, 20.0),
-            (0.0, -1.0),
-            "near S -> S"
-        );
-        assert_eq!(
-            lamp_arm_direction(true, true, true, true, 0.0, 18.0, 20.0),
-            (0.0, 1.0),
-            "near N -> N"
-        );
-    }
-
-    #[test]
-    fn lamp_arm_direction_ignores_non_road_edges() {
-        // Only S is a road; even though the post is closer to the W edge
-        // (no road), the arm must point S — never toward a non-road edge.
-        assert_eq!(
-            lamp_arm_direction(false, false, true, false, -18.0, 5.0, 20.0),
-            (0.0, -1.0)
-        );
-        // Only E is a road; post closer to W (no road) -> still E.
-        assert_eq!(
-            lamp_arm_direction(false, true, false, false, -18.0, 0.0, 20.0),
-            (1.0, 0.0)
-        );
-        // Only N is a road; post closer to S (no road) -> still N.
-        assert_eq!(
-            lamp_arm_direction(false, false, false, true, 5.0, -18.0, 20.0),
-            (0.0, 1.0)
-        );
-    }
-
-    #[test]
-    fn lamp_arm_direction_zero_when_no_road() {
-        assert_eq!(
-            lamp_arm_direction(false, false, false, false, 0.0, 0.0, 20.0),
-            (0.0, 0.0)
-        );
-        assert_eq!(
-            lamp_arm_direction(false, false, false, false, -19.0, 19.0, 20.0),
-            (0.0, 0.0)
-        );
-    }
-
-    #[test]
-    fn lamp_arm_direction_is_axis_aligned_unit_vector() {
-        // Across a grid of post positions with all roads present, the
-        // direction is always a single axis-aligned unit vector.
-        for lx in -19..=19 {
-            for lz in -19..=19 {
-                let (dx, dz) =
-                    lamp_arm_direction(true, true, true, true, lx as f32, lz as f32, 20.0);
-                let mag = (dx * dx + dz * dz).sqrt();
-                assert!(
-                    (mag - 1.0).abs() < 1e-6,
-                    "non-unit direction ({dx},{dz}) at ({lx},{lz})"
-                );
-                assert!(
-                    (dx == 0.0) != (dz == 0.0),
-                    "non-axis-aligned direction ({dx},{dz}) at ({lx},{lz})"
-                );
-                assert!(dx.abs() <= 1.0 && dz.abs() <= 1.0);
+    fn bench_orientation_is_deterministic_cardinal_and_does_not_advance_lcg() {
+        let mut turns = BTreeSet::new();
+        let mut actual = seed_for(4, -7);
+        let mut expected = actual;
+        for seed in 0..256 {
+            for ordinal in 0..4 {
+                let facing = bench_cardinal_facing(seed, ordinal);
+                assert_eq!(facing, bench_cardinal_facing(seed, ordinal));
+                assert!(facing.quarter_turns < 4);
+                turns.insert(facing.quarter_turns);
             }
         }
+        assert_eq!(turns, BTreeSet::from([0, 1, 2, 3]));
+        assert_eq!(actual, expected);
+        assert_eq!(rand(&mut actual), rand(&mut expected));
     }
 
     #[test]
-    fn lamp_pole_roots_at_ground_and_spans_full_height() {
-        let t = lamp_pole_transform();
-        // Cylinder mesh is centered on its midpoint, so center.y = half the
-        // height means it spans exactly 0 .. POLE_HEIGHT.
-        assert_eq!(t.translation.y, POLE_HEIGHT / 2.0);
-        assert_eq!(
-            t.translation.y - POLE_HEIGHT / 2.0,
-            0.0,
-            "pole bottom at ground"
-        );
-        assert_eq!(t.translation.y + POLE_HEIGHT / 2.0, POLE_HEIGHT, "pole top");
-        // Pole sits at the post's XZ origin (no horizontal offset).
-        assert_eq!(t.translation.x, 0.0);
-        assert_eq!(t.translation.z, 0.0);
-    }
-
-    #[test]
-    fn lamp_arm_is_connected_to_pole_and_oriented_along_road() {
-        for (dx, dz, label) in [
-            (-1.0_f32, 0.0_f32, "W"),
-            (1.0, 0.0, "E"),
-            (0.0, -1.0, "S"),
-            (0.0, 1.0, "N"),
+    fn cardinal_road_facing_points_imported_lamp_front_at_nearest_active_road() {
+        for (side, position, expected) in [
+            (W, Vec2::new(-18.0, 0.0), Vec3::NEG_X),
+            (E, Vec2::new(18.0, 0.0), Vec3::X),
+            (S, Vec2::new(0.0, -18.0), Vec3::NEG_Z),
+            (N, Vec2::new(0.0, 18.0), Vec3::Z),
         ] {
-            let t = lamp_arm_transform(dx, dz);
-            let he = lamp_arm_aabb_half_extents(dx, dz);
-
-            // Arm Y is the pole top -> arm overlaps the pole top (connected).
-            assert_eq!(t.translation.y, POLE_HEIGHT, "arm Y for {label}");
-            let arm_bottom = t.translation.y - ARM_THICK / 2.0;
-            let arm_top = t.translation.y + ARM_THICK / 2.0;
+            let mut sock = [Edge::None; 4];
+            sock[side] = Edge::Road;
+            let facing = cardinal_road_facing(sock, position, 20.0, 0);
             assert!(
-                arm_bottom <= POLE_HEIGHT && POLE_HEIGHT <= arm_top,
-                "arm must overlap pole top for {label}"
-            );
-
-            // Along the road direction: inner end at the pole (0), outer end
-            // at dir * ARM_LEN. Perpendicular: thin (ARM_THICK), not long.
-            let (along_center, along_half, perp_half) = if dx != 0.0 {
-                (t.translation.x, he.x, he.z)
-            } else {
-                (t.translation.z, he.z, he.x)
-            };
-            let end_a = along_center - along_half;
-            let end_b = along_center + along_half;
-            let want = (dx + dz) * ARM_LEN;
-            assert!(
-                (end_a - 0.0).abs() < 1e-6 || (end_b - 0.0).abs() < 1e-6,
-                "arm inner end not at pole for {label}: ends {end_a},{end_b}"
-            );
-            assert!(
-                (end_a - want).abs() < 1e-6 || (end_b - want).abs() < 1e-6,
-                "arm outer end not toward road for {label}: ends {end_a},{end_b} want {want}"
-            );
-            assert!(
-                (along_half - ARM_LEN / 2.0).abs() < 1e-6,
-                "arm long along road for {label}"
-            );
-            assert!(
-                (perp_half - ARM_THICK / 2.0).abs() < 1e-6,
-                "arm thin perpendicular for {label}"
+                (Quat::from_rotation_y(facing.yaw()) * Vec3::NEG_Z).abs_diff_eq(expected, 1e-6)
             );
         }
-    }
-
-    #[test]
-    fn lamp_arm_rotation_aligns_long_axis_with_road_direction() {
-        // Along X: no rotation (the mesh is already long along X).
-        assert_eq!(lamp_arm_transform(-1.0, 0.0).rotation, Quat::IDENTITY);
-        assert_eq!(lamp_arm_transform(1.0, 0.0).rotation, Quat::IDENTITY);
-        // Along Z: π/2 about Y. The arm is symmetric about its center, so the
-        // direction's sign is carried by the translation; the rotation is the
-        // same for +Z and -Z.
-        let want = Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
-        for (dx, dz) in [(0.0_f32, -1.0_f32), (0.0, 1.0)] {
-            let q = lamp_arm_transform(dx, dz).rotation;
-            assert!(
-                (q.x - want.x).abs() < 1e-6
-                    && (q.y - want.y).abs() < 1e-6
-                    && (q.z - want.z).abs() < 1e-6
-                    && (q.w - want.w).abs() < 1e-6,
-                "arm along Z must be rotated π/2 about Y for ({dx},{dz}), got {q}"
-            );
-        }
-    }
-
-    #[test]
-    fn lamp_fixture_hangs_connected_at_arm_end() {
-        for (dx, dz, label) in [
-            (-1.0_f32, 0.0_f32, "W"),
-            (1.0, 0.0, "E"),
-            (0.0, -1.0, "S"),
-            (0.0, 1.0, "N"),
-        ] {
-            let arm = lamp_arm_transform(dx, dz);
-            let lamp = lamp_fixture_transform(dx, dz);
-
-            // Same XZ as the arm's outer end.
-            assert!(
-                (lamp.translation.x - dx * ARM_LEN).abs() < 1e-6,
-                "lamp X at arm outer end for {label}"
-            );
-            assert!(
-                (lamp.translation.z - dz * ARM_LEN).abs() < 1e-6,
-                "lamp Z at arm outer end for {label}"
-            );
-
-            // Hangs BELOW the arm.
-            assert!(
-                lamp.translation.y < arm.translation.y,
-                "lamp must hang below arm for {label}"
-            );
-
-            // Bulb top touches arm bottom — connected, no gap, no float.
-            let arm_bottom = arm.translation.y - ARM_THICK / 2.0;
-            let lamp_top = lamp.translation.y + LAMP_RADIUS;
-            assert!(
-                (lamp_top - arm_bottom).abs() < 1e-6,
-                "lamp top must meet arm bottom for {label}: {lamp_top} vs {arm_bottom}"
-            );
-
-            // Entire bulb sits below the arm (no overlap with the bar) and
-            // clears the ground.
-            assert!(
-                lamp_top <= arm_bottom + 1e-6,
-                "bulb must not overlap arm for {label}"
-            );
-            assert!(
-                lamp.translation.y - LAMP_RADIUS > 0.0,
-                "lamp must clear the ground for {label}"
-            );
-        }
-    }
-
-    #[test]
-    fn lamp_post_vertical_chain_is_connected_with_no_gaps() {
-        // Pole: roots at ground, top at POLE_HEIGHT.
-        let pole = lamp_pole_transform();
-        assert_eq!(
-            pole.translation.y - POLE_HEIGHT / 2.0,
-            0.0,
-            "pole roots at ground"
-        );
-        assert_eq!(
-            pole.translation.y + POLE_HEIGHT / 2.0,
-            POLE_HEIGHT,
-            "pole top"
-        );
-
-        // Arm: at the pole top, overlapping it (connected — no gap to pole).
-        let arm = lamp_arm_transform(1.0, 0.0);
-        let arm_bottom = arm.translation.y - ARM_THICK / 2.0;
-        let arm_top = arm.translation.y + ARM_THICK / 2.0;
-        assert!(
-            arm_bottom <= POLE_HEIGHT && POLE_HEIGHT <= arm_top,
-            "arm must overlap pole top (no gap)"
-        );
-
-        // Lamp: hangs from the arm end, top meeting the arm bottom (no gap).
-        let lamp = lamp_fixture_transform(1.0, 0.0);
-        let lamp_top = lamp.translation.y + LAMP_RADIUS;
-        assert!(
-            (lamp_top - arm_bottom).abs() < 1e-6,
-            "lamp top must meet arm bottom (no gap)"
-        );
-
-        // The whole assembly is above ground and vertically ordered.
-        assert!(lamp.translation.y - LAMP_RADIUS > 0.0, "lamp clears ground");
-        assert!(
-            arm.translation.y > pole.translation.y,
-            "arm above pole center"
-        );
     }
 
     // --- Knockable cones: bounded launch, nonzero post-hit speed,
