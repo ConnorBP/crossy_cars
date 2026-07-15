@@ -42,7 +42,9 @@ const GRASS_FLECK_CELL_SIZE: u32 = 4;
 const SIDEWALK_SLAB_WIDTH: u32 = 32;
 const SIDEWALK_SLAB_HEIGHT: u32 = 16;
 const SIDEWALK_UV_REPEAT: f32 = 1.75;
-const SIDEWALK_JOINT_DARKENING: i32 = 10;
+const SIDEWALK_JOINT_DARKENING: i32 = 9;
+const SIDEWALK_EDGE_FADE: u32 = 2;
+const SIDEWALK_RELIEF_SPACING: u32 = 16;
 
 // Base sRGB values matching crate::palette constants (see palette.rs).
 const GRASS_SRGB: [f32; 3] = [0.30, 0.60, 0.30]; // palette::GRASS_LIGHT
@@ -442,7 +444,7 @@ fn sidewalk_texture() -> Image {
     make_image(sidewalk_pixel)
 }
 
-fn sidewalk_is_joint(x: u32, y: u32) -> bool {
+fn sidewalk_joint_distance(x: u32, y: u32) -> u32 {
     let x = x % TEX_SIZE;
     let y = y % TEX_SIZE;
     let row = y / SIDEWALK_SLAB_HEIGHT;
@@ -451,7 +453,27 @@ fn sidewalk_is_joint(x: u32, y: u32) -> bool {
     } else {
         SIDEWALK_SLAB_WIDTH / 2
     };
-    y % SIDEWALK_SLAB_HEIGHT == 0 || (x + stagger) % SIDEWALK_SLAB_WIDTH == 0
+    let x_phase = (x + stagger) % SIDEWALK_SLAB_WIDTH;
+    let y_phase = y % SIDEWALK_SLAB_HEIGHT;
+    let x_distance = x_phase.min(SIDEWALK_SLAB_WIDTH - x_phase);
+    let y_distance = y_phase.min(SIDEWALK_SLAB_HEIGHT - y_phase);
+    x_distance.min(y_distance)
+}
+
+#[cfg(test)]
+fn sidewalk_is_joint(x: u32, y: u32) -> bool {
+    sidewalk_joint_distance(x, y) == 0
+}
+
+/// Restrained contact shadow that falls off over two texels instead of
+/// stamping a hard dark grid around every slab.
+fn sidewalk_edge_darkening(x: u32, y: u32) -> i32 {
+    let distance = sidewalk_joint_distance(x, y);
+    if distance > SIDEWALK_EDGE_FADE {
+        return 0;
+    }
+    SIDEWALK_JOINT_DARKENING * (SIDEWALK_EDGE_FADE + 1 - distance) as i32
+        / (SIDEWALK_EDGE_FADE + 1) as i32
 }
 
 fn sidewalk_pixel(x: u32, y: u32) -> [u8; 4] {
@@ -469,15 +491,13 @@ fn sidewalk_pixel(x: u32, y: u32) -> [u8; 4] {
     let slabs_per_row = TEX_SIZE / SIDEWALK_SLAB_WIDTH;
     let slab_x = ((x + stagger) / SIDEWALK_SLAB_WIDTH) % slabs_per_row;
     let slab_tone = signed_noise2(slab_x, row) * 5 / 128;
-    let grain = signed_noise(x, y) * 6 / 128;
+    // Smooth, tileable variation gives the concrete broad relief without
+    // introducing another slab-, row-, or checker-aligned pattern.
+    let relief = (tileable_value_noise(x, y, SIDEWALK_RELIEF_SPACING, 67) * 4.0).round() as i32;
+    let grain = signed_noise(x, y) * 4 / 128;
     let brushed = if (x + 2 * y) % 11 == 0 { 2 } else { 0 };
-    // Expansion joints remain readable without becoming a near-black grid.
-    let joint = if sidewalk_is_joint(x, y) {
-        -SIDEWALK_JOINT_DARKENING
-    } else {
-        0
-    };
-    let value = slab_tone + grain + brushed + joint;
+    let contact_shadow = -sidewalk_edge_darkening(x, y);
+    let value = slab_tone + relief + grain + brushed + contact_shadow;
 
     [
         clamp_byte(b[0] + value),
@@ -801,19 +821,18 @@ fn asphalt_normal_map() -> Image {
     )
 }
 
-/// Concrete/sidewalk normal map: bumpy with a slightly stronger, coarser
-/// grain than `smooth_normal_map` to read as brushed concrete. T15: split
-/// into its own generator so the sidewalk can be tuned independently from
-/// the generic smooth noise used previously.
+/// Concrete/sidewalk normal map: broad, softly undulating relief under a
+/// restrained aggregate grain. The value-noise scales divide the 64px tile,
+/// so the stronger low-frequency shape does not create a boundary seam.
 fn concrete_normal_map() -> Image {
     make_normal_map(
         |x, y| {
-            // Coarse concrete grain + a finer component.
-            let coarse = signed_noise(x, y) as f32 / 128.0 * 0.7;
-            let fine = signed_noise2(x * 2, y * 2) as f32 / 128.0 * 0.3;
-            coarse + fine
+            let broad = tileable_value_noise(x, y, SIDEWALK_RELIEF_SPACING, 71) * 0.9;
+            let coarse = tileable_value_noise(x, y, 8, 73) * 0.35;
+            let aggregate = signed_noise2(x * 2, y * 2) as f32 / 128.0 * 0.18;
+            broad + coarse + aggregate
         },
-        0.6,
+        0.68,
     )
 }
 
@@ -1217,11 +1236,56 @@ mod tests {
     }
 
     #[test]
+    fn sidewalk_contact_edges_are_soft_and_modestly_darker_than_centers() {
+        let mut edge_sum = 0u32;
+        let mut edge_count = 0u32;
+        let mut center_sum = 0u32;
+        let mut center_count = 0u32;
+        for y in 0..TEX_SIZE {
+            for x in 0..TEX_SIZE {
+                let distance = sidewalk_joint_distance(x, y);
+                if distance == 0 {
+                    edge_sum += luminance(sidewalk_pixel(x, y)) as u32;
+                    edge_count += 1;
+                } else if distance > SIDEWALK_EDGE_FADE + 2 {
+                    center_sum += luminance(sidewalk_pixel(x, y)) as u32;
+                    center_count += 1;
+                }
+            }
+        }
+
+        let edge_mean = edge_sum as f32 / edge_count as f32;
+        let center_mean = center_sum as f32 / center_count as f32;
+        let difference = center_mean - edge_mean;
+        assert!(
+            (3.0..=16.0).contains(&difference),
+            "sidewalk edge darkening must remain subtle: {difference:.2}"
+        );
+        assert!(sidewalk_edge_darkening(5, 0) > sidewalk_edge_darkening(5, 1));
+        assert!(sidewalk_edge_darkening(5, 1) > sidewalk_edge_darkening(5, 2));
+        assert_eq!(sidewalk_edge_darkening(5, SIDEWALK_EDGE_FADE + 1), 0);
+    }
+
+    #[test]
+    fn sidewalk_color_and_relief_maps_preserve_exact_repeat_contract() {
+        let color = sidewalk_texture();
+        let normal = concrete_normal_map();
+        assert_repeat_format(&color, TextureFormat::Rgba8UnormSrgb);
+        assert_repeat_format(&normal, TextureFormat::Rgba8Unorm);
+        assert_eq!(pixels(&color), pixels(&sidewalk_texture()));
+        assert_eq!(pixels(&normal), pixels(&concrete_normal_map()));
+        assert!(max_opposite_edge_delta(&color) <= 20);
+        assert!(max_opposite_edge_delta(&normal) <= 48);
+    }
+
+    #[test]
     fn sidewalk_uses_long_staggered_slab_period() {
         assert!(SIDEWALK_SLAB_WIDTH > 16);
         assert!(SIDEWALK_SLAB_HEIGHT >= 16);
         assert_eq!(TEX_SIZE % SIDEWALK_SLAB_WIDTH, 0);
         assert_eq!(TEX_SIZE % SIDEWALK_SLAB_HEIGHT, 0);
+        assert_eq!(TEX_SIZE % SIDEWALK_RELIEF_SPACING, 0);
+        assert!(SIDEWALK_EDGE_FADE < SIDEWALK_SLAB_HEIGHT / 2);
         assert!((1.5..=2.0).contains(&SIDEWALK_UV_REPEAT));
         assert!(SIDEWALK_JOINT_DARKENING <= 10);
 
