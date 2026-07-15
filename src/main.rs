@@ -132,7 +132,7 @@ fn main() {
         app.insert_resource(ClearColor(Color::srgb(0.12, 0.125, 0.13)))
             .insert_resource(GlobalAmbientLight {
                 color: Color::WHITE,
-                brightness: 120.0,
+                brightness: 260.0,
                 ..default()
             })
             .add_plugins((TexturesPlugin, CarReviewPlugin, CarReviewCameraPlugin));

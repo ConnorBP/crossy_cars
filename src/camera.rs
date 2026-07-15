@@ -245,12 +245,14 @@ fn spawn_car_review_studio(
     commands.spawn((
         Mesh3d(meshes.add(Cylinder::new(1.55, 0.05))),
         MeshMaterial3d(platform),
-        Transform::from_xyz(0.0, -0.01, 0.0),
+        // Cylinder height is 0.05, so -0.025 puts its top exactly at Y=0,
+        // matching production road contact instead of clipping tire bottoms.
+        Transform::from_xyz(0.0, -0.025, 0.0),
     ));
     commands.spawn((
         DirectionalLight {
             color: Color::srgb(1.0, 0.96, 0.90),
-            illuminance: 8_000.0,
+            illuminance: 12_000.0,
             shadow_maps_enabled: true,
             ..default()
         },
@@ -259,7 +261,7 @@ fn spawn_car_review_studio(
     commands.spawn((
         DirectionalLight {
             color: Color::srgb(0.72, 0.82, 1.0),
-            illuminance: 2_200.0,
+            illuminance: 5_000.0,
             shadow_maps_enabled: false,
             ..default()
         },
