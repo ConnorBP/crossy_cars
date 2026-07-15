@@ -34,6 +34,10 @@ use bevy::text::FontSize;
 use std::cmp::Ordering;
 use std::f32::consts::{FRAC_PI_2, TAU};
 
+#[cfg(any(target_arch = "wasm32", test))]
+use crate::car::ToyShadowCaster;
+#[cfg(target_arch = "wasm32")]
+use crate::car::counter_rotated_projected_shadow_transform;
 use crate::car::{Car, DrivingSet, InputFrozen};
 use crate::game::SpawnSet;
 use crate::game::TouchStateSet;
@@ -44,6 +48,10 @@ use crate::run_events::ActiveEvent;
 use crate::touch::{
     TOUCH_LEVEL_HEIGHT, TOUCH_LEVEL_RIGHT, TOUCH_LEVEL_TOP, TOUCH_LEVEL_WIDTH, TouchControlsActive,
 };
+#[cfg(target_arch = "wasm32")]
+use crate::toy_shading::ToyCastShadow;
+use crate::toy_shading::{ToyContactShadow, ToyShadingAssets, contact_shadow_transform};
+use crate::toy_shading::{ToyMaterialFamily, toy_material};
 use crate::world::{
     Collider, LaneConnector, LaneCurve, LaneEdge, LaneTurn, ROAD_BLOCK_SIZE, road_plan,
     world_to_road_cell,
@@ -116,6 +124,9 @@ const BODY_W: f32 = 1.0;
 const BODY_D: f32 = 2.0;
 const WINDSHIELD_D: f32 = 0.03;
 const TRAFFIC_WHEEL_RADIUS: f32 = 0.15;
+const TRAFFIC_SHADOW_FOOTPRINT: Vec2 = Vec2::new(1.38, 2.30);
+#[cfg(target_arch = "wasm32")]
+const TRAFFIC_SHADOW_CASTER_HEIGHT: f32 = 1.10;
 
 /// Shared visual silhouettes. Selection reads the module's deterministic
 /// LCG state without advancing it, so visuals do not perturb movement rolls.
@@ -169,7 +180,6 @@ pub struct TrafficAssets {
     light_mesh: Handle<Mesh>,
     wheel_mesh: Handle<Mesh>,
     hub_mesh: Handle<Mesh>,
-    shadow_mesh: Handle<Mesh>,
     /// A small shared car-paint palette, selected at spawn.
     body_mats: [Handle<StandardMaterial>; 5],
     cabin_mat: Handle<StandardMaterial>,
@@ -178,7 +188,6 @@ pub struct TrafficAssets {
     rear_light_mat: Handle<StandardMaterial>,
     wheel_mat: Handle<StandardMaterial>,
     hub_mat: Handle<StandardMaterial>,
-    shadow_mat: Handle<StandardMaterial>,
 }
 
 impl FromWorld for TrafficAssets {
@@ -203,7 +212,6 @@ impl FromWorld for TrafficAssets {
             let light_mesh = meshes.add(Cuboid::new(0.18, 0.12, 0.04));
             let wheel_mesh = meshes.add(Cylinder::new(TRAFFIC_WHEEL_RADIUS, 0.18));
             let hub_mesh = meshes.add(Cylinder::new(0.066, 0.19));
-            let shadow_mesh = meshes.add(Plane3d::default().mesh().size(1.55, 2.35));
 
             let body_colors = [
                 Color::srgb(0.85, 0.12, 0.10),
@@ -213,18 +221,13 @@ impl FromWorld for TrafficAssets {
                 Color::srgb(0.95, 0.65, 0.08),
             ];
             let body_mats = body_colors.map(|base_color| {
-                materials.add(StandardMaterial {
-                    base_color,
-                    // Automotive paint is a dielectric colored coating, not a
-                    // bare colored metal. Keep the five cached palette
-                    // materials while giving only the body a clearcoat layer.
-                    metallic: 0.0,
-                    perceptual_roughness: 0.30,
-                    reflectance: 0.5,
-                    clearcoat: 0.85,
-                    clearcoat_perceptual_roughness: 0.20,
-                    ..default()
-                })
+                materials.add(toy_material(
+                    ToyMaterialFamily::CoatedPlastic,
+                    StandardMaterial {
+                        base_color,
+                        ..default()
+                    },
+                ))
             });
             let cabin_mat = materials.add(StandardMaterial {
                 base_color: Color::srgb(0.10, 0.10, 0.18),
@@ -250,23 +253,20 @@ impl FromWorld for TrafficAssets {
                 perceptual_roughness: 0.22,
                 ..default()
             });
-            let wheel_mat = materials.add(StandardMaterial {
-                base_color: Color::srgb(0.025, 0.025, 0.03),
-                perceptual_roughness: 0.92,
-                ..default()
-            });
-            let hub_mat = materials.add(StandardMaterial {
-                base_color: Color::srgb(0.5, 0.53, 0.56),
-                metallic: 0.95,
-                perceptual_roughness: 0.18,
-                ..default()
-            });
-            let shadow_mat = materials.add(StandardMaterial {
-                base_color: Color::srgba(0.0, 0.0, 0.0, 0.35),
-                alpha_mode: AlphaMode::Blend,
-                ..default()
-            });
-
+            let wheel_mat = materials.add(toy_material(
+                ToyMaterialFamily::Rubber,
+                StandardMaterial {
+                    base_color: Color::srgb(0.025, 0.025, 0.03),
+                    ..default()
+                },
+            ));
+            let hub_mat = materials.add(toy_material(
+                ToyMaterialFamily::BareMetal,
+                StandardMaterial {
+                    base_color: Color::srgb(0.5, 0.53, 0.56),
+                    ..default()
+                },
+            ));
             TrafficAssets {
                 body_meshes,
                 cabin_meshes,
@@ -274,7 +274,6 @@ impl FromWorld for TrafficAssets {
                 light_mesh,
                 wheel_mesh,
                 hub_mesh,
-                shadow_mesh,
                 body_mats,
                 cabin_mat,
                 windshield_mat,
@@ -282,7 +281,6 @@ impl FromWorld for TrafficAssets {
                 rear_light_mat,
                 wheel_mat,
                 hub_mat,
-                shadow_mat,
             }
         })
     }
@@ -338,6 +336,7 @@ impl Plugin for DifficultyPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Difficulty>()
             .init_resource::<TrafficAssets>()
+            .init_resource::<ToyShadingAssets>()
             // Fresh-round reset (skipped on resume from Paused). MUST run
             // before `reset_run` flips `RoundActive` on, so it's in
             // `SpawnSet` (which `reset_run` follows via `.after(SpawnSet)`).
@@ -632,6 +631,7 @@ fn plan_traffic(snapshots: &[TrafficSnapshot], delta_seconds: f32) -> Vec<Traffi
 fn manage_traffic(
     mut commands: Commands,
     assets: Res<TrafficAssets>,
+    toy_shading: Res<ToyShadingAssets>,
     difficulty: Res<Difficulty>,
     modifier: Res<ActiveModifier>,
     event: Res<ActiveEvent>,
@@ -761,6 +761,7 @@ fn manage_traffic(
             spawn_one_traffic(
                 &mut commands,
                 &assets,
+                &toy_shading,
                 candidate,
                 speed,
                 speed_roll,
@@ -1182,6 +1183,7 @@ fn traffic_kind(seed: u32) -> TrafficKind {
 fn spawn_one_traffic(
     commands: &mut Commands,
     assets: &TrafficAssets,
+    toy_shading: &ToyShadingAssets,
     candidate: TrafficSpawnCandidate,
     speed: f32,
     speed_roll: f32,
@@ -1212,6 +1214,31 @@ fn spawn_one_traffic(
             },
         ))
         .with_children(|root| {
+            root.spawn((
+                Mesh3d(toy_shading.contact_plane.clone()),
+                MeshMaterial3d(toy_shading.contact_material.clone()),
+                contact_shadow_transform(TRAFFIC_SHADOW_FOOTPRINT, 0.0),
+                ToyContactShadow,
+            ));
+            #[cfg(target_arch = "wasm32")]
+            {
+                let caster = ToyShadowCaster::new(
+                    TRAFFIC_SHADOW_FOOTPRINT,
+                    TRAFFIC_SHADOW_CASTER_HEIGHT,
+                    0.0,
+                );
+                root.spawn((
+                    Mesh3d(toy_shading.cast_plane.clone()),
+                    MeshMaterial3d(toy_shading.cast_material.clone()),
+                    counter_rotated_projected_shadow_transform(
+                        Quat::from_rotation_y(heading),
+                        caster,
+                    ),
+                    ToyCastShadow,
+                    caster,
+                ));
+            }
+
             let (body_y, cabin_y, cabin_z, glass_y, glass_z) = match kind {
                 TrafficKind::Sedan => (0.35, 0.35, 0.2, 0.45, -0.3),
                 TrafficKind::Van => (0.41, 0.54, 0.1, 0.62, -0.64),
@@ -1262,11 +1289,6 @@ fn spawn_one_traffic(
                     Transform::default(),
                 ));
             }
-            root.spawn((
-                Mesh3d(assets.shadow_mesh.clone()),
-                MeshMaterial3d(assets.shadow_mat.clone()),
-                Transform::from_xyz(0.0, 0.06, 0.0),
-            ));
         });
 }
 
@@ -1394,6 +1416,7 @@ mod tests {
     use super::*;
     use crate::modifiers::ModifierKind;
     use crate::run_events::EventKind;
+    use crate::toy_shading::ToyShadingAssets;
     use bevy::ecs::world::CommandQueue;
 
     const EXPECTED_BODY_COLORS: [Color; 5] = [
@@ -1407,7 +1430,9 @@ mod tests {
     fn traffic_asset_test_world() -> World {
         let mut world = World::new();
         world.init_resource::<Assets<Mesh>>();
+        world.init_resource::<Assets<Image>>();
         world.init_resource::<Assets<StandardMaterial>>();
+        world.init_resource::<ToyShadingAssets>();
         let assets = TrafficAssets::from_world(&mut world);
         world.insert_resource(assets);
         world
@@ -1420,8 +1445,9 @@ mod tests {
         let materials = world.resource::<Assets<StandardMaterial>>();
 
         assert_eq!(assets.body_mats.len(), EXPECTED_BODY_COLORS.len());
-        // Five body paints plus the seven unchanged shared part materials.
-        assert_eq!(materials.len(), 12);
+        // Five body paints, six unchanged shared part materials, and the two
+        // globally cached toy-shadow materials.
+        assert_eq!(materials.len(), 13);
         for (index, (handle, expected_color)) in assets
             .body_mats
             .iter()
@@ -1478,13 +1504,15 @@ mod tests {
         let tire = materials.get(&assets.wheel_mat).unwrap();
         assert_eq!(tire.base_color, Color::srgb(0.025, 0.025, 0.03));
         assert_eq!(tire.metallic, 0.0);
-        assert_eq!(tire.perceptual_roughness, 0.92);
+        assert_eq!(tire.perceptual_roughness, 0.88);
+        assert_eq!(tire.reflectance, 0.35);
         assert_eq!(tire.clearcoat, 0.0);
 
         let hub = materials.get(&assets.hub_mat).unwrap();
         assert_eq!(hub.base_color, Color::srgb(0.5, 0.53, 0.56));
-        assert_eq!(hub.metallic, 0.95);
-        assert_eq!(hub.perceptual_roughness, 0.18);
+        assert_eq!(hub.metallic, 0.92);
+        assert_eq!(hub.perceptual_roughness, 0.24);
+        assert_eq!(hub.reflectance, 0.5);
         assert_eq!(hub.clearcoat, 0.0);
 
         let headlight = materials.get(&assets.headlight_mat).unwrap();
@@ -1498,12 +1526,6 @@ mod tests {
         assert_eq!(rear_light.emissive, LinearRgba::new(0.8, 0.025, 0.015, 1.0));
         assert_eq!(rear_light.perceptual_roughness, 0.22);
         assert_eq!(rear_light.clearcoat, 0.0);
-
-        let shadow = materials.get(&assets.shadow_mat).unwrap();
-        assert_eq!(shadow.base_color, Color::srgba(0.0, 0.0, 0.0, 0.35));
-        assert_eq!(shadow.alpha_mode, AlphaMode::Blend);
-        assert_eq!(shadow.metallic, 0.0);
-        assert_eq!(shadow.clearcoat, 0.0);
     }
 
     #[test]
@@ -1534,12 +1556,14 @@ mod tests {
         let mut queue = CommandQueue::default();
         {
             let assets = world.resource::<TrafficAssets>();
+            let toy_shading = world.resource::<ToyShadingAssets>();
             let mut commands = Commands::new(&mut queue, &world);
             for traffic_id in 1..=2 {
                 let mut seed = initial_seed;
                 spawn_one_traffic(
                     &mut commands,
                     assets,
+                    toy_shading,
                     candidate,
                     5.0,
                     0.5,
@@ -1566,6 +1590,111 @@ mod tests {
             world.resource::<Assets<StandardMaterial>>().len(),
             material_count,
             "spawning must not allocate per-car materials"
+        );
+    }
+
+    #[test]
+    fn spawned_traffic_has_one_cached_contact_card_per_root() {
+        let mut world = traffic_asset_test_world();
+        let connector = road_plan(0, 0)
+            .connectors
+            .into_iter()
+            .flatten()
+            .next()
+            .unwrap();
+        let candidate = TrafficSpawnCandidate {
+            position: Vec2::ZERO,
+            half_extents: Vec2::new(TRAFFIC_HALF_WIDTH, TRAFFIC_HALF_LENGTH),
+            tangent: Vec2::Y,
+            connector,
+            distance: 0.0,
+            route_rng: 1,
+        };
+        let mut queue = CommandQueue::default();
+        {
+            let assets = world.resource::<TrafficAssets>();
+            let toy = world.resource::<ToyShadingAssets>();
+            let mut commands = Commands::new(&mut queue, &world);
+            let mut seed = 7;
+            spawn_one_traffic(
+                &mut commands,
+                assets,
+                toy,
+                candidate,
+                5.0,
+                0.5,
+                1,
+                &mut seed,
+            );
+        }
+        queue.apply(&mut world);
+
+        let root = world
+            .query_filtered::<Entity, With<Traffic>>()
+            .single(&world)
+            .unwrap();
+        let contact = world
+            .query_filtered::<Entity, With<ToyContactShadow>>()
+            .single(&world)
+            .unwrap();
+        assert_eq!(world.get::<ChildOf>(contact).unwrap().parent(), root);
+        let toy = world.resource::<ToyShadingAssets>();
+        assert_eq!(
+            world.get::<Mesh3d>(contact).unwrap().0.id(),
+            toy.contact_plane.id()
+        );
+        assert_eq!(
+            world
+                .get::<MeshMaterial3d<StandardMaterial>>(contact)
+                .unwrap()
+                .0
+                .id(),
+            toy.contact_material.id()
+        );
+        assert_eq!(
+            world.query::<&ToyShadowCaster>().iter(&world).count(),
+            usize::from(cfg!(target_arch = "wasm32"))
+        );
+
+        // Recursive traffic cleanup owns both cards. A subsequent round spawn
+        // produces exactly one fresh hierarchy rather than leaking/duplicating
+        // the old shadow child.
+        let mut cleanup = CommandQueue::default();
+        Commands::new(&mut cleanup, &world).entity(root).despawn();
+        cleanup.apply(&mut world);
+        assert_eq!(
+            world
+                .query_filtered::<Entity, With<ToyContactShadow>>()
+                .iter(&world)
+                .count(),
+            0
+        );
+
+        let mut restart = CommandQueue::default();
+        {
+            let assets = world.resource::<TrafficAssets>();
+            let toy = world.resource::<ToyShadingAssets>();
+            let mut commands = Commands::new(&mut restart, &world);
+            let mut seed = 9;
+            spawn_one_traffic(
+                &mut commands,
+                assets,
+                toy,
+                candidate,
+                5.0,
+                0.5,
+                2,
+                &mut seed,
+            );
+        }
+        restart.apply(&mut world);
+        assert_eq!(world.query::<&Traffic>().iter(&world).count(), 1);
+        assert_eq!(
+            world
+                .query_filtered::<Entity, With<ToyContactShadow>>()
+                .iter(&world)
+                .count(),
+            1
         );
     }
 

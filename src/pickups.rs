@@ -55,6 +55,8 @@ use crate::touch::{
     TOUCH_POWERUP_HEIGHT, TOUCH_POWERUP_LEFT, TOUCH_POWERUP_TOP, TOUCH_POWERUP_WIDTH,
     TouchControlsActive,
 };
+use crate::toy_shading::{ToyContactShadow, ToyShadingAssets, contact_shadow_transform};
+use crate::toy_shading::{ToyMaterialFamily, toy_material};
 use crate::world::Coin;
 
 // ===========================================================================
@@ -162,6 +164,8 @@ pub struct PickupAssets {
     mega_orb_mesh: Handle<Mesh>,
     /// Tiny dark cylinder pedestal mesh.
     pedestal_mesh: Handle<Mesh>,
+    /// Shared soft-card mesh beneath the pedestal/orb silhouette.
+    contact_shadow_mesh: Handle<Mesh>,
     /// SpeedBoost orb material (glowing blue).
     boost_mat: Handle<StandardMaterial>,
     /// CoinMagnet orb material (glowing gold/orange).
@@ -174,10 +178,19 @@ pub struct PickupAssets {
     megacoin_mat: Handle<StandardMaterial>,
     /// Pedestal material (dark, unlit).
     pedestal_mat: Handle<StandardMaterial>,
+    /// Shared soft-card material from the global toy-shading cache.
+    contact_shadow_mat: Handle<StandardMaterial>,
 }
 
 impl FromWorld for PickupAssets {
     fn from_world(world: &mut World) -> Self {
+        world.init_resource::<Assets<Image>>();
+        world.init_resource::<ToyShadingAssets>();
+        let (contact_shadow_mesh, contact_shadow_mat) = {
+            let toy = world.resource::<ToyShadingAssets>();
+            (toy.contact_plane.clone(), toy.contact_material.clone())
+        };
+
         // Scope meshes first (like textures.rs scopes Images), then grab
         // materials inside the closure so we never hold two `&mut Assets<…>`
         // at once without scoping (risk E3).
@@ -194,59 +207,79 @@ impl FromWorld for PickupAssets {
 
             // SpeedBoost: bright glowing blue. `LinearRgba` emissive so it
             // pops with bloom (T9 rendering is HDR + tonemapping + bloom).
-            let boost_mat = materials.add(StandardMaterial {
-                base_color: Color::srgb(0.25, 0.45, 1.0),
-                emissive: LinearRgba::rgb(0.4, 0.8, 2.2),
-                ..default()
-            });
+            let boost_mat = materials.add(toy_material(
+                ToyMaterialFamily::Ceramic,
+                StandardMaterial {
+                    base_color: Color::srgb(0.25, 0.45, 1.0),
+                    emissive: LinearRgba::rgb(0.4, 0.8, 2.2),
+                    ..default()
+                },
+            ));
 
             // CoinMagnet: glowing gold/orange.
-            let magnet_mat = materials.add(StandardMaterial {
-                base_color: Color::srgb(1.0, 0.7, 0.15),
-                emissive: LinearRgba::rgb(2.2, 1.4, 0.25),
-                ..default()
-            });
+            let magnet_mat = materials.add(toy_material(
+                ToyMaterialFamily::Ceramic,
+                StandardMaterial {
+                    base_color: Color::srgb(1.0, 0.7, 0.15),
+                    emissive: LinearRgba::rgb(2.2, 1.4, 0.25),
+                    ..default()
+                },
+            ));
 
             // Health: glowing green cross orb.
-            let health_mat = materials.add(StandardMaterial {
-                base_color: Color::srgb(0.2, 0.9, 0.3),
-                emissive: LinearRgba::rgb(0.3, 2.0, 0.45),
-                ..default()
-            });
+            let health_mat = materials.add(toy_material(
+                ToyMaterialFamily::Ceramic,
+                StandardMaterial {
+                    base_color: Color::srgb(0.2, 0.9, 0.3),
+                    emissive: LinearRgba::rgb(0.3, 2.0, 0.45),
+                    ..default()
+                },
+            ));
 
             // TimeBonus: glowing cyan clock orb (distinct from SpeedBoost's
             // deeper blue — brighter + greener hue reads as "time").
-            let time_mat = materials.add(StandardMaterial {
-                base_color: Color::srgb(0.2, 0.72, 0.95),
-                emissive: LinearRgba::rgb(0.3, 1.7, 2.1),
-                ..default()
-            });
+            let time_mat = materials.add(toy_material(
+                ToyMaterialFamily::Ceramic,
+                StandardMaterial {
+                    base_color: Color::srgb(0.2, 0.72, 0.95),
+                    emissive: LinearRgba::rgb(0.3, 1.7, 2.1),
+                    ..default()
+                },
+            ));
 
             // MegaCoin: bright glowing gold — richer than CoinMagnet so the
             // bigger orb reads as a premium prize.
-            let megacoin_mat = materials.add(StandardMaterial {
-                base_color: Color::srgb(1.0, 0.85, 0.2),
-                emissive: LinearRgba::rgb(2.6, 2.0, 0.4),
-                ..default()
-            });
+            let megacoin_mat = materials.add(toy_material(
+                ToyMaterialFamily::Ceramic,
+                StandardMaterial {
+                    base_color: Color::srgb(1.0, 0.85, 0.2),
+                    emissive: LinearRgba::rgb(2.6, 2.0, 0.4),
+                    ..default()
+                },
+            ));
 
             // Pedestal: dark, unlit (reads as a little stand).
-            let pedestal_mat = materials.add(StandardMaterial {
-                base_color: Color::srgb(0.12, 0.12, 0.14),
-                unlit: true,
-                ..default()
-            });
+            let pedestal_mat = materials.add(toy_material(
+                ToyMaterialFamily::CoatedPlastic,
+                StandardMaterial {
+                    base_color: Color::srgb(0.12, 0.12, 0.14),
+                    unlit: true,
+                    ..default()
+                },
+            ));
 
             PickupAssets {
                 orb_mesh,
                 mega_orb_mesh,
                 pedestal_mesh,
+                contact_shadow_mesh,
                 boost_mat,
                 magnet_mat,
                 health_mat,
                 time_mat,
                 megacoin_mat,
                 pedestal_mat,
+                contact_shadow_mat,
             }
         })
     }
@@ -287,6 +320,11 @@ pub enum PowerKind {
 pub struct PowerUp {
     kind: PowerKind,
 }
+
+/// Identifies the single ground-fixed contact card beneath a pickup. It is a
+/// child for recursive cleanup, but its local height counteracts orb bobbing.
+#[derive(Component)]
+struct PickupContactShadow;
 
 /// UI root for the active-power-up panel (bottom-center on desktop,
 /// upper-right above touch driving controls). Respawned with `Playing`.
@@ -472,6 +510,15 @@ fn spawn_pickup(
                 Mesh3d(assets.pedestal_mesh.clone()),
                 MeshMaterial3d(assets.pedestal_mat.clone()),
                 Transform::from_xyz(0.0, -ORB_HOVER_Y + 0.125, 0.0),
+            ));
+            // One cached soft card grounds both the pedestal and hovering orb.
+            // MegaCoin keeps one card but receives its wider silhouette.
+            p.spawn((
+                Mesh3d(assets.contact_shadow_mesh.clone()),
+                MeshMaterial3d(assets.contact_shadow_mat.clone()),
+                pickup_contact_shadow_transform(kind, ORB_HOVER_Y),
+                ToyContactShadow,
+                PickupContactShadow,
             ));
         });
 }
@@ -660,14 +707,19 @@ fn apply_coin_magnet(
 /// the root entity's rotation (spin around Y) and its
 /// translation Y (gentle bob around the hover height, with a per-orb phase
 /// derived from its XZ position so multiple orbs don't bounce in lockstep).
-/// The orb + pedestal mesh children ride along with the root transform.
+/// The orb and pedestal ride with the root; the soft contact child counters
+/// vertical motion to remain on the ground.
 fn animate_pickups(
-    mut powerups: Query<(&mut Transform, &PowerUp)>,
+    mut powerups: Query<(&mut Transform, &PowerUp, &Children)>,
+    mut shadows: Query<
+        (&mut Transform, &PickupContactShadow),
+        (Without<PowerUp>, With<ToyContactShadow>),
+    >,
     time: Res<Time>,
     settings: Res<Settings>,
 ) {
     let t = time.elapsed_secs();
-    for (mut tf, _power) in &mut powerups {
+    for (mut tf, power, children) in &mut powerups {
         let (rotation, y) = pickup_visual_pose(
             settings.reduced_motion,
             t,
@@ -676,6 +728,13 @@ fn animate_pickups(
         );
         tf.rotation = rotation;
         tf.translation.y = y;
+        // Counter the owner's hover/bob so the shadow remains on the ground.
+        // Rotation needs no correction because the contact mask is radial.
+        for child in children.iter() {
+            if let Ok((mut shadow, _)) = shadows.get_mut(child) {
+                *shadow = pickup_contact_shadow_transform(power.kind, y);
+            }
+        }
     }
 }
 
@@ -1110,6 +1169,25 @@ const fn pickup_flash_enabled(reduced_motion: bool) -> bool {
     !reduced_motion
 }
 
+const fn pickup_shadow_footprint(kind: PowerKind) -> Vec2 {
+    match kind {
+        PowerKind::MegaCoin => Vec2::splat(1.10),
+        PowerKind::SpeedBoost | PowerKind::CoinMagnet | PowerKind::Health | PowerKind::Time => {
+            Vec2::splat(0.72)
+        }
+    }
+}
+
+/// Local transform which always resolves to the ground after owner translation.
+fn pickup_contact_shadow_transform(kind: PowerKind, owner_y: f32) -> Transform {
+    contact_shadow_transform(pickup_shadow_footprint(kind), -owner_y)
+}
+
+#[cfg(test)]
+const fn pickup_shadow_card_count(_kind: PowerKind) -> usize {
+    1
+}
+
 /// Static reduced-motion pose or the normal animated orb pose.
 fn pickup_visual_pose(reduced_motion: bool, time: f32, x: f32, z: f32) -> (Quat, f32) {
     if reduced_motion {
@@ -1278,6 +1356,53 @@ fn rand(seed: &mut u32) -> f32 {
 mod tests {
     use super::*;
     use crate::touch::touch_driving_band_bounds;
+
+    #[test]
+    fn every_pickup_has_one_cached_contact_card_with_kind_appropriate_size() {
+        for kind in [
+            PowerKind::SpeedBoost,
+            PowerKind::CoinMagnet,
+            PowerKind::Health,
+            PowerKind::Time,
+            PowerKind::MegaCoin,
+        ] {
+            assert_eq!(pickup_shadow_card_count(kind), 1);
+        }
+        assert_eq!(
+            pickup_shadow_footprint(PowerKind::SpeedBoost),
+            Vec2::splat(0.72)
+        );
+        assert_eq!(
+            pickup_shadow_footprint(PowerKind::MegaCoin),
+            Vec2::splat(1.10)
+        );
+    }
+
+    #[test]
+    fn pickup_contact_card_stays_grounded_during_orb_bob() {
+        for owner_y in [ORB_HOVER_Y - 0.18, ORB_HOVER_Y, ORB_HOVER_Y + 0.18] {
+            let local = pickup_contact_shadow_transform(PowerKind::Health, owner_y);
+            assert!(
+                (owner_y + local.translation.y - crate::toy_shading::TOY_CONTACT_SHADOW_HEIGHT)
+                    .abs()
+                    < 1e-6
+            );
+        }
+    }
+
+    #[test]
+    fn pickup_assets_reuse_global_toy_shadow_cache() {
+        let mut app = App::new();
+        app.init_resource::<Assets<Image>>()
+            .init_resource::<Assets<Mesh>>()
+            .init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<ToyShadingAssets>()
+            .init_resource::<PickupAssets>();
+        let toy = app.world().resource::<ToyShadingAssets>();
+        let pickup = app.world().resource::<PickupAssets>();
+        assert_eq!(pickup.contact_shadow_mesh.id(), toy.contact_plane.id());
+        assert_eq!(pickup.contact_shadow_mat.id(), toy.contact_material.id());
+    }
 
     #[test]
     fn touch_powerup_panel_clears_driving_band_at_target_viewports() {

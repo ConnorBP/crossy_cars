@@ -36,10 +36,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use bevy::asset::RenderAssetUsages;
 use bevy::color::LinearRgba;
 #[cfg(not(target_arch = "wasm32"))]
 use bevy::light::CascadeShadowConfigBuilder;
 use bevy::math::primitives::Circle;
+use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 use serde::Serialize;
 
@@ -51,6 +53,11 @@ use crate::game::state::GameState;
 use crate::palette;
 use crate::shaders::WaterMaterial;
 use crate::textures::{GROUND_VARIANTS, TextureAssets};
+use crate::toy_shading::ImportedWorldVisual;
+#[cfg(any(target_arch = "wasm32", test))]
+use crate::toy_shading::{ToyCastShadow, projected_shadow_transform};
+use crate::toy_shading::{ToyContactShadow, ToyShadingAssets, contact_shadow_transform};
+use crate::toy_shading::{ToyMaterialFamily, toy_material};
 
 /// Gate real-time shadows off on WebGL2 for performance.
 const SHADOWS: bool = cfg!(not(target_arch = "wasm32"));
@@ -63,6 +70,13 @@ const REVIEW_SEED: u32 = 0;
 /// with them, collected on pickup and respawned when the block re-populates).
 #[derive(Component)]
 pub struct Coin;
+
+/// Rendered coin child. Keeping the collectible root on the ground lets its
+/// cached contact card remain grounded while this child spins and bobs.
+#[derive(Component)]
+struct CoinVisual {
+    phase: f32,
+}
 
 /// A raised curb the car can hop up onto (drives on top at `height`).
 #[derive(Component)]
@@ -163,10 +177,6 @@ struct PondShore;
 #[derive(Component)]
 struct PondProp;
 
-/// Shared marker for shadows backed by Bevy's XY-oriented `Circle` mesh.
-/// Every such shadow must use `ground_circle_transform` so it lies in XZ.
-#[derive(Component)]
-struct GroundCircleShadow;
 #[derive(Component)]
 struct TreeShadow;
 #[derive(Component)]
@@ -185,6 +195,56 @@ struct HaySprig;
 struct Mailbox;
 #[derive(Component)]
 struct PicketFencePanel;
+
+/// Visually meaningful static roots that receive one projected card on
+/// WebGL2, where the production directional light has no shadow map. Tiny
+/// sprigs, coins, and pond dressing deliberately remain contact-only.
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum StaticCastKind {
+    Tree,
+    Lamp,
+    Hydrant,
+    Bench,
+    Hedge,
+    Mailbox,
+    HayBale,
+    FarmCrate,
+    FencePanel,
+}
+
+#[cfg(test)]
+const STATIC_CAST_KINDS: [StaticCastKind; 9] = [
+    StaticCastKind::Tree,
+    StaticCastKind::Lamp,
+    StaticCastKind::Hydrant,
+    StaticCastKind::Bench,
+    StaticCastKind::Hedge,
+    StaticCastKind::Mailbox,
+    StaticCastKind::HayBale,
+    StaticCastKind::FarmCrate,
+    StaticCastKind::FencePanel,
+];
+
+#[cfg(any(target_arch = "wasm32", test))]
+const fn static_cast_height(kind: StaticCastKind) -> f32 {
+    match kind {
+        StaticCastKind::Tree => 3.40,
+        StaticCastKind::Lamp => 3.25,
+        StaticCastKind::Hydrant => 1.01,
+        StaticCastKind::Bench => 1.05,
+        StaticCastKind::Hedge => 0.50,
+        StaticCastKind::Mailbox => 1.48,
+        StaticCastKind::HayBale => HAY_BALE_RADIUS * 2.0,
+        StaticCastKind::FarmCrate => FARM_CRATE_HEIGHT,
+        StaticCastKind::FencePanel => 0.90,
+    }
+}
+
+/// The single curb-to-ground AO mesh owned by every road-bearing block.
+#[derive(Component)]
+#[require(bevy::light::NotShadowCaster)]
+pub(crate) struct BlockContactOverlay;
 
 // ---------------------------------------------------------------------------
 // Wang-tile road network (T19)
@@ -310,13 +370,9 @@ pub fn sockets(kind: TileKind) -> [Edge; 4] {
     }
 }
 
-// Each road surface is drawn by both blocks beside its world line. Markings
-// use a directional ownership rule so they are not also double-spawned: this
-// block owns its W (vertical) and S (horizontal) road surfaces. The four
-// flags are W-road at S endpoint, W-road at N endpoint, S-road at W endpoint,
-// and S-road at E endpoint. An approach is marked only when the endpoint has
-// a perpendicular road socket, i.e. it is a real intersection rather than a
-// through-road endpoint or dead-end.
+// The finite center-connected tile owns its center junction uniquely. Mark
+// an active socket only when at least one perpendicular socket is also active;
+// straight roads and stubs therefore remain uncluttered.
 fn exposed_pad_curb_sides(sock: [Edge; 4]) -> [bool; 4] {
     let has_road = sock.contains(&Edge::Road);
     sock.map(|edge| has_road && edge == Edge::None)
@@ -419,6 +475,77 @@ fn road_curb_segment_count(sock: [Edge; 4]) -> usize {
             .count()
 }
 
+const CURB_AO_WIDTH: f32 = 0.65;
+const CURB_AO_HEIGHT: f32 = 0.031;
+
+/// One cached block-local mesh per tile kind. Each curb contributes a ribbon
+/// immediately outside its non-road long edge. The curb edge is dark and the
+/// ground edge transparent, producing static curb/ground AO without entities
+/// or assets per curb.
+fn curb_contact_overlay_mesh(kind: TileKind) -> Mesh {
+    let mut positions = Vec::<[f32; 3]>::new();
+    let mut normals = Vec::<[f32; 3]>::new();
+    let mut colors = Vec::<[f32; 4]>::new();
+    let mut indices = Vec::<u32>::new();
+
+    for curb in road_curb_placements(sockets(kind)) {
+        let horizontal = curb.half_extents.x > curb.half_extents.y;
+        let road_side = match curb.source {
+            RoadCurbSource::Arm(side) => match side {
+                W | E => Vec2::new(0.0, -curb.center.y.signum()),
+                S | N => Vec2::new(-curb.center.x.signum(), 0.0),
+                _ => Vec2::ZERO,
+            },
+            RoadCurbSource::PadCap(side) => match side {
+                W => Vec2::X,
+                E => Vec2::NEG_X,
+                S => Vec2::Y,
+                N => Vec2::NEG_Y,
+                _ => Vec2::ZERO,
+            },
+        };
+        let outward = -road_side;
+        let inner_center = curb.center
+            + outward
+                * if horizontal {
+                    curb.half_extents.y
+                } else {
+                    curb.half_extents.x
+                };
+        let along = if horizontal {
+            Vec2::new(curb.half_extents.x, 0.0)
+        } else {
+            Vec2::new(0.0, curb.half_extents.y)
+        };
+        let inner_a = inner_center - along;
+        let inner_b = inner_center + along;
+        let outer_a = inner_a + outward * CURB_AO_WIDTH;
+        let outer_b = inner_b + outward * CURB_AO_WIDTH;
+        let base = positions.len() as u32;
+        for point in [inner_a, inner_b, outer_b, outer_a] {
+            positions.push([point.x, CURB_AO_HEIGHT, point.y]);
+            normals.push([0.0, 1.0, 0.0]);
+        }
+        colors.extend_from_slice(&[
+            [1.0, 1.0, 1.0, 0.14],
+            [1.0, 1.0, 1.0, 0.14],
+            [1.0, 1.0, 1.0, 0.0],
+            [1.0, 1.0, 1.0, 0.0],
+        ]);
+        indices.extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
+    }
+
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    );
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
+    mesh.insert_indices(Indices::U32(indices));
+    mesh
+}
+
 fn road_exclusion_rects(sock: [Edge; 4]) -> Vec<[f32; 4]> {
     let mut rects = Vec::with_capacity(5);
     if sock.contains(&Edge::Road) {
@@ -454,14 +581,15 @@ fn footprint_overlaps_road(
         .any(|r| !(max_x <= r[0] || min_x >= r[1] || max_z <= r[2] || min_z >= r[3]))
 }
 
-#[cfg(test)]
 fn marking_approaches(sock: [Edge; 4]) -> [bool; 4] {
     let road = |side| sock[side] == Edge::Road;
+    let horizontal = road(W) || road(E);
+    let vertical = road(S) || road(N);
     [
-        road(W) && road(S),
-        road(W) && road(N),
-        road(S) && road(W),
-        road(S) && road(E),
+        road(W) && vertical,
+        road(E) && vertical,
+        road(S) && horizontal,
+        road(N) && horizontal,
     ]
 }
 
@@ -1465,6 +1593,18 @@ pub struct Block {
 pub struct WorldAssets {
     meshes: WorldMeshAssets,
     materials: WorldMaterialAssets,
+    /// Stable catalog-indexed cache: at most one curb AO mesh per TileKind.
+    curb_contact_overlays: [Handle<Mesh>; TILE_CATALOG.len()],
+}
+
+impl WorldAssets {
+    fn curb_contact_overlay(&self, kind: TileKind) -> Handle<Mesh> {
+        let index = TILE_CATALOG
+            .iter()
+            .position(|candidate| *candidate == kind)
+            .expect("every TileKind is present in TILE_CATALOG");
+        self.curb_contact_overlays[index].clone()
+    }
 }
 
 /// The four audited building scenes used by deterministic urban generation.
@@ -1574,99 +1714,11 @@ const HAY_BALE_SCALE_MIN: f32 = 0.86;
 const HAY_BALE_SCALE_MAX: f32 = 1.0;
 const MAX_HAY_SPRIGS: usize = 12;
 
-/// Keep classical WebGL building shadows locked to the same world-space sun
-/// vector used by `spawn_production_sun`.
+/// Keep production lighting and projected toy shadows on the same fixed sun.
 const PRODUCTION_SUN_SOURCE: Vec3 = Vec3::new(30.0, 25.0, 15.0);
-#[cfg(any(target_arch = "wasm32", test))]
-const BUILDING_CAST_LENGTH_MIN: f32 = 2.0;
-#[cfg(any(target_arch = "wasm32", test))]
-const BUILDING_CAST_LENGTH_MAX: f32 = 12.0;
+
 const BUILDING_CONTACT_FOOTPRINT_SCALE: f32 = 1.08;
-#[cfg(any(target_arch = "wasm32", test))]
-const BUILDING_CAST_SHADOW_HEIGHT: f32 = 0.03;
-#[cfg(any(target_arch = "wasm32", test))]
-const BUILDING_CAST_SHADOW_THICKNESS: f32 = 0.02;
-
-/// Build a ground card whose local +Z axis points away from the sun in world
-/// XZ. `collider_half` is the already-rotated, conservative collider AABB.
-/// Building roots carry translation only, so this child transform remains
-/// world-fixed without compensating for a parent rotation.
-#[cfg(any(target_arch = "wasm32", test))]
-fn building_cast_shadow_transform(
-    collider_half: Vec2,
-    audited_height: f32,
-    sun_source: Vec3,
-) -> Transform {
-    let horizontal = Vec2::new(sun_source.x, sun_source.z);
-    let horizontal_length = if horizontal.is_finite() {
-        horizontal.length()
-    } else {
-        0.0
-    };
-    let cast_direction = if horizontal_length > f32::EPSILON {
-        -horizontal / horizontal_length
-    } else {
-        // Degenerate input is not used in production, but a deterministic
-        // fallback keeps this pure geometry helper finite and testable.
-        Vec2::NEG_X
-    };
-
-    let height = if audited_height.is_finite() {
-        audited_height.max(0.0)
-    } else {
-        0.0
-    };
-    let vertical = if sun_source.y.is_finite() {
-        sun_source.y.abs()
-    } else {
-        0.0
-    };
-    let projected_length = if vertical > f32::EPSILON {
-        height * horizontal_length / vertical
-    } else {
-        BUILDING_CAST_LENGTH_MAX
-    };
-    let projected_length = if projected_length.is_finite() {
-        projected_length.clamp(BUILDING_CAST_LENGTH_MIN, BUILDING_CAST_LENGTH_MAX)
-    } else {
-        BUILDING_CAST_LENGTH_MAX
-    };
-
-    let half = Vec2::new(
-        if collider_half.x.is_finite() {
-            collider_half.x.abs()
-        } else {
-            0.0
-        },
-        if collider_half.y.is_finite() {
-            collider_half.y.abs()
-        } else {
-            0.0
-        },
-    );
-    let perpendicular = Vec2::new(-cast_direction.y, cast_direction.x);
-    let card_width =
-        (2.0 * (half.x * perpendicular.x.abs() + half.y * perpendicular.y.abs())).max(0.01);
-    let center = cast_direction * (projected_length * 0.5);
-    let yaw = cast_direction.x.atan2(cast_direction.y);
-
-    Transform::from_xyz(center.x, BUILDING_CAST_SHADOW_HEIGHT, center.y)
-        .with_rotation(Quat::from_rotation_y(yaw))
-        .with_scale(Vec3::new(
-            card_width,
-            BUILDING_CAST_SHADOW_THICKNESS,
-            projected_length,
-        ))
-}
-
 const MAX_HOME_DECOR: usize = 9;
-
-/// Bevy's `Circle` primitive is authored in XY. This is the sole transform
-/// constructor for circular ground shadows, rotating their normal onto +Y.
-fn ground_circle_transform(height: f32) -> Transform {
-    Transform::from_xyz(0.0, height, 0.0)
-        .with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2))
-}
 
 /// Deterministic visual-only tree yaw. This hashes the layout identity and
 /// never advances the placement LCG.
@@ -1719,20 +1771,12 @@ struct WorldMeshAssets {
     coin: Handle<Mesh>,
     cone_body: Handle<Mesh>,
     cone_base: Handle<Mesh>,
-    cone_shadow: Handle<Mesh>,
-    tree_shadow: Handle<Mesh>,
-    hydrant_shadow: Handle<Mesh>,
-    bench_shadow: Handle<Mesh>,
     hedge_box: Handle<Mesh>,
-    hedge_shadow: Handle<Mesh>,
 }
 
 struct WorldMaterialAssets {
     line: Handle<StandardMaterial>,
-    shadow: Handle<StandardMaterial>,
-    building_contact_shadow: Handle<StandardMaterial>,
-    #[allow(dead_code)] // Consumed only by WebGL spawning and native contract tests.
-    building_cast_shadow: Handle<StandardMaterial>,
+    curb_contact_overlay: Handle<StandardMaterial>,
     field_furrow: Handle<StandardMaterial>,
     farm_wood: Handle<StandardMaterial>,
     road_marking: Handle<StandardMaterial>,
@@ -1791,85 +1835,92 @@ impl FromWorld for WorldAssets {
             coin: a.add(Cylinder::new(0.3, 0.08)),
             cone_body: a.add(bevy::math::primitives::Cone::new(0.18, 0.4)),
             cone_base: a.add(Cuboid::new(0.4, 0.04, 0.4)),
-            cone_shadow: a.add(Circle::new(0.3)),
-            tree_shadow: a.add(Circle::new(0.9)),
-            hydrant_shadow: a.add(Circle::new(0.35)),
-            bench_shadow: a.add(Plane3d::default().mesh().size(1.1, 0.45)),
             hedge_box: a.add(Cuboid::new(1.2, 0.5, 0.4)),
-            hedge_shadow: a.add(Plane3d::default().mesh().size(1.4, 0.55)),
+        });
+        let curb_contact_overlays = world.resource_scope(|_, mut a: Mut<Assets<Mesh>>| {
+            TILE_CATALOG.map(|kind| a.add(curb_contact_overlay_mesh(kind)))
         });
         let materials =
             world.resource_scope(
                 |_, mut a: Mut<Assets<StandardMaterial>>| WorldMaterialAssets {
-                    line: a.add(StandardMaterial {
-                        base_color: palette::LANE_WHITE,
-                        ..default()
-                    }),
-                    shadow: a.add(StandardMaterial {
-                        base_color: Color::srgba(0.0, 0.0, 0.0, 0.35),
-                        alpha_mode: AlphaMode::Blend,
-                        ..default()
-                    }),
-                    building_contact_shadow: a.add(StandardMaterial {
-                        base_color: Color::srgba(0.0, 0.0, 0.0, 0.20),
+                    line: a.add(toy_material(
+                        ToyMaterialFamily::PaintedMetal,
+                        StandardMaterial {
+                            base_color: palette::LANE_WHITE,
+                            ..default()
+                        },
+                    )),
+                    curb_contact_overlay: a.add(StandardMaterial {
+                        base_color: Color::srgb(0.025, 0.03, 0.035),
                         alpha_mode: AlphaMode::Blend,
                         unlit: true,
                         ..default()
                     }),
-                    building_cast_shadow: a.add(StandardMaterial {
-                        base_color: Color::srgba(0.0, 0.0, 0.0, 0.18),
-                        alpha_mode: AlphaMode::Blend,
-                        unlit: true,
-                        ..default()
-                    }),
-                    field_furrow: a.add(StandardMaterial {
-                        base_color: Color::srgb(0.31, 0.23, 0.09),
-                        perceptual_roughness: 1.0,
-                        ..default()
-                    }),
-                    farm_wood: a.add(StandardMaterial {
-                        base_color: Color::srgb(0.38, 0.22, 0.09),
-                        perceptual_roughness: 0.95,
-                        ..default()
-                    }),
-                    road_marking: a.add(StandardMaterial {
-                        base_color: palette::LANE_WHITE,
-                        perceptual_roughness: 0.75,
-                        ..default()
-                    }),
-                    coin: a.add(StandardMaterial {
-                        base_color: palette::COIN,
-                        metallic: 0.8,
-                        perceptual_roughness: 0.25,
-                        emissive: LinearRgba::rgb(0.9, 0.55, 0.05),
-                        ..default()
-                    }),
-                    cone: a.add(StandardMaterial {
-                        base_color: Color::srgb(0.95, 0.45, 0.05),
-                        perceptual_roughness: 0.7,
-                        emissive: LinearRgba::rgb(0.25, 0.08, 0.0),
-                        ..default()
-                    }),
-                    hedge: a.add(StandardMaterial {
-                        base_color: Color::srgb(0.16, 0.34, 0.14),
-                        perceptual_roughness: 0.9,
-                        ..default()
-                    }),
-                    pond_shore: a.add(StandardMaterial {
-                        base_color: Color::srgb(0.48, 0.39, 0.22),
-                        perceptual_roughness: 1.0,
-                        ..default()
-                    }),
-                    pond_reed: a.add(StandardMaterial {
-                        base_color: Color::srgb(0.34, 0.48, 0.12),
-                        perceptual_roughness: 0.95,
-                        ..default()
-                    }),
-                    pond_rock: a.add(StandardMaterial {
-                        base_color: Color::srgb(0.39, 0.42, 0.40),
-                        perceptual_roughness: 0.98,
-                        ..default()
-                    }),
+                    field_furrow: a.add(toy_material(
+                        ToyMaterialFamily::SoilHay,
+                        StandardMaterial {
+                            base_color: Color::srgb(0.31, 0.23, 0.09),
+                            ..default()
+                        },
+                    )),
+                    farm_wood: a.add(toy_material(
+                        ToyMaterialFamily::RawWood,
+                        StandardMaterial {
+                            base_color: Color::srgb(0.38, 0.22, 0.09),
+                            ..default()
+                        },
+                    )),
+                    road_marking: a.add(toy_material(
+                        ToyMaterialFamily::PaintedMetal,
+                        StandardMaterial {
+                            base_color: palette::LANE_WHITE,
+                            ..default()
+                        },
+                    )),
+                    coin: a.add(toy_material(
+                        ToyMaterialFamily::BareMetal,
+                        StandardMaterial {
+                            base_color: palette::COIN,
+                            emissive: LinearRgba::rgb(0.9, 0.55, 0.05),
+                            ..default()
+                        },
+                    )),
+                    cone: a.add(toy_material(
+                        ToyMaterialFamily::Rubber,
+                        StandardMaterial {
+                            base_color: Color::srgb(0.95, 0.45, 0.05),
+                            emissive: LinearRgba::rgb(0.25, 0.08, 0.0),
+                            ..default()
+                        },
+                    )),
+                    hedge: a.add(toy_material(
+                        ToyMaterialFamily::Foliage,
+                        StandardMaterial {
+                            base_color: Color::srgb(0.16, 0.34, 0.14),
+                            ..default()
+                        },
+                    )),
+                    pond_shore: a.add(toy_material(
+                        ToyMaterialFamily::SoilHay,
+                        StandardMaterial {
+                            base_color: Color::srgb(0.48, 0.39, 0.22),
+                            ..default()
+                        },
+                    )),
+                    pond_reed: a.add(toy_material(
+                        ToyMaterialFamily::Foliage,
+                        StandardMaterial {
+                            base_color: Color::srgb(0.34, 0.48, 0.12),
+                            ..default()
+                        },
+                    )),
+                    pond_rock: a.add(toy_material(
+                        ToyMaterialFamily::Concrete,
+                        StandardMaterial {
+                            base_color: Color::srgb(0.39, 0.42, 0.40),
+                            ..default()
+                        },
+                    )),
                     // Filled below after the StandardMaterial borrow closes.
                     pond_water: std::array::from_fn(|_| Handle::default()),
                 },
@@ -1891,7 +1942,11 @@ impl FromWorld for WorldAssets {
                 }),
             ]
         });
-        Self { meshes, materials }
+        Self {
+            meshes,
+            materials,
+            curb_contact_overlays,
+        }
     }
 }
 
@@ -2012,6 +2067,7 @@ fn spawn_initial_grid(
     textures: Res<TextureAssets>,
     world_assets: Res<WorldAssets>,
     scene_assets: Res<WorldSceneAssets>,
+    toy_shading: Res<ToyShadingAssets>,
     mut last_recycled_cell: ResMut<LastRecycledCell>,
 ) {
     spawn_grid_window(
@@ -2021,6 +2077,7 @@ fn spawn_initial_grid(
         &textures,
         &world_assets,
         &scene_assets,
+        &toy_shading,
     );
     last_recycled_cell.record_completed((0, 0));
 }
@@ -2041,6 +2098,7 @@ fn spawn_grid_window(
     textures: &TextureAssets,
     world_assets: &WorldAssets,
     scene_assets: &WorldSceneAssets,
+    toy_shading: &ToyShadingAssets,
 ) {
     let block = cfg.block;
     for (gx, gz) in desired_grid_coords((0, 0), cfg.count) {
@@ -2066,6 +2124,7 @@ fn spawn_grid_window(
             textures,
             world_assets,
             scene_assets,
+            toy_shading,
             root,
             gx,
             gz,
@@ -2232,6 +2291,7 @@ fn spawn_review_world(
     textures: Res<TextureAssets>,
     world_assets: Res<WorldAssets>,
     scene_assets: Res<WorldSceneAssets>,
+    toy_shading: Res<ToyShadingAssets>,
 ) {
     commands.spawn((
         DirectionalLight {
@@ -2251,6 +2311,7 @@ fn spawn_review_world(
             &textures,
             &world_assets,
             &scene_assets,
+            &toy_shading,
             Vec3::new(
                 gx as f32 * REVIEW_BLOCK_SIZE,
                 0.0,
@@ -2274,6 +2335,7 @@ fn spawn_review_world(
             &textures,
             &world_assets,
             &scene_assets,
+            &toy_shading,
             Vec3::new(
                 (column as f32 - 4.5) * REVIEW_ATLAS_PITCH,
                 0.0,
@@ -2297,6 +2359,7 @@ fn spawn_review_world(
             &textures,
             &world_assets,
             &scene_assets,
+            &toy_shading,
             Vec3::new(
                 (column as f32 - 4.5) * REVIEW_ATLAS_PITCH,
                 0.0,
@@ -2320,6 +2383,7 @@ fn spawn_review_tile(
     textures: &TextureAssets,
     world_assets: &WorldAssets,
     scene_assets: &WorldSceneAssets,
+    toy_shading: &ToyShadingAssets,
     position: Vec3,
     gx: i32,
     gz: i32,
@@ -2354,6 +2418,7 @@ fn spawn_review_tile(
         textures,
         world_assets,
         scene_assets,
+        toy_shading,
         root,
         gx,
         gz,
@@ -3079,6 +3144,7 @@ pub fn populate_block(
     textures: &TextureAssets,
     world_assets: &WorldAssets,
     scene_assets: &WorldSceneAssets,
+    toy_shading: &ToyShadingAssets,
     root: Entity,
     gx: i32,
     gz: i32,
@@ -3113,8 +3179,6 @@ pub fn populate_block(
     let interior_max_z_lo = if road_s { -half + 6.0 } else { -half + 1.0 };
     let interior_max_z_hi = if road_n { half - 6.0 } else { half - 1.0 };
 
-    let shadow_mat = world_assets.materials.shadow.clone();
-
     // Family detail uses a separate domain; the legacy seed remains dedicated
     // to topology-independent generic decoration such as coins.
     let layout_seed = family_layout_seed(gx, gz, family);
@@ -3146,6 +3210,14 @@ pub fn populate_block(
         // finite 16x8 (or 8x16) arm for each socket. Arms end at the tile
         // boundary and adjacent tiles meet there without overlapping planes.
         if any_road {
+            // One cached, tile-wide AO overlay rather than one entity/asset per
+            // curb. Empty blocks deliberately have no overlay child.
+            p.spawn((
+                Mesh3d(world_assets.curb_contact_overlay(kind)),
+                MeshMaterial3d(world_assets.materials.curb_contact_overlay.clone()),
+                Transform::IDENTITY,
+                BlockContactOverlay,
+            ));
             p.spawn((
                 Mesh3d(world_assets.meshes.road_pad.clone()),
                 MeshMaterial3d(textures.road.clone()),
@@ -3219,7 +3291,8 @@ pub fn populate_block(
                     ));
                 }
                 let sign = if socket == W { -1.0 } else { 1.0 };
-                for along in [6.0_f32, 10.0, 14.0, 18.0] {
+                // Keep dashes outside the compact stop/crossing approach.
+                for along in [10.0_f32, 14.0, 18.0] {
                     p.spawn((
                         Mesh3d(world_assets.meshes.dash_x.clone()),
                         MeshMaterial3d(line_mat.clone()),
@@ -3235,7 +3308,8 @@ pub fn populate_block(
                     ));
                 }
                 let sign = if socket == S { -1.0 } else { 1.0 };
-                for along in [6.0_f32, 10.0, 14.0, 18.0] {
+                // Keep dashes outside the compact stop/crossing approach.
+                for along in [10.0_f32, 14.0, 18.0] {
                     p.spawn((
                         Mesh3d(world_assets.meshes.dash_z.clone()),
                         MeshMaterial3d(line_mat.clone()),
@@ -3245,14 +3319,17 @@ pub fn populate_block(
             }
         }
 
-        // Junction approaches get compact arm-owned crossing/stop marks.
+        // Junction approaches get compact marks only on shared-edge surfaces
+        // owned by this block. The same pure plan drives regression tests,
+        // preventing duplicate marks from adjacent blocks.
         let road_count = [road_w, road_e, road_s, road_n]
             .into_iter()
             .filter(|enabled| *enabled)
             .count();
-        if road_count >= 2 {
+        let approach_plan = marking_approaches(sock);
+        if approach_plan.into_iter().any(|enabled| enabled) {
             let marking_mat = world_assets.materials.road_marking.clone();
-            for (socket, enabled) in [(W, road_w), (E, road_e), (S, road_s), (N, road_n)] {
+            for (socket, enabled) in approach_plan.into_iter().enumerate() {
                 if !enabled {
                     continue;
                 }
@@ -3261,24 +3338,24 @@ pub fn populate_block(
                 } else {
                     1.0
                 };
-                for offset in [-0.38_f32, 0.0, 0.38] {
-                    let (mesh, pos) = if socket <= E {
-                        (
-                            world_assets.meshes.crosswalk_z.clone(),
-                            Vec3::new(sign * (5.0 + offset), 0.06, 0.0),
-                        )
-                    } else {
-                        (
-                            world_assets.meshes.crosswalk_x.clone(),
-                            Vec3::new(0.0, 0.06, sign * (5.0 + offset)),
-                        )
-                    };
-                    p.spawn((
-                        Mesh3d(mesh),
-                        MeshMaterial3d(marking_mat.clone()),
-                        Transform::from_translation(pos),
-                    ));
-                }
+                // One crossing bar per approach avoids coplanar stacks and
+                // perpendicular tangles in the central junction footprint.
+                let (crossing_mesh, crossing_pos) = if socket <= E {
+                    (
+                        world_assets.meshes.crosswalk_z.clone(),
+                        Vec3::new(sign * 5.0, 0.06, 0.0),
+                    )
+                } else {
+                    (
+                        world_assets.meshes.crosswalk_x.clone(),
+                        Vec3::new(0.0, 0.06, sign * 5.0),
+                    )
+                };
+                p.spawn((
+                    Mesh3d(crossing_mesh),
+                    MeshMaterial3d(marking_mat.clone()),
+                    Transform::from_translation(crossing_pos),
+                ));
                 let (mesh, pos) = if socket <= E {
                     (
                         world_assets.meshes.stop_line_z.clone(),
@@ -3337,20 +3414,18 @@ pub fn populate_block(
         let cone_body_mesh = a.meshes.cone_body.clone();
         let cone_base_mesh = a.meshes.cone_base.clone();
         let cone_mat = a.materials.cone.clone();
-        let cone_shadow_mesh = a.meshes.cone_shadow.clone();
-        let tree_shadow_mesh = a.meshes.tree_shadow.clone();
-        let hydrant_shadow_mesh = a.meshes.hydrant_shadow.clone();
-        let bench_shadow_mesh = a.meshes.bench_shadow.clone();
         let hedge_box_mesh = a.meshes.hedge_box.clone();
         let hedge_mat = a.materials.hedge.clone();
-        let hedge_shadow_mesh = a.meshes.hedge_shadow.clone();
         let hay_bale_mesh = a.meshes.hay_bale.clone();
         let hay_sprig_mesh = a.meshes.hay_sprig.clone();
         let farm_crate_mesh = a.meshes.farm_crate.clone();
         let farm_wood_mat = a.materials.farm_wood.clone();
-        let building_contact_shadow_mat = a.materials.building_contact_shadow.clone();
-        #[cfg(target_arch = "wasm32")]
-        let building_cast_shadow_mat = a.materials.building_cast_shadow.clone();
+        let contact_plane = toy_shading.contact_plane.clone();
+        let contact_material = toy_shading.contact_material.clone();
+        #[cfg(any(target_arch = "wasm32", test))]
+        let cast_plane = toy_shading.cast_plane.clone();
+        #[cfg(any(target_arch = "wasm32", test))]
+        let cast_material = toy_shading.cast_material.clone();
 
         // --- Deterministic per-block LCG for placement variety ---
         let mut s = seed;
@@ -3381,11 +3456,24 @@ pub fn populate_block(
                 _ => (lateral, along),
             };
             p.spawn((
-                Mesh3d(coin_mesh.clone()),
-                MeshMaterial3d(coin_mat.clone()),
-                Transform::from_xyz(cx, 0.5, cz),
+                Transform::from_xyz(cx, 0.0, cz),
+                Visibility::default(),
                 Coin,
-            ));
+            ))
+            .with_children(|coin| {
+                coin.spawn((
+                    Mesh3d(coin_mesh.clone()),
+                    MeshMaterial3d(coin_mat.clone()),
+                    Transform::from_xyz(0.0, 0.5, 0.0),
+                    CoinVisual { phase: cx },
+                ));
+                coin.spawn((
+                    Mesh3d(contact_plane.clone()),
+                    MeshMaterial3d(contact_material.clone()),
+                    contact_shadow_transform(Vec2::splat(0.52), 0.0),
+                    ToyContactShadow,
+                ));
+            });
         }
 
         // --- Interior decorations ---
@@ -3401,7 +3489,15 @@ pub fn populate_block(
                 .flatten();
             if let Some(pond) = pond {
                 placed.push(pond.expanded_exclusion());
-                spawn_pond(p, family, pond, layout_seed, world_assets);
+                spawn_pond(
+                    p,
+                    family,
+                    pond,
+                    layout_seed,
+                    world_assets,
+                    &contact_plane,
+                    &contact_material,
+                );
             }
             let tree_family = if district == District::WaterPark && pond.is_none() {
                 pond_fallback_family(family)
@@ -3430,8 +3526,12 @@ pub fn populate_block(
                     tx,
                     tz,
                     &scene_assets.tree,
-                    &tree_shadow_mesh,
-                    &shadow_mat,
+                    &contact_plane,
+                    &contact_material,
+                    #[cfg(any(target_arch = "wasm32", test))]
+                    &cast_plane,
+                    #[cfg(any(target_arch = "wasm32", test))]
+                    &cast_material,
                     tree_visual_yaw(layout_seed, tree_ordinal),
                 );
             }
@@ -3498,6 +3598,24 @@ pub fn populate_block(
                     FarmProp,
                 ))
                 .with_children(|fp| {
+                    fp.spawn((
+                        Mesh3d(contact_plane.clone()),
+                        MeshMaterial3d(contact_material.clone()),
+                        contact_shadow_transform(Vec2::splat(half_extent * 2.0), 0.0),
+                        ToyContactShadow,
+                    ));
+                    #[cfg(any(target_arch = "wasm32", test))]
+                    spawn_static_cast_shadow(
+                        fp,
+                        &cast_plane,
+                        &cast_material,
+                        Vec2::splat(half_extent * 2.0),
+                        prop.rotation,
+                        match prop.kind {
+                            FieldPropKind::HayBale => StaticCastKind::HayBale,
+                            FieldPropKind::FarmCrate => StaticCastKind::FarmCrate,
+                        },
+                    );
                     match prop.kind {
                         FieldPropKind::HayBale => {
                             let scale = hay_bale_visual_scale(layout_seed, prop_ordinal);
@@ -3565,8 +3683,12 @@ pub fn populate_block(
                     tree_x,
                     tree_z,
                     &scene_assets.tree,
-                    &tree_shadow_mesh,
-                    &shadow_mat,
+                    &contact_plane,
+                    &contact_material,
+                    #[cfg(any(target_arch = "wasm32", test))]
+                    &cast_plane,
+                    #[cfg(any(target_arch = "wasm32", test))]
+                    &cast_material,
                     tree_visual_yaw(layout_seed, tree_ordinal),
                 );
             }
@@ -3620,34 +3742,30 @@ pub fn populate_block(
                 .with_children(|bp| {
                     bp.spawn((
                         WorldAssetRoot(scene_assets.building(asset_kind)),
+                        ImportedWorldVisual,
                         Transform::from_rotation(Quat::from_rotation_y(facing.yaw())),
                     ));
-                    // Subtle contact AO hugs the audited, rotated collider
-                    // footprint and reuses the cached unit box/material.
+                    // Every platform gets one shared soft contact card.
                     bp.spawn((
-                        Mesh3d(unit_box_mesh.clone()),
-                        MeshMaterial3d(building_contact_shadow_mat.clone()),
-                        Transform::from_xyz(0.0, 0.025, 0.0).with_scale(Vec3::new(
-                            collider_half.x * 2.0 * BUILDING_CONTACT_FOOTPRINT_SCALE,
-                            0.025,
-                            collider_half.y * 2.0 * BUILDING_CONTACT_FOOTPRINT_SCALE,
-                        )),
-                        BuildingGroundShadow,
-                    ));
-                    // Native builds use directional shadow maps. WebGL2 gets
-                    // exactly one classical projected card instead, with no
-                    // per-building mesh or material allocation.
-                    #[cfg(target_arch = "wasm32")]
-                    bp.spawn((
-                        Mesh3d(unit_box_mesh.clone()),
-                        MeshMaterial3d(building_cast_shadow_mat.clone()),
-                        building_cast_shadow_transform(
-                            collider_half,
-                            dimensions.height,
-                            PRODUCTION_SUN_SOURCE,
+                        Mesh3d(contact_plane.clone()),
+                        MeshMaterial3d(contact_material.clone()),
+                        contact_shadow_transform(
+                            collider_half * 2.0 * BUILDING_CONTACT_FOOTPRINT_SCALE,
+                            0.0,
                         ),
                         BuildingGroundShadow,
+                        ToyContactShadow,
+                    ));
+                    // Native builds retain directional shadow maps. WebGL2
+                    // alone gets the shared long-cast card.
+                    #[cfg(target_arch = "wasm32")]
+                    bp.spawn((
+                        Mesh3d(cast_plane.clone()),
+                        MeshMaterial3d(cast_material.clone()),
+                        projected_shadow_transform(collider_half * 2.0, dimensions.height, 0.0),
+                        BuildingGroundShadow,
                         BuildingCastShadow,
+                        ToyCastShadow,
                     ));
                 });
             }
@@ -3682,8 +3800,12 @@ pub fn populate_block(
                     tx,
                     tz,
                     &scene_assets.tree,
-                    &tree_shadow_mesh,
-                    &shadow_mat,
+                    &contact_plane,
+                    &contact_material,
+                    #[cfg(any(target_arch = "wasm32", test))]
+                    &cast_plane,
+                    #[cfg(any(target_arch = "wasm32", test))]
+                    &cast_material,
                     tree_visual_yaw(layout_seed, tree_ordinal),
                 );
             }
@@ -3722,8 +3844,24 @@ pub fn populate_block(
                 .with_children(|lp| {
                     lp.spawn((
                         WorldAssetRoot(scene_assets.streetlamp.clone()),
+                        ImportedWorldVisual,
                         Transform::from_rotation(Quat::from_rotation_y(facing.yaw())),
                     ));
+                    lp.spawn((
+                        Mesh3d(contact_plane.clone()),
+                        MeshMaterial3d(contact_material.clone()),
+                        contact_shadow_transform(Vec2::splat(0.55), 0.0),
+                        ToyContactShadow,
+                    ));
+                    #[cfg(any(target_arch = "wasm32", test))]
+                    spawn_static_cast_shadow(
+                        lp,
+                        &cast_plane,
+                        &cast_material,
+                        Vec2::splat(0.95),
+                        0.0,
+                        StaticCastKind::Lamp,
+                    );
                 });
             }
 
@@ -3783,11 +3921,11 @@ pub fn populate_block(
                                 Transform::from_xyz(0.0, 0.02, 0.0),
                             ));
                             cp.spawn((
-                                Mesh3d(cone_shadow_mesh.clone()),
-                                MeshMaterial3d(shadow_mat.clone()),
-                                ground_circle_transform(0.05),
+                                Mesh3d(contact_plane.clone()),
+                                MeshMaterial3d(contact_material.clone()),
+                                contact_shadow_transform(Vec2::splat(0.55), 0.0),
                                 ConeShadow,
-                                GroundCircleShadow,
+                                ToyContactShadow,
                             ));
                         });
                     }
@@ -3804,15 +3942,25 @@ pub fn populate_block(
                         .with_children(|hp| {
                             hp.spawn((
                                 WorldAssetRoot(scene_assets.hydrant.clone()),
+                                ImportedWorldVisual,
                                 Transform::IDENTITY,
                             ));
                             hp.spawn((
-                                Mesh3d(hydrant_shadow_mesh.clone()),
-                                MeshMaterial3d(shadow_mat.clone()),
-                                ground_circle_transform(0.05),
+                                Mesh3d(contact_plane.clone()),
+                                MeshMaterial3d(contact_material.clone()),
+                                contact_shadow_transform(Vec2::splat(0.65), 0.0),
                                 HydrantShadow,
-                                GroundCircleShadow,
+                                ToyContactShadow,
                             ));
+                            #[cfg(any(target_arch = "wasm32", test))]
+                            spawn_static_cast_shadow(
+                                hp,
+                                &cast_plane,
+                                &cast_material,
+                                Vec2::splat(0.72),
+                                0.0,
+                                StaticCastKind::Hydrant,
+                            );
                         });
                     }
                     2 => {
@@ -3828,16 +3976,26 @@ pub fn populate_block(
                         .with_children(|bp| {
                             bp.spawn((
                                 WorldAssetRoot(scene_assets.bench.clone()),
+                                ImportedWorldVisual,
                                 Transform::from_rotation(Quat::from_rotation_y(bench_facing.yaw())),
                             ));
                             bp.spawn((
-                                Mesh3d(bench_shadow_mesh.clone()),
-                                MeshMaterial3d(shadow_mat.clone()),
-                                Transform::from_xyz(0.0, 0.05, 0.0)
-                                    .with_rotation(Quat::from_rotation_y(bench_facing.yaw()))
-                                    .with_scale(Vec3::new(1.8 / 1.1, 1.0, 0.65 / 0.45)),
+                                Mesh3d(contact_plane.clone()),
+                                MeshMaterial3d(contact_material.clone()),
+                                contact_shadow_transform(Vec2::new(1.9, 0.75), 0.0)
+                                    .with_rotation(Quat::from_rotation_y(bench_facing.yaw())),
                                 BenchShadow,
+                                ToyContactShadow,
                             ));
+                            #[cfg(any(target_arch = "wasm32", test))]
+                            spawn_static_cast_shadow(
+                                bp,
+                                &cast_plane,
+                                &cast_material,
+                                bench_half * 2.0,
+                                0.0,
+                                StaticCastKind::Bench,
+                            );
                         });
                     }
                     _ => {
@@ -3859,10 +4017,20 @@ pub fn populate_block(
                                 Transform::from_xyz(0.0, 0.25, 0.0),
                             ));
                             hp.spawn((
-                                Mesh3d(hedge_shadow_mesh.clone()),
-                                MeshMaterial3d(shadow_mat.clone()),
-                                Transform::from_xyz(0.0, 0.05, 0.0),
+                                Mesh3d(contact_plane.clone()),
+                                MeshMaterial3d(contact_material.clone()),
+                                contact_shadow_transform(Vec2::new(1.4, 0.65), 0.0),
+                                ToyContactShadow,
                             ));
+                            #[cfg(any(target_arch = "wasm32", test))]
+                            spawn_static_cast_shadow(
+                                hp,
+                                &cast_plane,
+                                &cast_material,
+                                Vec2::new(1.2, 0.4),
+                                0.0,
+                                StaticCastKind::Hedge,
+                            );
                         });
                     }
                 }
@@ -3879,10 +4047,42 @@ pub fn populate_block(
                     &unit_box_mesh,
                     &farm_wood_mat,
                     &scene_assets.mailbox,
+                    &contact_plane,
+                    &contact_material,
+                    #[cfg(any(target_arch = "wasm32", test))]
+                    &cast_plane,
+                    #[cfg(any(target_arch = "wasm32", test))]
+                    &cast_material,
                 );
             }
         }
     });
+}
+
+/// Spawn one projected card while keeping the card's direction fixed in world
+/// space. `root_yaw` is the yaw already carried by the static root; applying
+/// its inverse to the helper transform counter-rotates both the offset and yaw
+/// so transform propagation reconstructs the canonical production-sun card.
+#[cfg(any(target_arch = "wasm32", test))]
+fn spawn_static_cast_shadow(
+    parent: &mut ChildSpawnerCommands,
+    cast_plane: &Handle<Mesh>,
+    cast_material: &Handle<StandardMaterial>,
+    world_footprint: Vec2,
+    root_yaw: f32,
+    kind: StaticCastKind,
+) {
+    let mut transform = projected_shadow_transform(world_footprint, static_cast_height(kind), 0.0);
+    let inverse_root = Quat::from_rotation_y(-root_yaw);
+    transform.translation = inverse_root * transform.translation;
+    transform.rotation = inverse_root * transform.rotation;
+    parent.spawn((
+        Mesh3d(cast_plane.clone()),
+        MeshMaterial3d(cast_material.clone()),
+        transform,
+        kind,
+        ToyCastShadow,
+    ));
 }
 
 fn spawn_pond(
@@ -3891,6 +4091,8 @@ fn spawn_pond(
     footprint: PondFootprint,
     seed: u32,
     assets: &WorldAssets,
+    contact_plane: &Handle<Mesh>,
+    contact_material: &Handle<StandardMaterial>,
 ) {
     let water_index = match family {
         DistrictFamily::WaterGardenOval => 0,
@@ -3927,23 +4129,49 @@ fn spawn_pond(
     for prop in props.into_iter().take(count.min(MAX_POND_PROPS)) {
         match prop.kind {
             PondPropKind::Reed => {
-                parent.spawn((
-                    Mesh3d(assets.meshes.pond_reed.clone()),
-                    MeshMaterial3d(assets.materials.pond_reed.clone()),
-                    Transform::from_xyz(prop.position.x, 0.375, prop.position.y)
-                        .with_rotation(Quat::from_rotation_y(prop.rotation)),
-                    PondProp,
-                ));
+                parent
+                    .spawn((
+                        Transform::from_xyz(prop.position.x, 0.0, prop.position.y)
+                            .with_rotation(Quat::from_rotation_y(prop.rotation)),
+                        Visibility::default(),
+                        PondProp,
+                    ))
+                    .with_children(|reed| {
+                        reed.spawn((
+                            Mesh3d(assets.meshes.pond_reed.clone()),
+                            MeshMaterial3d(assets.materials.pond_reed.clone()),
+                            Transform::from_xyz(0.0, 0.375, 0.0),
+                        ));
+                        reed.spawn((
+                            Mesh3d(contact_plane.clone()),
+                            MeshMaterial3d(contact_material.clone()),
+                            contact_shadow_transform(Vec2::splat(0.28), 0.0),
+                            ToyContactShadow,
+                        ));
+                    });
             }
             PondPropKind::Rock => {
-                parent.spawn((
-                    Mesh3d(assets.meshes.pond_rock.clone()),
-                    MeshMaterial3d(assets.materials.pond_rock.clone()),
-                    Transform::from_xyz(prop.position.x, 0.22, prop.position.y)
-                        .with_scale(Vec3::new(1.0, 0.55, 0.8))
-                        .with_rotation(Quat::from_rotation_y(prop.rotation)),
-                    PondProp,
-                ));
+                parent
+                    .spawn((
+                        Transform::from_xyz(prop.position.x, 0.0, prop.position.y)
+                            .with_rotation(Quat::from_rotation_y(prop.rotation)),
+                        Visibility::default(),
+                        PondProp,
+                    ))
+                    .with_children(|rock| {
+                        rock.spawn((
+                            Mesh3d(assets.meshes.pond_rock.clone()),
+                            MeshMaterial3d(assets.materials.pond_rock.clone()),
+                            Transform::from_xyz(0.0, 0.22, 0.0)
+                                .with_scale(Vec3::new(1.0, 0.55, 0.8)),
+                        ));
+                        rock.spawn((
+                            Mesh3d(contact_plane.clone()),
+                            MeshMaterial3d(contact_material.clone()),
+                            contact_shadow_transform(Vec2::new(0.90, 0.72), 0.0),
+                            ToyContactShadow,
+                        ));
+                    });
             }
         }
     }
@@ -3954,8 +4182,10 @@ fn spawn_tree_root(
     x: f32,
     z: f32,
     scene: &Handle<WorldAsset>,
-    shadow_mesh: &Handle<Mesh>,
-    shadow_mat: &Handle<StandardMaterial>,
+    contact_plane: &Handle<Mesh>,
+    contact_material: &Handle<StandardMaterial>,
+    #[cfg(any(target_arch = "wasm32", test))] cast_plane: &Handle<Mesh>,
+    #[cfg(any(target_arch = "wasm32", test))] cast_material: &Handle<StandardMaterial>,
     visual_yaw: f32,
 ) {
     parent
@@ -3971,15 +4201,25 @@ fn spawn_tree_root(
         .with_children(|tree| {
             tree.spawn((
                 WorldAssetRoot(scene.clone()),
+                ImportedWorldVisual,
                 Transform::from_rotation(Quat::from_rotation_y(visual_yaw)),
             ));
             tree.spawn((
-                Mesh3d(shadow_mesh.clone()),
-                MeshMaterial3d(shadow_mat.clone()),
-                ground_circle_transform(0.05),
+                Mesh3d(contact_plane.clone()),
+                MeshMaterial3d(contact_material.clone()),
+                contact_shadow_transform(Vec2::splat(1.8), 0.0),
                 TreeShadow,
-                GroundCircleShadow,
+                ToyContactShadow,
             ));
+            #[cfg(any(target_arch = "wasm32", test))]
+            spawn_static_cast_shadow(
+                tree,
+                cast_plane,
+                cast_material,
+                Vec2::splat(1.45),
+                0.0,
+                StaticCastKind::Tree,
+            );
         });
 }
 
@@ -4085,6 +4325,10 @@ fn spawn_home_decor(
     mesh: &Handle<Mesh>,
     wood: &Handle<StandardMaterial>,
     mailbox_scene: &Handle<WorldAsset>,
+    contact_plane: &Handle<Mesh>,
+    contact_material: &Handle<StandardMaterial>,
+    #[cfg(any(target_arch = "wasm32", test))] cast_plane: &Handle<Mesh>,
+    #[cfg(any(target_arch = "wasm32", test))] cast_material: &Handle<StandardMaterial>,
 ) {
     let layout = home_decor_layout(seed);
     // Fences are admitted first with their own local seed. Mailbox selection
@@ -4114,15 +4358,37 @@ fn spawn_home_decor(
         )
         .is_some()
         {
-            parent.spawn((
-                Mesh3d(mesh.clone()),
-                MeshMaterial3d(wood.clone()),
-                Transform::from_xyz(decor.position.x, 0.45, decor.position.y)
-                    .with_rotation(Quat::from_rotation_y(decor.rotation))
-                    .with_scale(Vec3::new(4.0, 0.9, 0.12)),
-                Collider { half_x, half_z },
-                PicketFencePanel,
-            ));
+            parent
+                .spawn((
+                    Transform::from_xyz(decor.position.x, 0.0, decor.position.y),
+                    Visibility::default(),
+                    Collider { half_x, half_z },
+                    PicketFencePanel,
+                ))
+                .with_children(|fence| {
+                    fence.spawn((
+                        Mesh3d(mesh.clone()),
+                        MeshMaterial3d(wood.clone()),
+                        Transform::from_xyz(0.0, 0.45, 0.0)
+                            .with_rotation(Quat::from_rotation_y(decor.rotation))
+                            .with_scale(Vec3::new(4.0, 0.9, 0.12)),
+                    ));
+                    fence.spawn((
+                        Mesh3d(contact_plane.clone()),
+                        MeshMaterial3d(contact_material.clone()),
+                        contact_shadow_transform(Vec2::new(half_x * 2.1, half_z * 2.1), 0.0),
+                        ToyContactShadow,
+                    ));
+                    #[cfg(any(target_arch = "wasm32", test))]
+                    spawn_static_cast_shadow(
+                        fence,
+                        cast_plane,
+                        cast_material,
+                        Vec2::new(half_x * 2.0, half_z * 2.0),
+                        0.0,
+                        StaticCastKind::FencePanel,
+                    );
+                });
         }
     }
 
@@ -4168,8 +4434,24 @@ fn spawn_home_decor(
         .with_children(|mailbox| {
             mailbox.spawn((
                 WorldAssetRoot(mailbox_scene.clone()),
+                ImportedWorldVisual,
                 Transform::from_rotation(Quat::from_rotation_y(facing.yaw())),
             ));
+            mailbox.spawn((
+                Mesh3d(contact_plane.clone()),
+                MeshMaterial3d(contact_material.clone()),
+                contact_shadow_transform(collider_half * 2.1, 0.0),
+                ToyContactShadow,
+            ));
+            #[cfg(any(target_arch = "wasm32", test))]
+            spawn_static_cast_shadow(
+                mailbox,
+                cast_plane,
+                cast_material,
+                collider_half * 2.0,
+                0.0,
+                StaticCastKind::Mailbox,
+            );
         });
 }
 
@@ -4398,6 +4680,7 @@ fn recycle_grid(
     textures: Res<TextureAssets>,
     world_assets: Res<WorldAssets>,
     scene_assets: Res<WorldSceneAssets>,
+    toy_shading: Res<ToyShadingAssets>,
     car: Query<&Transform, (With<Car>, Without<Block>)>,
     blocks: Query<(Entity, &Block, Option<&PendingBlock>)>,
     mut last_recycled_cell: ResMut<LastRecycledCell>,
@@ -4493,6 +4776,7 @@ fn recycle_grid(
                     &textures,
                     &world_assets,
                     &scene_assets,
+                    &toy_shading,
                     block_size,
                     gx,
                     gz,
@@ -4562,6 +4846,7 @@ fn spawn_block_at(
     textures: &TextureAssets,
     world_assets: &WorldAssets,
     scene_assets: &WorldSceneAssets,
+    toy_shading: &ToyShadingAssets,
     block: f32,
     gx: i32,
     gz: i32,
@@ -4588,6 +4873,7 @@ fn spawn_block_at(
         textures,
         world_assets,
         scene_assets,
+        toy_shading,
         root,
         gx,
         gz,
@@ -4611,6 +4897,7 @@ fn reset_grid(
     textures: Res<TextureAssets>,
     world_assets: Res<WorldAssets>,
     scene_assets: Res<WorldSceneAssets>,
+    toy_shading: Res<ToyShadingAssets>,
     blocks: Query<Entity, With<Block>>,
     round_active: Res<RoundActive>,
     mut last_recycled_cell: ResMut<LastRecycledCell>,
@@ -4635,6 +4922,7 @@ fn reset_grid(
         &textures,
         &world_assets,
         &scene_assets,
+        &toy_shading,
     );
     last_recycled_cell.record_completed((0, 0));
 }
@@ -4654,11 +4942,11 @@ fn coin_time_after_collect(current: f32) -> f32 {
     roady_score_rules::coin_time_after_collect(current)
 }
 
-fn spin_coins(mut coins: Query<&mut Transform, With<Coin>>, time: Res<Time>) {
+fn spin_coins(mut coins: Query<(&mut Transform, &CoinVisual)>, time: Res<Time>) {
     let t = time.elapsed_secs();
-    for mut tf in &mut coins {
+    for (mut tf, visual) in &mut coins {
         tf.rotation = Quat::from_rotation_y(t * 2.0);
-        tf.translation.y = 0.5 + (t * 2.0 + tf.translation.x).sin() * 0.08;
+        tf.translation.y = 0.5 + (t * 2.0 + visual.phase).sin() * 0.08;
     }
 }
 
@@ -5195,7 +5483,8 @@ mod tests {
             .init_resource::<Assets<StandardMaterial>>()
             .init_resource::<Assets<WaterMaterial>>()
             .init_resource::<TextureAssets>()
-            .init_resource::<WorldAssets>();
+            .init_resource::<WorldAssets>()
+            .init_resource::<ToyShadingAssets>();
         app.finish();
         app.cleanup();
         app.init_resource::<WorldSceneAssets>()
@@ -5807,89 +6096,6 @@ mod tests {
     }
 
     #[test]
-    fn circular_ground_shadows_use_the_only_flat_xz_transform() {
-        let transform = ground_circle_transform(0.05);
-        assert_eq!(transform.translation, Vec3::new(0.0, 0.05, 0.0));
-        // Circle is authored in XY with +Z normal; a ground circle needs +Y.
-        let normal = transform.rotation * Vec3::Z;
-        assert!(normal.abs_diff_eq(Vec3::Y, 1e-6), "normal was {normal}");
-        assert_eq!(transform.scale, Vec3::ONE);
-    }
-
-    #[test]
-    fn building_cast_shadow_projects_away_from_production_sun() {
-        let height = 6.15;
-        let transform =
-            building_cast_shadow_transform(Vec2::new(2.30, 2.20), height, PRODUCTION_SUN_SOURCE);
-        let expected_direction =
-            -Vec2::new(PRODUCTION_SUN_SOURCE.x, PRODUCTION_SUN_SOURCE.z).normalize();
-        let expected_length = (height
-            * Vec2::new(PRODUCTION_SUN_SOURCE.x, PRODUCTION_SUN_SOURCE.z).length()
-            / PRODUCTION_SUN_SOURCE.y)
-            .clamp(BUILDING_CAST_LENGTH_MIN, BUILDING_CAST_LENGTH_MAX);
-
-        assert!((transform.scale.z - expected_length).abs() <= 1e-6);
-        let center = Vec2::new(transform.translation.x, transform.translation.z);
-        assert!(center.normalize().abs_diff_eq(expected_direction, 1e-6));
-        assert!((center.length() - expected_length * 0.5).abs() <= 1e-6);
-        let card_direction = transform.rotation * Vec3::Z;
-        assert!(
-            Vec2::new(card_direction.x, card_direction.z).abs_diff_eq(expected_direction, 1e-6)
-        );
-        assert_eq!(transform.translation.y, BUILDING_CAST_SHADOW_HEIGHT);
-        assert_eq!(transform.scale.y, BUILDING_CAST_SHADOW_THICKNESS);
-    }
-
-    #[test]
-    fn building_cast_shadow_length_is_height_monotonic_and_clamped() {
-        let half = Vec2::new(2.4, 2.1);
-        let short = building_cast_shadow_transform(half, 1.0, PRODUCTION_SUN_SOURCE);
-        let medium = building_cast_shadow_transform(half, 5.0, PRODUCTION_SUN_SOURCE);
-        let tall = building_cast_shadow_transform(half, 20.0, PRODUCTION_SUN_SOURCE);
-
-        assert_eq!(short.scale.z, BUILDING_CAST_LENGTH_MIN);
-        assert!(medium.scale.z > short.scale.z);
-        assert!(tall.scale.z >= medium.scale.z);
-        assert_eq!(tall.scale.z, BUILDING_CAST_LENGTH_MAX);
-    }
-
-    #[test]
-    fn building_cast_shadow_transform_stays_finite_for_degenerate_inputs() {
-        for (half, height, sun) in [
-            (Vec2::ZERO, 0.0, Vec3::ZERO),
-            (Vec2::splat(f32::NAN), f32::NAN, Vec3::splat(f32::NAN)),
-            (Vec2::splat(f32::INFINITY), f32::INFINITY, Vec3::Y),
-        ] {
-            let transform = building_cast_shadow_transform(half, height, sun);
-            assert!(transform.translation.is_finite());
-            assert!(transform.scale.is_finite());
-            assert!(
-                transform
-                    .rotation
-                    .to_array()
-                    .into_iter()
-                    .all(f32::is_finite)
-            );
-            assert!(
-                (BUILDING_CAST_LENGTH_MIN..=BUILDING_CAST_LENGTH_MAX).contains(&transform.scale.z)
-            );
-            assert!(transform.scale.x > 0.0);
-        }
-    }
-
-    #[test]
-    fn building_cast_shadow_width_conservatively_covers_rotated_footprint() {
-        let direction = -Vec2::new(PRODUCTION_SUN_SOURCE.x, PRODUCTION_SUN_SOURCE.z).normalize();
-        let perpendicular = Vec2::new(-direction.y, direction.x);
-        for half in [Vec2::new(2.3, 2.2), Vec2::new(2.2, 2.3)] {
-            let transform = building_cast_shadow_transform(half, 6.15, PRODUCTION_SUN_SOURCE);
-            let required_width =
-                2.0 * (half.x * perpendicular.x.abs() + half.y * perpendicular.y.abs());
-            assert!(transform.scale.x + 1e-6 >= required_width);
-        }
-    }
-
-    #[test]
     fn organic_visual_plans_are_deterministic_bounded_and_collider_safe() {
         for seed in 0..256 {
             for ordinal in 0..12 {
@@ -6339,13 +6545,49 @@ mod tests {
             .init_resource::<Assets<WaterMaterial>>()
             .init_resource::<TextureAssets>()
             .insert_resource(WorldReviewMode)
-            .init_resource::<WorldAssets>();
+            .init_resource::<WorldAssets>()
+            .init_resource::<ToyShadingAssets>();
         app.finish();
         app.cleanup();
         app.init_resource::<WorldSceneAssets>()
             .add_systems(Startup, spawn_review_world);
         app.update();
         app
+    }
+
+    #[test]
+    fn road_blocks_own_exactly_one_cached_contact_overlay() {
+        let mut app = review_test_app();
+        let world = app.world_mut();
+        let blocks: Vec<_> = world
+            .query::<(Entity, &Block)>()
+            .iter(world)
+            .map(|(entity, block)| (entity, block.kind))
+            .collect();
+        for (entity, kind) in blocks {
+            let mut descendants = Vec::new();
+            if let Some(children) = world.get::<Children>(entity) {
+                descendants.extend(children.iter());
+            }
+            let overlays: Vec<_> = descendants
+                .into_iter()
+                .filter(|child| world.get::<BlockContactOverlay>(*child).is_some())
+                .collect();
+            assert_eq!(
+                overlays.len(),
+                usize::from(sockets(kind).contains(&Edge::Road)),
+                "{kind:?}"
+            );
+            for overlay in overlays {
+                assert_eq!(
+                    world.get::<Mesh3d>(overlay).unwrap().0.id(),
+                    world
+                        .resource::<WorldAssets>()
+                        .curb_contact_overlay(kind)
+                        .id()
+                );
+            }
+        }
     }
 
     #[test]
@@ -6434,7 +6676,13 @@ mod tests {
                 }
                 "lamp" => {
                     assert_eq!(collider, Vec2::splat(0.15));
-                    assert_eq!(children.len(), 1);
+                    assert_eq!(
+                        children
+                            .iter()
+                            .filter(|&&child| world.get::<ToyContactShadow>(child).is_some())
+                            .count(),
+                        1
+                    );
                 }
                 "hydrant" => {
                     assert_eq!(collider, Vec2::splat(0.25));
@@ -6471,7 +6719,13 @@ mod tests {
                         Vec2::new(0.24, 0.30)
                     };
                     assert_eq!(collider, expected);
-                    assert_eq!(children.len(), 1);
+                    assert_eq!(
+                        children
+                            .iter()
+                            .filter(|&&child| world.get::<ToyContactShadow>(child).is_some())
+                            .count(),
+                        1
+                    );
                 }
                 _ => unreachable!(),
             }
@@ -6481,9 +6735,8 @@ mod tests {
             for &child in &children {
                 if world.get::<Mesh3d>(child).is_some() {
                     assert!(
-                        world.get::<TreeShadow>(child).is_some()
-                            || world.get::<HydrantShadow>(child).is_some()
-                            || world.get::<BenchShadow>(child).is_some()
+                        world.get::<ToyContactShadow>(child).is_some()
+                            || world.get::<ToyCastShadow>(child).is_some()
                     );
                 }
             }
@@ -6495,6 +6748,157 @@ mod tests {
                 !entity.contains::<PointLight>() && !entity.contains::<SpotLight>()
             })
         );
+    }
+
+    #[test]
+    fn static_world_contact_cards_have_exactly_one_per_supported_root() {
+        let mut app = review_test_app();
+        let world = app.world_mut();
+        let roots: Vec<_> = world
+            .query::<(Entity, &Children)>()
+            .iter(world)
+            .filter(|(entity, _)| {
+                world.get::<Building>(*entity).is_some()
+                    || world.get::<Tree>(*entity).is_some()
+                    || world.get::<LampPost>(*entity).is_some()
+                    || world.get::<Cone>(*entity).is_some()
+                    || world.get::<Hydrant>(*entity).is_some()
+                    || world.get::<Bench>(*entity).is_some()
+                    || world.get::<Hedge>(*entity).is_some()
+                    || world.get::<FarmProp>(*entity).is_some()
+                    || world.get::<Mailbox>(*entity).is_some()
+                    || world.get::<PicketFencePanel>(*entity).is_some()
+                    || world.get::<PondProp>(*entity).is_some()
+                    || world.get::<Coin>(*entity).is_some()
+            })
+            .map(|(entity, children)| (entity, children.iter().collect::<Vec<_>>()))
+            .collect();
+        assert!(!roots.is_empty());
+        for (root, children) in &roots {
+            assert_eq!(
+                children
+                    .iter()
+                    .filter(|child| world.get::<ToyContactShadow>(**child).is_some())
+                    .count(),
+                1,
+                "static root {root:?}"
+            );
+        }
+        let card_count = world
+            .query_filtered::<Entity, With<ToyContactShadow>>()
+            .iter(world)
+            .count();
+        assert_eq!(card_count, roots.len());
+    }
+
+    #[test]
+    fn pond_props_have_exactly_one_cached_contact_card() {
+        let mut app = review_test_app();
+        let (mesh_id, material_id) = {
+            let assets = app.world().resource::<ToyShadingAssets>();
+            (assets.contact_plane.id(), assets.contact_material.id())
+        };
+        let world = app.world_mut();
+        let props: Vec<_> = world
+            .query_filtered::<(Entity, &Children), With<PondProp>>()
+            .iter(world)
+            .map(|(entity, children)| (entity, children.iter().collect::<Vec<_>>()))
+            .collect();
+        assert!(!props.is_empty());
+        for (root, children) in props {
+            let cards: Vec<_> = children
+                .into_iter()
+                .filter(|&child| world.get::<ToyContactShadow>(child).is_some())
+                .collect();
+            assert_eq!(cards.len(), 1, "pond prop {root:?}");
+            assert_eq!(world.get::<Mesh3d>(cards[0]).unwrap().0.id(), mesh_id);
+            assert_eq!(
+                world
+                    .get::<MeshMaterial3d<StandardMaterial>>(cards[0])
+                    .unwrap()
+                    .0
+                    .id(),
+                material_id
+            );
+        }
+    }
+
+    #[test]
+    fn static_projected_cards_cover_each_meaningful_root_once_and_reuse_cache() {
+        let mut app = review_test_app();
+        let (mesh_id, material_id) = {
+            let assets = app.world().resource::<ToyShadingAssets>();
+            (assets.cast_plane.id(), assets.cast_material.id())
+        };
+        let world = app.world_mut();
+        let roots: Vec<_> = world
+            .query::<(Entity, &Children)>()
+            .iter(world)
+            .filter(|(entity, _)| {
+                world.get::<Tree>(*entity).is_some()
+                    || world.get::<LampPost>(*entity).is_some()
+                    || world.get::<Hydrant>(*entity).is_some()
+                    || world.get::<Bench>(*entity).is_some()
+                    || world.get::<Hedge>(*entity).is_some()
+                    || world.get::<Mailbox>(*entity).is_some()
+                    || world.get::<FarmProp>(*entity).is_some()
+                    || world.get::<PicketFencePanel>(*entity).is_some()
+            })
+            .map(|(entity, children)| (entity, children.iter().collect::<Vec<_>>()))
+            .collect();
+        assert!(!roots.is_empty());
+        let mut covered = BTreeSet::new();
+        for (root, children) in roots {
+            let cards: Vec<_> = children
+                .into_iter()
+                .filter(|&child| world.get::<StaticCastKind>(child).is_some())
+                .collect();
+            assert_eq!(cards.len(), 1, "static root {root:?}");
+            let card = cards[0];
+            let kind = *world.get::<StaticCastKind>(card).unwrap();
+            covered.insert(kind);
+            assert!(world.get::<ToyCastShadow>(card).is_some());
+            assert!(world.get::<ToyContactShadow>(card).is_none());
+            assert_eq!(world.get::<Mesh3d>(card).unwrap().0.id(), mesh_id);
+            assert_eq!(
+                world
+                    .get::<MeshMaterial3d<StandardMaterial>>(card)
+                    .unwrap()
+                    .0
+                    .id(),
+                material_id
+            );
+
+            // Root yaw must not turn the fixed-sun card. Recompose the child
+            // transform relative to its root and compare its +Z direction to
+            // the canonical helper output for the same audited height.
+            let root_rotation = world.get::<Transform>(root).unwrap().rotation;
+            let card_rotation = world.get::<Transform>(card).unwrap().rotation;
+            let actual = root_rotation * card_rotation * Vec3::Z;
+            let expected = projected_shadow_transform(Vec2::ONE, static_cast_height(kind), 0.0)
+                .rotation
+                * Vec3::Z;
+            assert!(actual.abs_diff_eq(expected, 1e-5), "{kind:?}");
+        }
+        assert_eq!(covered, BTreeSet::from(STATIC_CAST_KINDS));
+
+        // Existing building cast cards use their own marker/cardinality path;
+        // tiny or moving roots must not accidentally gain a static card.
+        let mut excluded = world.query::<(Entity, Option<&Children>)>();
+        for (entity, children) in excluded.iter(world) {
+            if world.get::<Coin>(entity).is_none()
+                && world.get::<Cone>(entity).is_none()
+                && world.get::<HaySprig>(entity).is_none()
+                && world.get::<PondProp>(entity).is_none()
+            {
+                continue;
+            }
+            assert!(children.is_none_or(|children| {
+                children
+                    .iter()
+                    .all(|child| world.get::<StaticCastKind>(child).is_none())
+            }));
+        }
     }
 
     #[test]
@@ -6513,12 +6917,13 @@ mod tests {
         };
         assert_eq!(cached_buildings.len(), 4);
 
-        let (unit_box_id, contact_material_id, cast_material_id) = {
-            let assets = app.world().resource::<WorldAssets>();
+        let (contact_mesh_id, contact_material_id, cast_mesh_id, cast_material_id) = {
+            let assets = app.world().resource::<ToyShadingAssets>();
             (
-                assets.meshes.unit_box.id(),
-                assets.materials.building_contact_shadow.id(),
-                assets.materials.building_cast_shadow.id(),
+                assets.contact_plane.id(),
+                assets.contact_material.id(),
+                assets.cast_plane.id(),
+                assets.cast_material.id(),
             )
         };
         let world = app.world_mut();
@@ -6624,12 +7029,15 @@ mod tests {
             assert!(contact_transform.scale.abs_diff_eq(
                 Vec3::new(
                     collider.x * 2.0 * BUILDING_CONTACT_FOOTPRINT_SCALE,
-                    0.025,
+                    1.0,
                     collider.y * 2.0 * BUILDING_CONTACT_FOOTPRINT_SCALE,
                 ),
                 1e-6,
             ));
-            assert_eq!(world.get::<Mesh3d>(contact).unwrap().0.id(), unit_box_id);
+            assert_eq!(
+                world.get::<Mesh3d>(contact).unwrap().0.id(),
+                contact_mesh_id
+            );
             assert_eq!(
                 world
                     .get::<MeshMaterial3d<StandardMaterial>>(contact)
@@ -6639,7 +7047,7 @@ mod tests {
                 contact_material_id
             );
             for cast in cast_shadows {
-                assert_eq!(world.get::<Mesh3d>(cast).unwrap().0.id(), unit_box_id);
+                assert_eq!(world.get::<Mesh3d>(cast).unwrap().0.id(), cast_mesh_id);
                 assert_eq!(
                     world
                         .get::<MeshMaterial3d<StandardMaterial>>(cast)
@@ -6692,7 +7100,8 @@ mod tests {
             .init_resource::<Assets<WaterMaterial>>()
             .init_resource::<TextureAssets>()
             .insert_resource(WorldReviewMode)
-            .init_resource::<WorldAssets>();
+            .init_resource::<WorldAssets>()
+            .init_resource::<ToyShadingAssets>();
         app.finish();
         app.cleanup();
         app.init_resource::<WorldSceneAssets>();
@@ -6778,26 +7187,6 @@ mod tests {
     }
 
     #[test]
-    fn all_spawned_circle_shadows_are_flat_and_marker_complete() {
-        let mut app = review_test_app();
-        let world = app.world_mut();
-        let all_count = {
-            let mut query = world.query::<(&GroundCircleShadow, &Transform)>();
-            query
-                .iter(world)
-                .map(|(_, transform)| {
-                    assert!((transform.rotation * Vec3::Z).abs_diff_eq(Vec3::Y, 1e-6));
-                })
-                .count()
-        };
-        let tree_count = world.query::<&TreeShadow>().iter(world).count();
-        let cone_count = world.query::<&ConeShadow>().iter(world).count();
-        let hydrant_count = world.query::<&HydrantShadow>().iter(world).count();
-        assert_eq!(all_count, tree_count + cone_count + hydrant_count);
-        assert!(all_count > 0);
-    }
-
-    #[test]
     fn normal_world_plugin_has_no_review_mode_or_review_archetypes() {
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()));
@@ -6806,7 +7195,8 @@ mod tests {
             .init_resource::<Assets<Image>>()
             .init_resource::<Assets<StandardMaterial>>()
             .init_resource::<Assets<WaterMaterial>>()
-            .init_resource::<TextureAssets>();
+            .init_resource::<TextureAssets>()
+            .init_resource::<ToyShadingAssets>();
         app.add_plugins(WorldPlugin);
         assert!(!app.world().contains_resource::<WorldReviewMode>());
         let review_tiles = {
@@ -7137,6 +7527,38 @@ mod tests {
     }
 
     #[test]
+    fn curb_overlay_cache_has_one_mesh_per_kind_with_gradient_ribbons() {
+        let mut app = App::new();
+        app.init_resource::<Assets<Mesh>>()
+            .init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<Assets<WaterMaterial>>();
+        app.init_resource::<WorldAssets>();
+        let assets = app.world().resource::<WorldAssets>();
+        let overlay_ids: BTreeSet<_> = assets
+            .curb_contact_overlays
+            .iter()
+            .map(|handle| handle.id())
+            .collect();
+        assert_eq!(overlay_ids.len(), TILE_CATALOG.len());
+        let meshes = app.world().resource::<Assets<Mesh>>();
+        for kind in TILE_CATALOG {
+            let mesh = meshes.get(&assets.curb_contact_overlay(kind)).unwrap();
+            let expected_vertices = road_curb_placements(sockets(kind)).len() * 4;
+            assert_eq!(mesh.count_vertices(), expected_vertices, "{kind:?}");
+            let colors = mesh.attribute(Mesh::ATTRIBUTE_COLOR).unwrap();
+            let bevy::mesh::VertexAttributeValues::Float32x4(colors) = colors else {
+                panic!("curb overlay requires float vertex colors")
+            };
+            assert_eq!(colors.len(), expected_vertices);
+            assert!(
+                colors
+                    .iter()
+                    .all(|color| color[3] == 0.0 || color[3] == 0.14)
+            );
+        }
+    }
+
+    #[test]
     fn curb_plan_completes_every_exposed_pad_side() {
         for kind in TILE_CATALOG {
             let sock = sockets(kind);
@@ -7409,9 +7831,30 @@ mod tests {
         }
     }
 
-    /// Markings are emitted only for owned road approaches whose endpoint
-    /// has a perpendicular road. Straight roads, empty/park blocks and stubs
-    /// therefore never receive a crosswalk or stop line.
+    /// Markings are emitted only for active center-junction approaches with a
+    /// perpendicular road. Straights, empty blocks, and stubs remain clear.
+    #[test]
+    fn marking_plan_cardinality_matches_active_perpendicular_approaches() {
+        for kind in TILE_CATALOG {
+            let sock = sockets(kind);
+            let plan = marking_approaches(sock);
+            let roads = sock.iter().filter(|&&edge| edge == Edge::Road).count();
+            let expected = if roads < 2 || matches!(kind, TileKind::RoadNS | TileKind::RoadEW) {
+                0
+            } else {
+                roads
+            };
+            assert_eq!(
+                plan.into_iter().filter(|enabled| *enabled).count(),
+                expected,
+                "{kind:?}"
+            );
+            for side in [W, E, S, N] {
+                assert!(!plan[side] || sock[side] == Edge::Road);
+            }
+        }
+    }
+
     #[test]
     fn marking_approaches_require_perpendicular_road_sockets() {
         use TileKind::*;
@@ -7421,13 +7864,13 @@ mod tests {
             (RoadNS, [false; 4]),
             (RoadEW, [false; 4]),
             (Cross, [true; 4]),
-            (TN, [true, false, true, true]),
-            (TE, [true, true, true, false]),
-            (TS, [false, true, false, false]),
-            (TW, [false, false, false, true]),
-            (CornerWN, [false, true, false, false]),
-            (CornerNE, [false; 4]),
-            (CornerES, [false, false, false, true]),
+            (TN, [true, true, true, false]),
+            (TE, [true, false, true, true]),
+            (TS, [true, true, false, true]),
+            (TW, [false, true, true, true]),
+            (CornerWN, [true, false, false, true]),
+            (CornerNE, [false, true, false, true]),
+            (CornerES, [false, true, true, false]),
             (CornerSW, [true, false, true, false]),
             (StubW, [false; 4]),
             (StubE, [false; 4]),

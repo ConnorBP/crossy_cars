@@ -19,8 +19,8 @@
 //!   module only **writes** it via `MessageWriter` (never re-registers).
 //! - `spawn_chickens` runs `.in_set(SpawnSet)` and consumes a cleanup-driven
 //!   fresh-round latch, so pause/resume skips spawning regardless of reset order.
-//! - Shadows are gated by the directional light in `world.rs`; chicken
-//!   `StandardMaterial`s need no shadow config.
+//! - Every chicken reuses the shared soft contact card; WebGL2 also gets one
+//!   cached projected card counter-rotated against the chicken's heading.
 
 use bevy::prelude::*;
 use std::f32::consts::TAU;
@@ -33,6 +33,10 @@ use crate::game::state::GameState;
 use crate::modifiers::ActiveModifier;
 use crate::run_events::{ActiveEvent, EventKind, RoundEventStarted};
 use crate::settings::Settings;
+#[cfg(any(target_arch = "wasm32", test))]
+use crate::toy_shading::{ToyCastShadow, projected_shadow_transform};
+use crate::toy_shading::{ToyContactShadow, ToyShadingAssets, contact_shadow_transform};
+use crate::toy_shading::{ToyMaterialFamily, toy_material};
 use crate::world::{RoadAxis, RoadSegment, nearest_road_segment};
 
 // ---------------------------------------------------------------------------
@@ -145,6 +149,11 @@ struct ChickenBody {
     base_y: f32,
 }
 
+/// Chicken-only cast-card marker used to keep the WebGL projection fixed to
+/// the world-space sun while the owning chicken turns.
+#[derive(Component)]
+struct ChickenCastShadow;
+
 /// A feather particle (small sphere) ejected on chicken hit. Affected by
 /// gravity + spin; despawns when `life` reaches 0.
 #[derive(Component)]
@@ -179,7 +188,10 @@ pub struct ChickenAssets {
     beak_mesh: Handle<Mesh>,
     leg_mesh: Handle<Mesh>,
     eye_mesh: Handle<Mesh>,
-    shadow_mesh: Handle<Mesh>,
+    // Shared toy-shadow cache handles (never allocated per chicken).
+    contact_shadow_mesh: Handle<Mesh>,
+    #[cfg(any(target_arch = "wasm32", test))]
+    cast_shadow_mesh: Handle<Mesh>,
     // Particle burst
     feather_mesh: Handle<Mesh>,
     puff_mesh: Handle<Mesh>,
@@ -189,13 +201,29 @@ pub struct ChickenAssets {
     beak_mat: Handle<StandardMaterial>,
     leg_mat: Handle<StandardMaterial>,
     eye_mat: Handle<StandardMaterial>,
-    shadow_mat: Handle<StandardMaterial>,
+    contact_shadow_mat: Handle<StandardMaterial>,
+    #[cfg(any(target_arch = "wasm32", test))]
+    cast_shadow_mat: Handle<StandardMaterial>,
     feather_mat: Handle<StandardMaterial>,
     puff_mat: Handle<StandardMaterial>,
 }
 
 impl FromWorld for ChickenAssets {
     fn from_world(world: &mut World) -> Self {
+        // Model resources are also initialized directly by lightweight test /
+        // review harnesses, so make the shared cache available there too.
+        world.init_resource::<Assets<Image>>();
+        world.init_resource::<ToyShadingAssets>();
+        let (contact_shadow_mesh, contact_shadow_mat) = {
+            let toy = world.resource::<ToyShadingAssets>();
+            (toy.contact_plane.clone(), toy.contact_material.clone())
+        };
+        #[cfg(any(target_arch = "wasm32", test))]
+        let (cast_shadow_mesh, cast_shadow_mat) = {
+            let toy = world.resource::<ToyShadingAssets>();
+            (toy.cast_plane.clone(), toy.cast_material.clone())
+        };
+
         // Build meshes + materials together inside a `resource_scope` so we
         // never hold `&mut Assets<Mesh>` and `&mut Assets<StandardMaterial>`
         // without scoping (risk E3 — mirrors `textures.rs::TextureAssets`).
@@ -210,56 +238,62 @@ impl FromWorld for ChickenAssets {
             let beak_mesh = meshes.add(Cuboid::new(0.10, 0.05, 0.06));
             let leg_mesh = meshes.add(Cylinder::new(0.03, 0.30));
             let eye_mesh = meshes.add(Sphere::new(0.035).mesh().uv(6, 4));
-            // Blob shadow: flat dark quad under the chicken.
-            let shadow_mesh = meshes.add(Plane3d::default().mesh().size(0.5, 0.5));
 
             // --- Particle meshes ---
             let feather_mesh = meshes.add(Sphere::new(0.08).mesh().uv(6, 4));
             let puff_mesh = meshes.add(Plane3d::default().mesh().size(0.3, 0.3));
 
             // --- Materials ---
-            let body_mat = materials.add(StandardMaterial {
-                base_color: Color::srgb(0.95, 0.93, 0.85), // cream-white
-                perceptual_roughness: 0.85,
-                ..default()
-            });
-            let comb_mat = materials.add(StandardMaterial {
-                base_color: Color::srgb(0.85, 0.15, 0.12), // red
-                perceptual_roughness: 0.7,
-                ..default()
-            });
-            let beak_mat = materials.add(StandardMaterial {
-                base_color: Color::srgb(0.95, 0.55, 0.10), // orange
-                perceptual_roughness: 0.6,
-                ..default()
-            });
-            let leg_mat = materials.add(StandardMaterial {
-                base_color: Color::srgb(0.90, 0.65, 0.15), // yellow-orange
-                perceptual_roughness: 0.6,
-                ..default()
-            });
-            let eye_mat = materials.add(StandardMaterial {
-                base_color: Color::srgb(0.02, 0.02, 0.02), // near-black
-                perceptual_roughness: 0.3,
-                metallic: 0.1,
-                ..default()
-            });
-            let shadow_mat = materials.add(StandardMaterial {
-                base_color: Color::srgba(0.0, 0.0, 0.0, 0.30),
-                alpha_mode: AlphaMode::Blend,
-                ..default()
-            });
-            let feather_mat = materials.add(StandardMaterial {
-                base_color: Color::srgb(0.95, 0.93, 0.85),
-                perceptual_roughness: 0.85,
-                ..default()
-            });
-            let puff_mat = materials.add(StandardMaterial {
-                base_color: Color::srgba(0.90, 0.90, 0.90, 0.50),
-                alpha_mode: AlphaMode::Blend,
-                perceptual_roughness: 1.0,
-                ..default()
-            });
+            let body_mat = materials.add(toy_material(
+                ToyMaterialFamily::Ceramic,
+                StandardMaterial {
+                    base_color: Color::srgb(0.95, 0.93, 0.85), // cream-white
+                    ..default()
+                },
+            ));
+            let comb_mat = materials.add(toy_material(
+                ToyMaterialFamily::Clay,
+                StandardMaterial {
+                    base_color: Color::srgb(0.85, 0.15, 0.12), // red
+                    ..default()
+                },
+            ));
+            let beak_mat = materials.add(toy_material(
+                ToyMaterialFamily::Clay,
+                StandardMaterial {
+                    base_color: Color::srgb(0.95, 0.55, 0.10), // orange
+                    ..default()
+                },
+            ));
+            let leg_mat = materials.add(toy_material(
+                ToyMaterialFamily::Clay,
+                StandardMaterial {
+                    base_color: Color::srgb(0.90, 0.65, 0.15), // yellow-orange
+                    ..default()
+                },
+            ));
+            let eye_mat = materials.add(toy_material(
+                ToyMaterialFamily::CoatedPlastic,
+                StandardMaterial {
+                    base_color: Color::srgb(0.02, 0.02, 0.02), // near-black
+                    ..default()
+                },
+            ));
+            let feather_mat = materials.add(toy_material(
+                ToyMaterialFamily::Ceramic,
+                StandardMaterial {
+                    base_color: Color::srgb(0.95, 0.93, 0.85),
+                    ..default()
+                },
+            ));
+            let puff_mat = materials.add(toy_material(
+                ToyMaterialFamily::Clay,
+                StandardMaterial {
+                    base_color: Color::srgba(0.90, 0.90, 0.90, 0.50),
+                    alpha_mode: AlphaMode::Blend,
+                    ..default()
+                },
+            ));
 
             ChickenAssets {
                 body_mesh,
@@ -268,7 +302,9 @@ impl FromWorld for ChickenAssets {
                 beak_mesh,
                 leg_mesh,
                 eye_mesh,
-                shadow_mesh,
+                contact_shadow_mesh,
+                #[cfg(any(target_arch = "wasm32", test))]
+                cast_shadow_mesh,
                 feather_mesh,
                 puff_mesh,
                 body_mat,
@@ -276,7 +312,9 @@ impl FromWorld for ChickenAssets {
                 beak_mat,
                 leg_mat,
                 eye_mat,
-                shadow_mat,
+                contact_shadow_mat,
+                #[cfg(any(target_arch = "wasm32", test))]
+                cast_shadow_mat,
                 feather_mat,
                 puff_mat,
             }
@@ -431,7 +469,8 @@ fn spawn_chicken_burst(
 ///   │           ├── beak (orange Cuboid, front = -Z)
 ///   │           └── eye × 2 (black Spheres)
 ///   ├── leg × 2 (Cylinders, children of root — stay grounded)
-///   └── blob shadow (flat quad at y=0.02)
+///   ├── one shared soft contact card
+///   └── one world-fixed projected card on WebGL2
 /// ```
 ///
 /// The body group (`ChickenBody`) is animated by `wander_chickens`: its
@@ -444,6 +483,8 @@ pub(crate) fn spawn_chicken_visual(
     assets: &ChickenAssets,
     transform: Transform,
 ) -> Entity {
+    #[cfg(any(target_arch = "wasm32", test))]
+    let cast_transform = chicken_projected_shadow_local_transform(&transform);
     commands
         .spawn((transform, Visibility::default()))
         .with_children(|root| {
@@ -501,11 +542,25 @@ pub(crate) fn spawn_chicken_visual(
                 ));
             }
 
-            // --- Blob shadow (flat on the ground under the chicken) ---
+            // One soft card preserves the old 0.5 × 0.5 footprint while
+            // replacing its hard-edged material/mesh with the global cache.
             root.spawn((
-                Mesh3d(assets.shadow_mesh.clone()),
-                MeshMaterial3d(assets.shadow_mat.clone()),
-                Transform::from_xyz(0.0, 0.02, 0.0),
+                Mesh3d(assets.contact_shadow_mesh.clone()),
+                MeshMaterial3d(assets.contact_shadow_mat.clone()),
+                contact_shadow_transform(CHICKEN_SHADOW_FOOTPRINT, 0.0),
+                ToyContactShadow,
+            ));
+
+            // Native uses the directional shadow map. WebGL2 gets one smooth
+            // classical projection; test builds include it for hierarchy
+            // contract coverage without changing native production builds.
+            #[cfg(any(target_arch = "wasm32", test))]
+            root.spawn((
+                Mesh3d(assets.cast_shadow_mesh.clone()),
+                MeshMaterial3d(assets.cast_shadow_mat.clone()),
+                cast_transform,
+                ToyCastShadow,
+                ChickenCastShadow,
             ));
         })
         .id()
@@ -543,7 +598,19 @@ fn wander_chickens(
         &Children,
         Option<&ChickenBurstExtra>,
     )>,
-    mut bodies: Query<(&mut Transform, &ChickenBody), (Without<Chicken>, Without<Car>)>,
+    mut bodies: Query<
+        (&mut Transform, &ChickenBody),
+        (Without<Chicken>, Without<Car>, Without<ChickenCastShadow>),
+    >,
+    #[cfg(any(target_arch = "wasm32", test))] mut cast_shadows: Query<
+        &mut Transform,
+        (
+            With<ChickenCastShadow>,
+            Without<ChickenBody>,
+            Without<Chicken>,
+            Without<Car>,
+        ),
+    >,
     time: Res<Time>,
     settings: Res<Settings>,
     mut seed: Local<u32>,
@@ -571,6 +638,15 @@ fn wander_chickens(
         // --- Face the heading (rotate Y so the beak points along dir) ---
         let heading = (-chicken.dir.x).atan2(-chicken.dir.z);
         tf.rotation = Quat::from_rotation_y(heading);
+
+        // Counter-rotate the projected child so the sun direction remains
+        // fixed in world space rather than turning with its moving owner.
+        #[cfg(any(target_arch = "wasm32", test))]
+        for child_e in children.iter() {
+            if let Ok(mut shadow_tf) = cast_shadows.get_mut(child_e) {
+                *shadow_tf = chicken_projected_shadow_local_transform(&tf);
+            }
+        }
 
         // --- Recycle chickens that fell behind or drifted too far away ---
         if should_recycle(tf.translation, car_pos, car_forward) {
@@ -833,8 +909,30 @@ fn cleanup_particles(
 // Helpers
 // ---------------------------------------------------------------------------
 
+const CHICKEN_SHADOW_FOOTPRINT: Vec2 = Vec2::splat(0.5);
+#[cfg(any(target_arch = "wasm32", test))]
+const CHICKEN_CASTER_HEIGHT: f32 = 0.9;
+
 const fn hit_particles_enabled(reduced_motion: bool) -> bool {
     !reduced_motion
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn chicken_projected_shadow_local_transform(owner: &Transform) -> Transform {
+    let mut projected =
+        projected_shadow_transform(CHICKEN_SHADOW_FOOTPRINT, CHICKEN_CASTER_HEIGHT, 0.0);
+    let inverse_owner_rotation = owner.rotation.inverse();
+    // The helper returns a world-relative card. Undo owner yaw for both the
+    // offset and orientation, and compensate any authored owner height.
+    projected.translation.y -= owner.translation.y;
+    projected.translation = inverse_owner_rotation * projected.translation;
+    projected.rotation = inverse_owner_rotation * projected.rotation;
+    projected
+}
+
+#[cfg(test)]
+const fn chicken_shadow_card_count(webgl: bool) -> usize {
+    1 + webgl as usize
 }
 
 /// Body-only visual pose; root movement and all gameplay continue unchanged.
@@ -1021,6 +1119,40 @@ fn ensure_seeded(seed: &mut u32, initial: u32) {
 mod tests {
     use super::*;
     use crate::modifiers::ModifierKind;
+
+    #[test]
+    fn chicken_shadows_preserve_contact_size_and_webgl_cardinality() {
+        let contact = contact_shadow_transform(CHICKEN_SHADOW_FOOTPRINT, 0.0);
+        assert_eq!(contact.scale, Vec3::new(0.5, 1.0, 0.5));
+        assert_eq!(chicken_shadow_card_count(false), 1);
+        assert_eq!(chicken_shadow_card_count(true), 2);
+    }
+
+    #[test]
+    fn turning_owner_does_not_turn_or_displace_projected_chicken_shadow() {
+        let owner = Transform::from_xyz(4.0, 0.0, -8.0).with_rotation(Quat::from_rotation_y(1.3));
+        let local = chicken_projected_shadow_local_transform(&owner);
+        let canonical =
+            projected_shadow_transform(CHICKEN_SHADOW_FOOTPRINT, CHICKEN_CASTER_HEIGHT, 0.0);
+        assert!((owner.rotation * local.translation).abs_diff_eq(canonical.translation, 1e-5));
+        assert!((owner.rotation * local.rotation).abs_diff_eq(canonical.rotation, 1e-5));
+    }
+
+    #[test]
+    fn chicken_assets_reuse_the_global_toy_shadow_cache() {
+        let mut app = App::new();
+        app.init_resource::<Assets<Image>>()
+            .init_resource::<Assets<Mesh>>()
+            .init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<ToyShadingAssets>()
+            .init_resource::<ChickenAssets>();
+        let toy = app.world().resource::<ToyShadingAssets>();
+        let chicken = app.world().resource::<ChickenAssets>();
+        assert_eq!(chicken.contact_shadow_mesh.id(), toy.contact_plane.id());
+        assert_eq!(chicken.cast_shadow_mesh.id(), toy.cast_plane.id());
+        assert_eq!(chicken.contact_shadow_mat.id(), toy.contact_material.id());
+        assert_eq!(chicken.cast_shadow_mat.id(), toy.cast_material.id());
+    }
 
     #[test]
     fn reduced_motion_keeps_chicken_body_static_and_suppresses_particles() {

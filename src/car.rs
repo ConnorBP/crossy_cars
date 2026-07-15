@@ -10,6 +10,11 @@ use crate::game::resources::GameConfig;
 use crate::game::state::GameState;
 use crate::palette;
 use crate::textures::TextureAssets;
+#[cfg(target_arch = "wasm32")]
+use crate::toy_shading::ToyCastShadow;
+use crate::toy_shading::{
+    ToyContactShadow, ToyShadingAssets, contact_shadow_transform, projected_shadow_transform,
+};
 use crate::world::{
     Collider, Cone, ConeMotion, ConeState, Curb, cone_hit_speed, cone_initial_lifetime,
     cone_launch_velocity, cone_spin_axis, cone_spin_rate,
@@ -198,6 +203,11 @@ const WHEEL_POSITIONS: [(f32, f32); 4] = [
 // independent of cosmetic wheel/fender overhang in the procedural visual.
 const COLLISION_HALF_WIDTH: f32 = 0.56;
 const COLLISION_HALF_LENGTH: f32 = 1.0;
+/// Cosmetic shadow cards are deliberately a little wider than the gameplay
+/// collider so the wheels remain visually grounded without affecting physics.
+const PLAYER_SHADOW_FOOTPRINT: Vec2 = Vec2::new(1.30, 2.25);
+#[cfg(any(target_arch = "wasm32", test))]
+const PLAYER_SHADOW_CASTER_HEIGHT: f32 = 0.90;
 
 const fn car_footprint_half_extents() -> (f32, f32) {
     (COLLISION_HALF_WIDTH, COLLISION_HALF_LENGTH)
@@ -414,6 +424,63 @@ fn map_handbrake(shift_left: bool, shift_right: bool) -> bool {
 /// it so they lean together.
 #[derive(Component)]
 struct CarBody;
+
+/// A vehicle's WebGL-only projected card. The authored transform is expressed
+/// in world axes even though the card is parented for lifecycle ownership; the
+/// maintenance system counter-rotates it after vehicle movement.
+#[derive(Component, Clone, Copy, Debug)]
+pub(crate) struct ToyShadowCaster {
+    footprint: Vec2,
+    caster_height: f32,
+    ground_height: f32,
+}
+
+impl ToyShadowCaster {
+    #[cfg(any(target_arch = "wasm32", test))]
+    pub(crate) const fn new(footprint: Vec2, caster_height: f32, ground_height: f32) -> Self {
+        Self {
+            footprint,
+            caster_height,
+            ground_height,
+        }
+    }
+}
+
+/// Convert a world-authored projected card to parent-local space. Applying the
+/// parent rotation to the returned translation and rotation reconstructs the
+/// shared fixed-sun transform, including at every cardinal vehicle heading.
+pub(crate) fn counter_rotated_projected_shadow_transform(
+    parent_rotation: Quat,
+    caster: ToyShadowCaster,
+) -> Transform {
+    let parent_rotation = if parent_rotation.is_finite() {
+        parent_rotation.normalize()
+    } else {
+        Quat::IDENTITY
+    };
+    let world =
+        projected_shadow_transform(caster.footprint, caster.caster_height, caster.ground_height);
+    let inverse = parent_rotation.inverse();
+    Transform {
+        translation: inverse * world.translation,
+        rotation: inverse * world.rotation,
+        scale: world.scale,
+    }
+}
+
+/// Keep projected cards fixed to the world sun while retaining them as direct
+/// children, so despawning/restarting a vehicle cannot leak or duplicate one.
+fn maintain_vehicle_projected_shadows(
+    mut shadows: Query<(&ChildOf, &ToyShadowCaster, &mut Transform)>,
+    roots: Query<&Transform, Without<ToyShadowCaster>>,
+) {
+    for (child_of, caster, mut transform) in &mut shadows {
+        let Ok(parent) = roots.get(child_of.parent()) else {
+            continue;
+        };
+        *transform = counter_rotated_projected_shadow_transform(parent.rotation, *caster);
+    }
+}
 
 /// Selects the one player-car presentation assembled beneath the unchanged
 /// gameplay [`Car`] root. The imported concept is the production default;
@@ -646,6 +713,7 @@ impl Plugin for CarReviewPlugin {
             .init_resource::<PlayerInput>()
             .init_resource::<Time>()
             .init_resource::<ImportedCarPaint>()
+            .init_resource::<ToyShadingAssets>()
             .add_systems(Startup, spawn_car)
             .add_systems(
                 Update,
@@ -656,6 +724,10 @@ impl Plugin for CarReviewPlugin {
                     animate_imported_car,
                 )
                     .chain(),
+            )
+            .add_systems(
+                Update,
+                maintain_vehicle_projected_shadows.after(animate_imported_car),
             );
     }
 }
@@ -667,6 +739,7 @@ impl Plugin for CarPlugin {
             .init_resource::<PlayerInput>()
             .init_resource::<Handbrake>()
             .init_resource::<ImportedCarPaint>()
+            .init_resource::<ToyShadingAssets>()
             .configure_sets(
                 Update,
                 (KeyboardInputSet, TouchInputSet, DrivingSet).chain(),
@@ -702,7 +775,10 @@ impl Plugin for CarPlugin {
                     .chain()
                     .in_set(DrivingSet)
                     .run_if(in_state(GameState::Playing)),
-            );
+            )
+            // Traffic management is ordered before DrivingSet. Running after
+            // DrivingSet therefore observes final player and traffic headings.
+            .add_systems(Update, maintain_vehicle_projected_shadows.after(DrivingSet));
     }
 }
 
@@ -1697,16 +1773,51 @@ fn spawn_car(
     textures: Res<TextureAssets>,
     asset_server: Res<AssetServer>,
     visual: Res<PlayerCarVisual>,
+    toy_shading: Res<ToyShadingAssets>,
 ) {
     match *visual {
-        PlayerCarVisual::ImportedConcept => build_imported_car(&mut commands, &asset_server),
-        PlayerCarVisual::LegacyProcedural => {
-            build_legacy_car(&mut commands, &mut meshes, &mut materials, &textures)
+        PlayerCarVisual::ImportedConcept => {
+            build_imported_car(&mut commands, &asset_server, &toy_shading)
         }
+        PlayerCarVisual::LegacyProcedural => build_legacy_car(
+            &mut commands,
+            &mut meshes,
+            &mut materials,
+            &textures,
+            &toy_shading,
+        ),
     }
 }
 
-fn build_imported_car(commands: &mut Commands, asset_server: &AssetServer) {
+fn spawn_player_shadow_cards(car: &mut ChildSpawnerCommands, assets: &ToyShadingAssets) {
+    car.spawn((
+        Mesh3d(assets.contact_plane.clone()),
+        MeshMaterial3d(assets.contact_material.clone()),
+        contact_shadow_transform(PLAYER_SHADOW_FOOTPRINT, 0.0),
+        ToyContactShadow,
+    ));
+
+    // Native uses directional shadow maps; only WebGL receives the inexpensive
+    // projected card. Both platforms retain the compact contact card above.
+    #[cfg(target_arch = "wasm32")]
+    {
+        let caster =
+            ToyShadowCaster::new(PLAYER_SHADOW_FOOTPRINT, PLAYER_SHADOW_CASTER_HEIGHT, 0.0);
+        car.spawn((
+            Mesh3d(assets.cast_plane.clone()),
+            MeshMaterial3d(assets.cast_material.clone()),
+            counter_rotated_projected_shadow_transform(Quat::IDENTITY, caster),
+            ToyCastShadow,
+            caster,
+        ));
+    }
+}
+
+fn build_imported_car(
+    commands: &mut Commands,
+    asset_server: &AssetServer,
+    toy_shading: &ToyShadingAssets,
+) {
     commands
         .spawn((
             Transform::from_xyz(0.0, 0.0, 0.0),
@@ -1719,6 +1830,7 @@ fn build_imported_car(commands: &mut Commands, asset_server: &AssetServer) {
             DriftLatch::default(),
         ))
         .with_children(|car| {
+            spawn_player_shadow_cards(car, toy_shading);
             // Keep the production body-motion pivot regardless of visual. The
             // scene transform is deliberately authored below this pivot.
             car.spawn((
@@ -1748,6 +1860,7 @@ fn build_legacy_car(
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     textures: &TextureAssets,
+    toy_shading: &ToyShadingAssets,
 ) {
     // --- Shared meshes/materials for the body's nested children ---
     // One cached mesh per greenhouse layer replaces the hard cabin box and
@@ -1847,6 +1960,7 @@ fn build_legacy_car(
             DriftLatch::default(),
         ))
         .with_children(|car| {
+            spawn_player_shadow_cards(car, toy_shading);
             // Painted body shell (car paint). Cabin + glass + lights nest
             // under it so the whole upper structure rolls together.
             car.spawn((
@@ -2763,6 +2877,21 @@ mod tests {
     }
 
     #[test]
+    fn vehicle_projected_shadow_stays_world_fixed_at_cardinal_rotations() {
+        let caster =
+            ToyShadowCaster::new(PLAYER_SHADOW_FOOTPRINT, PLAYER_SHADOW_CASTER_HEIGHT, 0.0);
+        let expected =
+            projected_shadow_transform(PLAYER_SHADOW_FOOTPRINT, PLAYER_SHADOW_CASTER_HEIGHT, 0.0);
+        for yaw in [0.0, FRAC_PI_2, PI, 3.0 * FRAC_PI_2] {
+            let parent = Quat::from_rotation_y(yaw);
+            let local = counter_rotated_projected_shadow_transform(parent, caster);
+            assert!((parent * local.translation).abs_diff_eq(expected.translation, 1e-5));
+            assert!((parent * local.rotation).abs_diff_eq(expected.rotation, 1e-5));
+            assert_eq!(local.scale, expected.scale);
+        }
+    }
+
+    #[test]
     fn imported_visual_has_exact_transform_and_one_gameplay_root() {
         let mut app = review_app(PlayerCarVisual::ImportedConcept);
         assert_eq!(app.world_mut().query::<&Car>().iter(app.world()).count(), 1);
@@ -2791,6 +2920,41 @@ mod tests {
             .single(app.world())
             .unwrap();
         assert_eq!(app.world().get::<ChildOf>(imported).unwrap().parent(), body);
+        let car = app
+            .world_mut()
+            .query_filtered::<Entity, With<Car>>()
+            .single(app.world())
+            .unwrap();
+        let contacts: Vec<_> = app
+            .world_mut()
+            .query_filtered::<Entity, With<ToyContactShadow>>()
+            .iter(app.world())
+            .collect();
+        assert_eq!(contacts.len(), 1);
+        assert_eq!(
+            app.world().get::<ChildOf>(contacts[0]).unwrap().parent(),
+            car
+        );
+        let toy_assets = app.world().resource::<ToyShadingAssets>();
+        assert_eq!(
+            app.world().get::<Mesh3d>(contacts[0]).unwrap().0.id(),
+            toy_assets.contact_plane.id()
+        );
+        assert_eq!(
+            app.world()
+                .get::<MeshMaterial3d<StandardMaterial>>(contacts[0])
+                .unwrap()
+                .0
+                .id(),
+            toy_assets.contact_material.id()
+        );
+        assert_eq!(
+            app.world_mut()
+                .query::<&ToyShadowCaster>()
+                .iter(app.world())
+                .count(),
+            usize::from(cfg!(target_arch = "wasm32"))
+        );
         let transform = app.world().get::<Transform>(imported).unwrap();
         assert_eq!(transform.translation, Vec3::new(0.0, IMPORTED_CAR_Y, 0.0));
         assert_eq!(transform.scale, Vec3::splat(IMPORTED_CAR_SCALE));
@@ -2839,6 +3003,13 @@ mod tests {
         assert_eq!(
             app.world_mut().query::<&Wheel>().iter(app.world()).count(),
             4
+        );
+        assert_eq!(
+            app.world_mut()
+                .query::<&ToyContactShadow>()
+                .iter(app.world())
+                .count(),
+            1
         );
         assert_eq!(
             app.world_mut()

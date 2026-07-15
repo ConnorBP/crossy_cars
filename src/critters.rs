@@ -34,6 +34,10 @@ use crate::health::Health;
 use crate::modifiers::ActiveModifier;
 use crate::run_events::{EventKind, RoundEventStarted};
 use crate::settings::Settings;
+#[cfg(any(target_arch = "wasm32", test))]
+use crate::toy_shading::{ToyCastShadow, projected_shadow_transform};
+use crate::toy_shading::{ToyContactShadow, ToyShadingAssets, contact_shadow_transform};
+use crate::toy_shading::{ToyMaterialFamily, toy_material};
 
 // ---------------------------------------------------------------------------
 // Tuning constants
@@ -141,6 +145,11 @@ struct CritterBody {
     base_y: f32,
 }
 
+/// Cast-card marker used to counter-rotate WebGL projections against their
+/// moving owner's heading.
+#[derive(Component)]
+struct CritterCastShadow;
+
 /// A red gib particle (small sphere) ejected on critter hit. Affected by
 /// gravity + spin; despawns when `life` reaches 0.
 #[derive(Component)]
@@ -206,7 +215,10 @@ pub struct CritterAssets {
     // --- Shared parts ---
     leg_mesh: Handle<Mesh>,
     eye_mesh: Handle<Mesh>,
-    shadow_mesh: Handle<Mesh>,
+    // Cached globally by ToyShadingAssets, then cloned here for spawn access.
+    contact_shadow_mesh: Handle<Mesh>,
+    #[cfg(any(target_arch = "wasm32", test))]
+    cast_shadow_mesh: Handle<Mesh>,
     // --- Particle burst ---
     gib_mesh: Handle<Mesh>,
     puff_mesh: Handle<Mesh>,
@@ -222,13 +234,27 @@ pub struct CritterAssets {
     moose_head_mat: Handle<StandardMaterial>,
     antler_mat: Handle<StandardMaterial>,
     eye_mat: Handle<StandardMaterial>,
-    shadow_mat: Handle<StandardMaterial>,
+    contact_shadow_mat: Handle<StandardMaterial>,
+    #[cfg(any(target_arch = "wasm32", test))]
+    cast_shadow_mat: Handle<StandardMaterial>,
     gib_mat: Handle<StandardMaterial>,
     puff_mat: Handle<StandardMaterial>,
 }
 
 impl FromWorld for CritterAssets {
     fn from_world(world: &mut World) -> Self {
+        world.init_resource::<Assets<Image>>();
+        world.init_resource::<ToyShadingAssets>();
+        let (contact_shadow_mesh, contact_shadow_mat) = {
+            let toy = world.resource::<ToyShadingAssets>();
+            (toy.contact_plane.clone(), toy.contact_material.clone())
+        };
+        #[cfg(any(target_arch = "wasm32", test))]
+        let (cast_shadow_mesh, cast_shadow_mat) = {
+            let toy = world.resource::<ToyShadingAssets>();
+            (toy.cast_plane.clone(), toy.cast_material.clone())
+        };
+
         // Build meshes + materials together inside a `resource_scope` so we
         // never hold `&mut Assets<Mesh>` and `&mut Assets<StandardMaterial>`
         // without scoping (mirrors `chickens.rs::ChickenAssets`).
@@ -255,97 +281,116 @@ impl FromWorld for CritterAssets {
 
             // --- Shared meshes ---
             // Legs: cylinder (radius 0.06, height 0.4) — scaled per kind at
-            // spawn. Eyes: tiny black spheres. Shadow: flat quad.
+            // spawn. Eyes: tiny black spheres.
             let leg_mesh = meshes.add(Cylinder::new(0.06, 0.40));
             let eye_mesh = meshes.add(Sphere::new(0.035).mesh().uv(6, 4));
-            let shadow_mesh = meshes.add(Plane3d::default().mesh().size(1.0, 1.0));
 
             // --- Particle meshes ---
             let gib_mesh = meshes.add(Sphere::new(0.09).mesh().uv(6, 4));
             let puff_mesh = meshes.add(Plane3d::default().mesh().size(0.3, 0.3));
 
             // --- Materials: pedestrian (neutral clothing + skin) ---
-            let ped_body_mat = materials.add(StandardMaterial {
-                base_color: Color::srgb(0.30, 0.40, 0.70), // blue shirt
-                perceptual_roughness: 0.85,
-                ..default()
-            });
-            let ped_head_mat = materials.add(StandardMaterial {
-                base_color: Color::srgb(0.85, 0.70, 0.55), // skin
-                perceptual_roughness: 0.8,
-                ..default()
-            });
-            let ped_leg_mat = materials.add(StandardMaterial {
-                base_color: Color::srgb(0.20, 0.20, 0.25), // dark pants
-                perceptual_roughness: 0.85,
-                ..default()
-            });
+            let ped_body_mat = materials.add(toy_material(
+                ToyMaterialFamily::CoatedPlastic,
+                StandardMaterial {
+                    base_color: Color::srgb(0.30, 0.40, 0.70), // blue shirt
+                    ..default()
+                },
+            ));
+            let ped_head_mat = materials.add(toy_material(
+                ToyMaterialFamily::Clay,
+                StandardMaterial {
+                    base_color: Color::srgb(0.85, 0.70, 0.55), // skin
+                    ..default()
+                },
+            ));
+            let ped_leg_mat = materials.add(toy_material(
+                ToyMaterialFamily::CoatedPlastic,
+                StandardMaterial {
+                    base_color: Color::srgb(0.20, 0.20, 0.25), // dark pants
+                    ..default()
+                },
+            ));
 
             // --- Materials: cow (white body + black spots + pinkish head) ---
-            let cow_body_mat = materials.add(StandardMaterial {
-                base_color: Color::srgb(0.92, 0.92, 0.90),
-                perceptual_roughness: 0.85,
-                ..default()
-            });
-            let cow_spot_mat = materials.add(StandardMaterial {
-                base_color: Color::srgb(0.05, 0.05, 0.05),
-                perceptual_roughness: 0.8,
-                ..default()
-            });
-            let cow_head_mat = materials.add(StandardMaterial {
-                base_color: Color::srgb(0.82, 0.68, 0.62), // pinkish
-                perceptual_roughness: 0.85,
-                ..default()
-            });
+            let cow_body_mat = materials.add(toy_material(
+                ToyMaterialFamily::CoatedPlastic,
+                StandardMaterial {
+                    base_color: Color::srgb(0.92, 0.92, 0.90),
+                    ..default()
+                },
+            ));
+            let cow_spot_mat = materials.add(toy_material(
+                ToyMaterialFamily::CoatedPlastic,
+                StandardMaterial {
+                    base_color: Color::srgb(0.05, 0.05, 0.05),
+                    ..default()
+                },
+            ));
+            let cow_head_mat = materials.add(toy_material(
+                ToyMaterialFamily::Clay,
+                StandardMaterial {
+                    base_color: Color::srgb(0.82, 0.68, 0.62), // pinkish
+                    ..default()
+                },
+            ));
 
             // --- Materials: shared animal legs (dark brown, cow + moose) ---
-            let animal_leg_mat = materials.add(StandardMaterial {
-                base_color: Color::srgb(0.15, 0.12, 0.10),
-                perceptual_roughness: 0.9,
-                ..default()
-            });
+            let animal_leg_mat = materials.add(toy_material(
+                ToyMaterialFamily::RawWood,
+                StandardMaterial {
+                    base_color: Color::srgb(0.15, 0.12, 0.10),
+                    ..default()
+                },
+            ));
 
             // --- Materials: moose (brown body + darker head + tan antlers) ---
-            let moose_body_mat = materials.add(StandardMaterial {
-                base_color: Color::srgb(0.35, 0.25, 0.15), // brown
-                perceptual_roughness: 0.9,
-                ..default()
-            });
-            let moose_head_mat = materials.add(StandardMaterial {
-                base_color: Color::srgb(0.28, 0.20, 0.12), // dark brown
-                perceptual_roughness: 0.9,
-                ..default()
-            });
-            let antler_mat = materials.add(StandardMaterial {
-                base_color: Color::srgb(0.65, 0.55, 0.40), // tan
-                perceptual_roughness: 0.7,
-                ..default()
-            });
+            let moose_body_mat = materials.add(toy_material(
+                ToyMaterialFamily::RawWood,
+                StandardMaterial {
+                    base_color: Color::srgb(0.35, 0.25, 0.15), // brown
+                    ..default()
+                },
+            ));
+            let moose_head_mat = materials.add(toy_material(
+                ToyMaterialFamily::RawWood,
+                StandardMaterial {
+                    base_color: Color::srgb(0.28, 0.20, 0.12), // dark brown
+                    ..default()
+                },
+            ));
+            let antler_mat = materials.add(toy_material(
+                ToyMaterialFamily::RawWood,
+                StandardMaterial {
+                    base_color: Color::srgb(0.65, 0.55, 0.40), // tan
+                    ..default()
+                },
+            ));
 
             // --- Materials: shared eyes + shadow + particles ---
-            let eye_mat = materials.add(StandardMaterial {
-                base_color: Color::srgb(0.02, 0.02, 0.02),
-                perceptual_roughness: 0.3,
-                metallic: 0.1,
-                ..default()
-            });
-            let shadow_mat = materials.add(StandardMaterial {
-                base_color: Color::srgba(0.0, 0.0, 0.0, 0.30),
-                alpha_mode: AlphaMode::Blend,
-                ..default()
-            });
+            let eye_mat = materials.add(toy_material(
+                ToyMaterialFamily::CoatedPlastic,
+                StandardMaterial {
+                    base_color: Color::srgb(0.02, 0.02, 0.02),
+                    ..default()
+                },
+            ));
             // Red gib + red smoke for the penalty burst.
-            let gib_mat = materials.add(StandardMaterial {
-                base_color: Color::srgb(0.80, 0.10, 0.08),
-                perceptual_roughness: 0.6,
-                ..default()
-            });
-            let puff_mat = materials.add(StandardMaterial {
-                base_color: Color::srgba(0.70, 0.10, 0.08, 0.50),
-                alpha_mode: AlphaMode::Blend,
-                perceptual_roughness: 1.0,
-                ..default()
-            });
+            let gib_mat = materials.add(toy_material(
+                ToyMaterialFamily::Clay,
+                StandardMaterial {
+                    base_color: Color::srgb(0.80, 0.10, 0.08),
+                    ..default()
+                },
+            ));
+            let puff_mat = materials.add(toy_material(
+                ToyMaterialFamily::Clay,
+                StandardMaterial {
+                    base_color: Color::srgba(0.70, 0.10, 0.08, 0.50),
+                    alpha_mode: AlphaMode::Blend,
+                    ..default()
+                },
+            ));
 
             CritterAssets {
                 ped_body_mesh,
@@ -358,7 +403,9 @@ impl FromWorld for CritterAssets {
                 antler_mesh,
                 leg_mesh,
                 eye_mesh,
-                shadow_mesh,
+                contact_shadow_mesh,
+                #[cfg(any(target_arch = "wasm32", test))]
+                cast_shadow_mesh,
                 gib_mesh,
                 puff_mesh,
                 ped_body_mat,
@@ -372,7 +419,9 @@ impl FromWorld for CritterAssets {
                 moose_head_mat,
                 antler_mat,
                 eye_mat,
-                shadow_mat,
+                contact_shadow_mat,
+                #[cfg(any(target_arch = "wasm32", test))]
+                cast_shadow_mat,
                 gib_mat,
                 puff_mat,
             }
@@ -527,7 +576,8 @@ fn spawn_critter_burst(
 ///   ├── CritterBody { base_y } (bob group — animated each frame)
 ///   │     └── kind-specific parts (body mesh, head, spots/antlers, eyes)
 ///   ├── leg × N (Cylinders, children of root — stay grounded)
-///   └── blob shadow (flat quad at y=0.02, scaled per kind)
+///   ├── one shared soft contact card
+///   └── one world-fixed projected card for every critter on WebGL2
 /// ```
 fn spawn_one_critter(
     commands: &mut Commands,
@@ -541,6 +591,10 @@ fn spawn_one_critter(
 ) -> Entity {
     let speed = critter_speed(kind, cfg);
     let base_y = critter_body_base_y(kind);
+    #[cfg(any(target_arch = "wasm32", test))]
+    let owner_transform = Transform::from_translation(pos);
+    #[cfg(any(target_arch = "wasm32", test))]
+    let cast_transform = critter_projected_shadow_local_transform(kind, &owner_transform);
 
     commands
         .spawn((
@@ -570,13 +624,28 @@ fn spawn_one_critter(
             // --- Legs (children of root, not the bob group — stay grounded) ---
             build_legs(root, assets, kind);
 
-            // --- Blob shadow (flat on the ground, scaled per kind) ---
+            // Every kind retains exactly one contact card at the old
+            // footprint. The shared alpha texture supplies the soft edge.
             let (sw, sl) = critter_shadow_size(kind);
             root.spawn((
-                Mesh3d(assets.shadow_mesh.clone()),
-                MeshMaterial3d(assets.shadow_mat.clone()),
-                Transform::from_xyz(0.0, 0.02, 0.0).with_scale(Vec3::new(sw, 1.0, sl)),
+                Mesh3d(assets.contact_shadow_mesh.clone()),
+                MeshMaterial3d(assets.contact_shadow_mat.clone()),
+                contact_shadow_transform(Vec2::new(sw, sl), 0.0),
+                ToyContactShadow,
             ));
+
+            // WebGL2 has no real-time shadow maps, so every critter gets a
+            // classical projection in addition to its contact card.
+            #[cfg(any(target_arch = "wasm32", test))]
+            if critter_has_projected_shadow(kind) {
+                root.spawn((
+                    Mesh3d(assets.cast_shadow_mesh.clone()),
+                    MeshMaterial3d(assets.cast_shadow_mat.clone()),
+                    cast_transform,
+                    ToyCastShadow,
+                    CritterCastShadow,
+                ));
+            }
         })
         .id()
 }
@@ -755,13 +824,26 @@ fn wander_critters(
         (
             Entity,
             &mut Critter,
+            &CritterKind,
             &mut Transform,
             &Children,
             Has<CritterBurstExtra>,
         ),
         Without<Car>,
     >,
-    mut bodies: Query<(&mut Transform, &CritterBody), (Without<Critter>, Without<Car>)>,
+    mut bodies: Query<
+        (&mut Transform, &CritterBody),
+        (Without<Critter>, Without<Car>, Without<CritterCastShadow>),
+    >,
+    #[cfg(any(target_arch = "wasm32", test))] mut cast_shadows: Query<
+        &mut Transform,
+        (
+            With<CritterCastShadow>,
+            Without<CritterBody>,
+            Without<Critter>,
+            Without<Car>,
+        ),
+    >,
     time: Res<Time>,
     settings: Res<Settings>,
     mut seed: Local<u32>,
@@ -774,7 +856,7 @@ fn wander_critters(
     let car_forward = horizontal_forward(car_t.rotation);
     let dt = time.delta_secs();
 
-    for (e, mut critter, mut tf, children, burst_extra) in &mut critters {
+    for (e, mut critter, _kind, mut tf, children, burst_extra) in &mut critters {
         // --- Periodically pick a new random heading ---
         critter.timer -= dt;
         if critter.timer <= 0.0 {
@@ -788,6 +870,13 @@ fn wander_critters(
         // --- Face the heading (rotate Y so the face points along dir) ---
         let heading = (-critter.dir.x).atan2(-critter.dir.z);
         tf.rotation = Quat::from_rotation_y(heading);
+
+        #[cfg(any(target_arch = "wasm32", test))]
+        for child_e in children.iter() {
+            if let Ok(mut shadow_tf) = cast_shadows.get_mut(child_e) {
+                *shadow_tf = critter_projected_shadow_local_transform(*_kind, &tf);
+            }
+        }
 
         // --- Recycle critters that fell behind or drifted too far away ---
         if should_recycle(tf.translation, car_pos, car_forward) {
@@ -1258,7 +1347,7 @@ fn critter_body_base_y(kind: CritterKind) -> f32 {
     }
 }
 
-/// Shadow quad (width, length) per kind — bigger animals cast bigger shadows.
+/// Contact card (width, length) per kind — preserving the prior blob sizes.
 fn critter_shadow_size(kind: CritterKind) -> (f32, f32) {
     match kind {
         CritterKind::Pedestrian => (0.40, 0.40),
@@ -1267,10 +1356,107 @@ fn critter_shadow_size(kind: CritterKind) -> (f32, f32) {
     }
 }
 
+#[cfg(any(target_arch = "wasm32", test))]
+const fn critter_has_projected_shadow(_kind: CritterKind) -> bool {
+    true
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+const fn critter_caster_height(kind: CritterKind) -> f32 {
+    match kind {
+        CritterKind::Pedestrian => 1.05,
+        CritterKind::Cow => 1.15,
+        CritterKind::Moose => 1.65,
+    }
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn critter_projected_shadow_local_transform(kind: CritterKind, owner: &Transform) -> Transform {
+    let (width, length) = critter_shadow_size(kind);
+    let mut projected =
+        projected_shadow_transform(Vec2::new(width, length), critter_caster_height(kind), 0.0);
+    let inverse_owner_rotation = owner.rotation.inverse();
+    projected.translation.y -= owner.translation.y;
+    projected.translation = inverse_owner_rotation * projected.translation;
+    projected.rotation = inverse_owner_rotation * projected.rotation;
+    projected
+}
+
+#[cfg(test)]
+const fn critter_shadow_card_count(kind: CritterKind, webgl: bool) -> usize {
+    1 + (webgl && critter_has_projected_shadow(kind)) as usize
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::modifiers::ModifierKind;
+    use std::f32::consts::{FRAC_PI_2, PI};
+
+    #[test]
+    fn critter_contact_sizes_and_platform_cardinality_are_preserved() {
+        assert_eq!(critter_shadow_size(CritterKind::Pedestrian), (0.4, 0.4));
+        assert_eq!(critter_shadow_size(CritterKind::Cow), (0.8, 1.2));
+        assert_eq!(critter_shadow_size(CritterKind::Moose), (0.7, 1.3));
+        for kind in [
+            CritterKind::Pedestrian,
+            CritterKind::Cow,
+            CritterKind::Moose,
+        ] {
+            assert_eq!(critter_shadow_card_count(kind, false), 1);
+            assert_eq!(critter_shadow_card_count(kind, true), 2);
+        }
+    }
+
+    #[test]
+    fn critter_projected_shadows_use_full_caster_heights() {
+        assert_eq!(critter_caster_height(CritterKind::Pedestrian), 1.05);
+        assert_eq!(critter_caster_height(CritterKind::Cow), 1.15);
+        assert_eq!(critter_caster_height(CritterKind::Moose), 1.65);
+    }
+
+    #[test]
+    fn turning_critters_keep_projected_cards_world_fixed() {
+        for kind in [
+            CritterKind::Pedestrian,
+            CritterKind::Cow,
+            CritterKind::Moose,
+        ] {
+            let (width, length) = critter_shadow_size(kind);
+            let canonical = projected_shadow_transform(
+                Vec2::new(width, length),
+                critter_caster_height(kind),
+                0.0,
+            );
+            for yaw in [0.0, FRAC_PI_2, PI, 3.0 * FRAC_PI_2] {
+                let owner =
+                    Transform::from_xyz(4.0, 0.35, -8.0).with_rotation(Quat::from_rotation_y(yaw));
+                let local = critter_projected_shadow_local_transform(kind, &owner);
+                let world_translation = owner.translation + owner.rotation * local.translation;
+                let expected_translation = Vec3::new(owner.translation.x, 0.0, owner.translation.z)
+                    + canonical.translation;
+                assert!(world_translation.abs_diff_eq(expected_translation, 1e-5));
+                assert!((owner.rotation * local.rotation).abs_diff_eq(canonical.rotation, 1e-5));
+                assert_eq!(local.scale, canonical.scale);
+            }
+        }
+    }
+
+    #[test]
+    fn critter_assets_reuse_global_toy_shadow_cache() {
+        let mut app = App::new();
+        app.init_resource::<Assets<Image>>()
+            .init_resource::<Assets<Mesh>>()
+            .init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<ToyShadingAssets>()
+            .init_resource::<CritterAssets>();
+        let toy = app.world().resource::<ToyShadingAssets>();
+        let critter = app.world().resource::<CritterAssets>();
+        assert_eq!(critter.contact_shadow_mesh.id(), toy.contact_plane.id());
+        assert_eq!(critter.cast_shadow_mesh.id(), toy.cast_plane.id());
+        assert_eq!(critter.contact_shadow_mat.id(), toy.contact_material.id());
+        assert_eq!(critter.cast_shadow_mat.id(), toy.cast_material.id());
+    }
 
     #[test]
     fn reduced_motion_keeps_critter_body_static_and_suppresses_particles() {
