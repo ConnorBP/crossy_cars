@@ -93,6 +93,16 @@ impl ModifierKind {
         }
     }
 
+    /// Regular roadside coin population for a supplied baseline.
+    /// Chicken Frenzy gives up one coin per road block to offset its denser,
+    /// higher-value flock without changing coin scoring or time rules.
+    pub(crate) const fn coin_target(self, base: usize) -> usize {
+        match self {
+            Self::ChickenFrenzy => base.saturating_sub(1),
+            _ => base,
+        }
+    }
+
     /// Multiplier for the target penalty-critter population.
     pub(crate) const fn critter_count_multiplier(self) -> usize {
         match self {
@@ -248,6 +258,17 @@ mod tests {
     ];
 
     #[test]
+    fn chicken_frenzy_reduces_only_regular_coin_population_by_one() {
+        assert_eq!(ALL.map(|kind| kind.coin_target(4)), [4, 4, 3, 4, 4]);
+        assert_eq!(ModifierKind::ChickenFrenzy.coin_target(0), 0);
+        assert_eq!(ModifierKind::ChickenFrenzy.coin_target(1), 0);
+        assert_eq!(
+            ModifierKind::ChickenFrenzy.coin_target(usize::MAX),
+            usize::MAX - 1
+        );
+    }
+
+    #[test]
     fn modifier_storage_indices_are_stable() {
         for (expected, kind) in ALL.into_iter().enumerate() {
             assert_eq!(kind.index(), expected);
@@ -264,6 +285,7 @@ mod tests {
         assert_eq!(active.traffic_count_multiplier(), 1);
         assert_eq!(active.traffic_speed_multiplier(), 1.0);
         assert_eq!(active.chicken_target(14), 14);
+        assert_eq!(active.0.coin_target(4), 4);
         assert_eq!(active.critter_count_multiplier(), 1);
         assert_eq!(active.damage_multiplier(), 1.0);
         assert_eq!(active.combo_bonus_multiplier(), 1);

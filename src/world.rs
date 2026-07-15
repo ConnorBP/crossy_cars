@@ -50,6 +50,7 @@ use crate::game::SpawnSet;
 use crate::game::events::CoinCollected;
 use crate::game::resources::{RoundActive, Score, TimeLeft};
 use crate::game::state::GameState;
+use crate::modifiers::{ActiveModifier, ModifierKind};
 use crate::palette;
 use crate::shaders::WaterMaterial;
 use crate::textures::{GROUND_VARIANTS, TextureAssets};
@@ -65,6 +66,7 @@ const SHADOWS: bool = cfg!(not(target_arch = "wasm32"));
 /// Stable review/export seed. Production generation itself is coordinate
 /// seeded and unchanged; this only documents the harness contract.
 const REVIEW_SEED: u32 = 0;
+const COINS_PER_ROAD_BLOCK: usize = 4;
 
 /// Tag for coin entities (environment now — spawned inside blocks, recycled
 /// with them, collected on pickup and respawned when the block re-populates).
@@ -2069,6 +2071,7 @@ fn spawn_initial_grid(
     world_assets: Res<WorldAssets>,
     scene_assets: Res<WorldSceneAssets>,
     toy_shading: Res<ToyShadingAssets>,
+    modifier: Option<Res<ActiveModifier>>,
     mut last_recycled_cell: ResMut<LastRecycledCell>,
 ) {
     spawn_grid_window(
@@ -2079,6 +2082,7 @@ fn spawn_initial_grid(
         &world_assets,
         &scene_assets,
         &toy_shading,
+        modifier.map_or(ModifierKind::Standard, |active| active.0),
     );
     last_recycled_cell.record_completed((0, 0));
 }
@@ -2100,6 +2104,7 @@ fn spawn_grid_window(
     world_assets: &WorldAssets,
     scene_assets: &WorldSceneAssets,
     toy_shading: &ToyShadingAssets,
+    modifier: ModifierKind,
 ) {
     let block = cfg.block;
     for (gx, gz) in desired_grid_coords((0, 0), cfg.count) {
@@ -2133,6 +2138,7 @@ fn spawn_grid_window(
             kind,
             district,
             family,
+            modifier,
         );
     }
 }
@@ -2427,6 +2433,7 @@ fn spawn_review_tile(
         kind,
         district,
         family,
+        ModifierKind::Standard,
     );
 }
 
@@ -3153,6 +3160,7 @@ pub fn populate_block(
     kind: TileKind,
     district: District,
     family: DistrictFamily,
+    modifier: ModifierKind,
 ) {
     let block = 40.0_f32; // matches GridConfig default; decorations are laid
     // out relative to this.
@@ -3439,23 +3447,11 @@ pub fn populate_block(
         let mut placed: Vec<[f32; 4]> = road_exclusion_rects(sock);
 
         // --- Coins on the Road arms only ---
-        let road_sockets: Vec<_> = [road_w, road_e, road_s, road_n]
-            .into_iter()
-            .enumerate()
-            .filter_map(|(socket, enabled)| enabled.then_some(socket))
-            .collect();
-        for _ in 0..if any_road { 4 } else { 0 } {
-            let index =
-                ((rand(&mut s) * road_sockets.len() as f32) as usize).min(road_sockets.len() - 1);
-            let socket = road_sockets[index];
-            let along = 6.0 + rand(&mut s) * 12.0;
-            let lateral = (rand(&mut s) * 2.0 - 1.0) * 3.0;
-            let (cx, cz) = match socket {
-                W => (-along, lateral),
-                E => (along, lateral),
-                S => (lateral, -along),
-                _ => (lateral, along),
-            };
+        let coin_count = modifier.coin_target(COINS_PER_ROAD_BLOCK);
+        let (coin_positions, next_seed) = coin_layout(s, kind, coin_count);
+        s = next_seed;
+        for position in coin_positions {
+            let (cx, cz) = (position.x, position.y);
             p.spawn((
                 Transform::from_xyz(cx, 0.0, cz),
                 Visibility::default(),
@@ -4628,6 +4624,37 @@ fn rand(seed: &mut u32) -> f32 {
     (*seed as f32) / (u32::MAX as f32)
 }
 
+/// Deterministic regular-coin positions and the seed after their draws.
+/// Fewer Frenzy coins are an exact prefix of the baseline layout, while all
+/// other conditions keep the original four-coin/12-draw sequence unchanged.
+fn coin_layout(seed: u32, kind: TileKind, count: usize) -> (Vec<Vec2>, u32) {
+    let sock = sockets(kind);
+    let road_sockets: Vec<_> = sock
+        .into_iter()
+        .enumerate()
+        .filter_map(|(socket, edge)| (edge == Edge::Road).then_some(socket))
+        .collect();
+    if road_sockets.is_empty() {
+        return (Vec::new(), seed);
+    }
+    let mut seed = seed;
+    let mut positions = Vec::with_capacity(count);
+    for _ in 0..count {
+        let index =
+            ((rand(&mut seed) * road_sockets.len() as f32) as usize).min(road_sockets.len() - 1);
+        let socket = road_sockets[index];
+        let along = 6.0 + rand(&mut seed) * 12.0;
+        let lateral = (rand(&mut seed) * 2.0 - 1.0) * 3.0;
+        positions.push(match socket {
+            W => Vec2::new(-along, lateral),
+            E => Vec2::new(along, lateral),
+            S => Vec2::new(lateral, -along),
+            _ => Vec2::new(lateral, along),
+        });
+    }
+    (positions, seed)
+}
+
 /// Overlap-rejection placement (a la "simple room placement"): try up to
 /// `attempts` random positions within `[x_lo,x_hi] x [z_lo,z_hi]` for a box of
 /// half-extents `(half_x, half_z)` plus a `margin`, returning the first that
@@ -4682,6 +4709,7 @@ fn recycle_grid(
     world_assets: Res<WorldAssets>,
     scene_assets: Res<WorldSceneAssets>,
     toy_shading: Res<ToyShadingAssets>,
+    modifier: Option<Res<ActiveModifier>>,
     car: Query<&Transform, (With<Car>, Without<Block>)>,
     blocks: Query<(Entity, &Block, Option<&PendingBlock>)>,
     mut last_recycled_cell: ResMut<LastRecycledCell>,
@@ -4781,6 +4809,9 @@ fn recycle_grid(
                     block_size,
                     gx,
                     gz,
+                    modifier
+                        .as_ref()
+                        .map_or(ModifierKind::Standard, |active| active.0),
                 );
                 commands.entity(entity).insert(PendingBlock);
                 work.scheduled = Some((gx, gz));
@@ -4851,6 +4882,7 @@ fn spawn_block_at(
     block: f32,
     gx: i32,
     gz: i32,
+    modifier: ModifierKind,
 ) -> Entity {
     let kind = tile_from_edges(gx, gz);
     let district = district_for(gx, gz);
@@ -4882,6 +4914,7 @@ fn spawn_block_at(
         kind,
         district,
         family,
+        modifier,
     );
     root
 }
@@ -4899,6 +4932,7 @@ fn reset_grid(
     world_assets: Res<WorldAssets>,
     scene_assets: Res<WorldSceneAssets>,
     toy_shading: Res<ToyShadingAssets>,
+    modifier: Option<Res<ActiveModifier>>,
     blocks: Query<Entity, With<Block>>,
     round_active: Res<RoundActive>,
     mut last_recycled_cell: ResMut<LastRecycledCell>,
@@ -4924,6 +4958,7 @@ fn reset_grid(
         &world_assets,
         &scene_assets,
         &toy_shading,
+        modifier.map_or(ModifierKind::Standard, |active| active.0),
     );
     last_recycled_cell.record_completed((0, 0));
 }
@@ -5150,6 +5185,53 @@ fn update_cone_motion(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frenzy_coin_layout_is_a_three_coin_prefix_and_other_modes_are_identical() {
+        let seed = seed_for(11, -7);
+        let baseline = coin_layout(seed, TileKind::Cross, COINS_PER_ROAD_BLOCK);
+        assert_eq!(baseline.0.len(), 4);
+
+        for kind in [
+            ModifierKind::Standard,
+            ModifierKind::RushHour,
+            ModifierKind::Stampede,
+            ModifierKind::GlassCannon,
+        ] {
+            assert_eq!(
+                coin_layout(
+                    seed,
+                    TileKind::Cross,
+                    kind.coin_target(COINS_PER_ROAD_BLOCK)
+                ),
+                baseline,
+                "{kind:?} changed baseline coin layout"
+            );
+        }
+
+        let frenzy = coin_layout(
+            seed,
+            TileKind::Cross,
+            ModifierKind::ChickenFrenzy.coin_target(COINS_PER_ROAD_BLOCK),
+        );
+        assert_eq!(frenzy.0.as_slice(), &baseline.0[..3]);
+        let mut expected_frenzy_seed = seed;
+        for _ in 0..9 {
+            rand(&mut expected_frenzy_seed);
+        }
+        assert_eq!(frenzy.1, expected_frenzy_seed);
+        let mut expected_baseline_seed = seed;
+        for _ in 0..12 {
+            rand(&mut expected_baseline_seed);
+        }
+        assert_eq!(baseline.1, expected_baseline_seed);
+    }
+
+    #[test]
+    fn empty_tiles_spawn_no_coins_and_consume_no_coin_rng() {
+        let seed = seed_for(-2, 2);
+        assert_eq!(coin_layout(seed, TileKind::Empty, 4), (Vec::new(), seed));
+    }
 
     #[test]
     fn production_startup_spawns_exactly_one_tuned_sun() {
