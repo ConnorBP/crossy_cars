@@ -38,8 +38,12 @@ struct EngineSound {
     smooth_vol: f32,
 }
 
-/// Marker for the single looping ambient wind/hum entity, cleaned up on exit
-/// from Playing.
+/// Optional ambient bed policy. The shipped noise-heavy loop is retained for
+/// future redesign/debugging but disabled by default because it reads as
+/// persistent static during play.
+const ENABLE_AMBIENT_BED: bool = false;
+
+/// Marker for an opt-in ambient loop, cleaned up on exit from Playing.
 #[derive(Component)]
 struct AmbientSound;
 
@@ -72,7 +76,7 @@ impl Plugin for AudioPlugin {
             )
             .add_systems(
                 OnEnter(GameState::Playing),
-                (spawn_engine, spawn_ambient, play_click),
+                (spawn_continuous_audio, play_click),
             )
             .add_systems(
                 OnExit(GameState::Playing),
@@ -290,28 +294,33 @@ fn play_click(mut commands: Commands, handles: Res<AudioHandles>) {
 /// driven each frame by `update_engine`; `cleanup_engine` stops it on exit.
 /// The `EngineSound` starts at idle (speed 0) values so there's no initial
 /// pop — `update_engine` lerps from there as the car speeds up.
-fn spawn_engine(mut commands: Commands, handles: Res<AudioHandles>) {
-    commands.spawn((
-        AudioPlayer::new(handles.engine.clone()),
-        PlaybackSettings::LOOP,
-        EngineSound {
-            smooth_rate: ENGINE_IDLE_RATE,
-            smooth_vol: ENGINE_IDLE_VOL,
-        },
-        AudioBaseGain(ENGINE_IDLE_VOL),
-    ));
-}
-
-/// Spawn the looping ambient wind/hum bed when entering Playing. Very low
-/// volume so it sits under the engine without competing for attention.
-/// `cleanup_ambient` stops it on exit.
-fn spawn_ambient(mut commands: Commands, handles: Res<AudioHandles>) {
-    commands.spawn((
-        AudioPlayer::new(handles.ambient.clone()),
-        PlaybackSettings::LOOP.with_volume(Volume::Linear(AMBIENT_VOLUME)),
-        AmbientSound,
-        AudioBaseGain(AMBIENT_VOLUME),
-    ));
+fn spawn_continuous_audio(
+    mut commands: Commands,
+    handles: Res<AudioHandles>,
+    engine: Query<(), With<EngineSound>>,
+    ambient: Query<(), With<AmbientSound>>,
+) {
+    // State transitions normally clean these up, but idempotence prevents a
+    // duplicate loop if Playing is re-entered through an unusual lifecycle.
+    if engine.is_empty() {
+        commands.spawn((
+            AudioPlayer::new(handles.engine.clone()),
+            PlaybackSettings::LOOP,
+            EngineSound {
+                smooth_rate: ENGINE_IDLE_RATE,
+                smooth_vol: ENGINE_IDLE_VOL,
+            },
+            AudioBaseGain(ENGINE_IDLE_VOL),
+        ));
+    }
+    if ENABLE_AMBIENT_BED && ambient.is_empty() {
+        commands.spawn((
+            AudioPlayer::new(handles.ambient.clone()),
+            PlaybackSettings::LOOP.with_volume(Volume::Linear(AMBIENT_VOLUME)),
+            AmbientSound,
+            AudioBaseGain(AMBIENT_VOLUME),
+        ));
+    }
 }
 
 /// Stop the engine whenever we leave Playing (-> Paused / GameOver / Menu).
@@ -395,6 +404,49 @@ fn update_engine(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_continuous_audio_policy_disables_noise_heavy_ambient_bed() {
+        assert!(!ENABLE_AMBIENT_BED);
+        assert!((ENGINE_IDLE_VOL..=ENGINE_MAX_VOL).contains(&ENGINE_IDLE_VOL));
+        assert!(
+            AMBIENT_VOLUME > 0.0,
+            "asset remains available for future opt-in"
+        );
+    }
+
+    #[test]
+    fn continuous_audio_spawn_is_idempotent_and_engine_only_by_default() {
+        let mut app = App::new();
+        app.add_plugins((
+            bevy::app::TaskPoolPlugin::default(),
+            bevy::asset::AssetPlugin::default(),
+        ))
+        .init_asset::<AudioSource>()
+        .init_resource::<AudioHandles>()
+        .add_systems(Update, spawn_continuous_audio);
+
+        app.update();
+        app.update();
+        let world = app.world_mut();
+        assert_eq!(world.query::<&EngineSound>().iter(world).count(), 1);
+        assert_eq!(world.query::<&AmbientSound>().iter(world).count(), 0);
+    }
+
+    #[test]
+    fn cleanup_removes_all_continuous_loop_markers() {
+        let mut app = App::new();
+        app.add_systems(Update, (cleanup_engine, cleanup_ambient));
+        app.world_mut().spawn(EngineSound {
+            smooth_rate: ENGINE_IDLE_RATE,
+            smooth_vol: ENGINE_IDLE_VOL,
+        });
+        app.world_mut().spawn(AmbientSound);
+        app.update();
+        let world = app.world_mut();
+        assert_eq!(world.query::<&EngineSound>().iter(world).count(), 0);
+        assert_eq!(world.query::<&AmbientSound>().iter(world).count(), 0);
+    }
 
     #[test]
     fn bounded_cue_gain_clamps_to_unit_and_silences_nonfinite() {
