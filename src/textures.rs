@@ -16,6 +16,8 @@ use bevy::math::Affine2;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
+use crate::toy_shading::{ToyMaterialFamily, toy_material};
+
 /// Texture edge length in pixels.
 const TEX_SIZE: u32 = 64;
 
@@ -120,101 +122,111 @@ impl FromWorld for TextureAssets {
 
                 // GRASS — subtle deterministic mottle, mowing bands, and sparse
                 // color flecks; tile 16x with a matte blade-bump normal map.
-                let grass = materials.add(StandardMaterial {
-                    base_color: Color::WHITE,
-                    base_color_texture: Some(images.add(grass_texture())),
-                    normal_map_texture: Some(grass_normal),
-                    perceptual_roughness: 1.0,
-                    metallic: 0.0,
-                    uv_transform: Affine2::from_scale(Vec2::splat(16.0)),
-                    ..default()
-                });
+                let grass = materials.add(toy_material(
+                    ToyMaterialFamily::Foliage,
+                    StandardMaterial {
+                        base_color: Color::WHITE,
+                        base_color_texture: Some(images.add(grass_texture())),
+                        normal_map_texture: Some(grass_normal),
+                        uv_transform: Affine2::from_scale(Vec2::splat(16.0)),
+                        ..default()
+                    },
+                ));
 
                 // ROAD — dark asphalt with richer gravel/noise; tile 8×. T15: more
                 // gravel specks + multi-frequency noise, near-fully rough with a
                 // gravelly normal map for per-pixel surface detail.
-                let road = materials.add(StandardMaterial {
-                    base_color: Color::WHITE,
-                    base_color_texture: Some(images.add(road_texture())),
-                    normal_map_texture: Some(road_normal),
-                    perceptual_roughness: 0.92,
-                    metallic: 0.0,
-                    uv_transform: Affine2::from_scale(Vec2::splat(8.0)),
-                    ..default()
-                });
+                let road = materials.add(toy_material(
+                    ToyMaterialFamily::Asphalt,
+                    StandardMaterial {
+                        base_color: Color::WHITE,
+                        base_color_texture: Some(images.add(road_texture())),
+                        normal_map_texture: Some(road_normal),
+                        uv_transform: Affine2::from_scale(Vec2::splat(8.0)),
+                        ..default()
+                    },
+                ));
 
                 // SIDEWALK — long staggered concrete slabs, restrained slab-tone
                 // variation, expansion joints, and a rough concrete normal map.
-                let sidewalk = materials.add(StandardMaterial {
-                    base_color: Color::WHITE,
-                    base_color_texture: Some(images.add(sidewalk_texture())),
-                    normal_map_texture: Some(sidewalk_normal),
-                    perceptual_roughness: 0.88,
-                    metallic: 0.0,
-                    // Fewer repeats make the larger, staggered slabs legible.
-                    uv_transform: Affine2::from_scale(Vec2::splat(SIDEWALK_UV_REPEAT)),
-                    ..default()
-                });
+                let sidewalk = materials.add(toy_material(
+                    ToyMaterialFamily::Concrete,
+                    StandardMaterial {
+                        base_color: Color::WHITE,
+                        base_color_texture: Some(images.add(sidewalk_texture())),
+                        normal_map_texture: Some(sidewalk_normal),
+                        // Fewer repeats make the larger, staggered slabs legible.
+                        uv_transform: Affine2::from_scale(Vec2::splat(SIDEWALK_UV_REPEAT)),
+                        ..default()
+                    },
+                ));
 
                 // Three cached species/palette variants. Textures add leaf-sized
                 // highlights and veins without transparent cutouts (they are used
                 // by closed foliage meshes).
                 let foliage = std::array::from_fn(|variant| {
-                    materials.add(StandardMaterial {
-                        base_color: Color::WHITE,
-                        base_color_texture: Some(images.add(foliage_texture(variant))),
-                        perceptual_roughness: 0.9,
-                        metallic: 0.0,
-                        uv_transform: Affine2::from_scale(Vec2::splat(2.0)),
-                        ..default()
-                    })
+                    materials.add(toy_material(
+                        ToyMaterialFamily::Foliage,
+                        StandardMaterial {
+                            base_color: Color::WHITE,
+                            base_color_texture: Some(images.add(foliage_texture(variant))),
+                            uv_transform: Affine2::from_scale(Vec2::splat(2.0)),
+                            ..default()
+                        },
+                    ))
                 });
 
                 // Cached field/bale straw variants. Both carry directional fibres;
                 // their different band direction and palette suit the two uses.
                 let hay = std::array::from_fn(|variant| {
-                    materials.add(StandardMaterial {
-                        base_color: Color::WHITE,
-                        base_color_texture: Some(images.add(hay_texture(variant))),
-                        perceptual_roughness: 0.96,
-                        metallic: 0.0,
-                        uv_transform: Affine2::from_scale(Vec2::splat(3.0)),
-                        ..default()
-                    })
+                    materials.add(toy_material(
+                        ToyMaterialFamily::SoilHay,
+                        StandardMaterial {
+                            base_color: Color::WHITE,
+                            base_color_texture: Some(images.add(hay_texture(variant))),
+                            uv_transform: Affine2::from_scale(Vec2::splat(3.0)),
+                            ..default()
+                        },
+                    ))
                 });
 
                 let park_ground = std::array::from_fn(|variant| {
-                    materials.add(StandardMaterial {
-                        base_color: Color::WHITE,
-                        base_color_texture: Some(images.add(park_ground_texture(variant))),
-                        normal_map_texture: Some(images.add(park_ground_normal_map(variant))),
-                        perceptual_roughness: 0.90,
-                        metallic: 0.0,
-                        uv_transform: Affine2::from_scale(Vec2::splat(10.0)),
-                        ..default()
-                    })
+                    materials.add(toy_material(
+                        ToyMaterialFamily::Foliage,
+                        StandardMaterial {
+                            base_color: Color::WHITE,
+                            base_color_texture: Some(images.add(park_ground_texture(variant))),
+                            normal_map_texture: Some(images.add(park_ground_normal_map(variant))),
+                            uv_transform: Affine2::from_scale(Vec2::splat(10.0)),
+                            ..default()
+                        },
+                    ))
                 });
                 let orchard_ground = std::array::from_fn(|variant| {
-                    materials.add(StandardMaterial {
-                        base_color: Color::WHITE,
-                        base_color_texture: Some(images.add(orchard_ground_texture(variant))),
-                        normal_map_texture: Some(images.add(orchard_ground_normal_map(variant))),
-                        perceptual_roughness: 0.93,
-                        metallic: 0.0,
-                        uv_transform: Affine2::from_scale(Vec2::splat(8.0)),
-                        ..default()
-                    })
+                    materials.add(toy_material(
+                        ToyMaterialFamily::SoilHay,
+                        StandardMaterial {
+                            base_color: Color::WHITE,
+                            base_color_texture: Some(images.add(orchard_ground_texture(variant))),
+                            normal_map_texture: Some(
+                                images.add(orchard_ground_normal_map(variant)),
+                            ),
+                            uv_transform: Affine2::from_scale(Vec2::splat(8.0)),
+                            ..default()
+                        },
+                    ))
                 });
                 let field_ground = std::array::from_fn(|variant| {
-                    materials.add(StandardMaterial {
-                        base_color: Color::WHITE,
-                        base_color_texture: Some(images.add(field_ground_texture(variant))),
-                        normal_map_texture: Some(images.add(field_ground_normal_map(variant))),
-                        perceptual_roughness: 0.96,
-                        metallic: 0.0,
-                        uv_transform: Affine2::from_scale(Vec2::splat(6.0)),
-                        ..default()
-                    })
+                    materials.add(toy_material(
+                        ToyMaterialFamily::SoilHay,
+                        StandardMaterial {
+                            base_color: Color::WHITE,
+                            base_color_texture: Some(images.add(field_ground_texture(variant))),
+                            normal_map_texture: Some(images.add(field_ground_normal_map(variant))),
+                            uv_transform: Affine2::from_scale(Vec2::splat(6.0)),
+                            ..default()
+                        },
+                    ))
                 });
 
                 // Real red metallic paint. The rounded body supplies smooth
@@ -1219,17 +1231,20 @@ mod tests {
             }
         }
 
-        for (family, roughness) in [
-            (&textures.park_ground, 0.90),
-            (&textures.orchard_ground, 0.93),
-            (&textures.field_ground, 0.96),
+        for (family, expected_family) in [
+            (&textures.park_ground, ToyMaterialFamily::Foliage),
+            (&textures.orchard_ground, ToyMaterialFamily::SoilHay),
+            (&textures.field_ground, ToyMaterialFamily::SoilHay),
         ] {
+            let finish = expected_family.finish();
             for handle in family {
                 let material = materials
                     .get(handle)
                     .expect("cached ground material exists");
-                assert_eq!(material.perceptual_roughness, roughness);
-                assert_eq!(material.metallic, 0.0);
+                assert_eq!(material.perceptual_roughness, finish.roughness);
+                assert_eq!(material.metallic, finish.metallic);
+                assert_eq!(material.reflectance, finish.reflectance);
+                assert_eq!(material.clearcoat, finish.clearcoat);
                 assert!(material.normal_map_texture.is_some());
             }
         }
