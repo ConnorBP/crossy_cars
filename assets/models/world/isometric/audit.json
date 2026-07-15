@@ -1,0 +1,146 @@
+{
+  "house_cottage_gabled": {
+    "root": "Building_Cottage_Gabled",
+    "kind": "building",
+    "dimensions": [
+      4.2,
+      4.0,
+      4.85
+    ],
+    "triangles": 1052,
+    "meshes": 9,
+    "materials": 9,
+    "nodes": 10,
+    "bytes": 85436,
+    "ground_min_z": 0.0,
+    "glb2_valid": true
+  },
+  "house_porched_blue": {
+    "root": "Building_House_Porched_Blue",
+    "kind": "building",
+    "dimensions": [
+      4.6,
+      4.4,
+      6.15
+    ],
+    "triangles": 1508,
+    "meshes": 8,
+    "materials": 8,
+    "nodes": 9,
+    "bytes": 116900,
+    "ground_min_z": 0.0,
+    "glb2_valid": true
+  },
+  "townhouse_brick": {
+    "root": "Building_Townhouse_Brick",
+    "kind": "building",
+    "dimensions": [
+      4.7,
+      4.3,
+      7.25
+    ],
+    "triangles": 1972,
+    "meshes": 9,
+    "materials": 8,
+    "nodes": 10,
+    "bytes": 149656,
+    "ground_min_z": 0.0,
+    "glb2_valid": true
+  },
+  "apartment_modern_balconies": {
+    "root": "Building_Apartment_Modern_Balconies",
+    "kind": "building",
+    "dimensions": [
+      4.95,
+      4.8,
+      8.55
+    ],
+    "triangles": 2504,
+    "meshes": 10,
+    "materials": 9,
+    "nodes": 11,
+    "bytes": 189952,
+    "ground_min_z": 0.0,
+    "glb2_valid": true
+  },
+  "tree_urban_blocky": {
+    "root": "Prop_Tree_Urban_Blocky",
+    "kind": "prop",
+    "dimensions": [
+      1.45,
+      1.45,
+      3.4
+    ],
+    "triangles": 64,
+    "meshes": 3,
+    "materials": 3,
+    "nodes": 4,
+    "bytes": 7600,
+    "ground_min_z": 0.0,
+    "glb2_valid": true
+  },
+  "streetlamp_classic": {
+    "root": "Prop_Streetlamp_Classic",
+    "kind": "prop",
+    "dimensions": [
+      0.95,
+      0.95,
+      3.25
+    ],
+    "triangles": 120,
+    "meshes": 2,
+    "materials": 2,
+    "nodes": 3,
+    "bytes": 10852,
+    "ground_min_z": 0.0,
+    "glb2_valid": true
+  },
+  "bench_park": {
+    "root": "Prop_Bench_Park",
+    "kind": "prop",
+    "dimensions": [
+      1.8,
+      0.65,
+      1.05
+    ],
+    "triangles": 132,
+    "meshes": 2,
+    "materials": 2,
+    "nodes": 3,
+    "bytes": 11600,
+    "ground_min_z": 0.0,
+    "glb2_valid": true
+  },
+  "mailbox_residential": {
+    "root": "Prop_Mailbox_Residential",
+    "kind": "prop",
+    "dimensions": [
+      0.78,
+      0.6,
+      1.48
+    ],
+    "triangles": 92,
+    "meshes": 4,
+    "materials": 4,
+    "nodes": 5,
+    "bytes": 10028,
+    "ground_min_z": 0.0,
+    "glb2_valid": true
+  },
+  "hydrant_city": {
+    "root": "Prop_Hydrant_City",
+    "kind": "prop",
+    "dimensions": [
+      0.72,
+      0.72,
+      1.01
+    ],
+    "triangles": 252,
+    "meshes": 2,
+    "materials": 2,
+    "nodes": 3,
+    "bytes": 18128,
+    "ground_min_z": 0.0,
+    "glb2_valid": true
+  }
+}

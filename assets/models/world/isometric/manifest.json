@@ -1,0 +1,662 @@
+{
+  "contract": {
+    "up": "+Z Blender / +Y Bevy",
+    "front": "+Y Blender / -Z Bevy",
+    "origin": "ground center",
+    "format": "GLB"
+  },
+  "assets": {
+    "house_cottage_gabled": {
+      "kind": "building",
+      "root": "Building_Cottage_Gabled",
+      "dimensions": [
+        4.2,
+        4.0,
+        4.85
+      ],
+      "front_axis": "+Y (exports to Bevy -Z)",
+      "mesh_count": 9,
+      "vertices": 650,
+      "triangles": 1052,
+      "materials": 9,
+      "audit": [
+        {
+          "name": "Building_Cottage_Gabled_Concrete",
+          "vertices": 96,
+          "triangles": 176,
+          "nonmanifold": 0,
+          "boundary": 0,
+          "zero": 0,
+          "uv": 1,
+          "materials": 1
+        },
+        {
+          "name": "Building_Cottage_Gabled_Cream",
+          "vertices": 42,
+          "triangles": 76,
+          "nonmanifold": 0,
+          "boundary": 0,
+          "zero": 0,
+          "uv": 1,
+          "materials": 1
+        },
+        {
+          "name": "Building_Cottage_Gabled_Glass",
+          "vertices": 48,
+          "triangles": 72,
+          "nonmanifold": 0,
+          "boundary": 0,
+          "zero": 0,
+          "uv": 1,
+          "materials": 1
+        },
+        {
+          "name": "Building_Cottage_Gabled_Green",
+          "vertices": 48,
+          "triangles": 72,
+          "nonmanifold": 0,
+          "boundary": 0,
+          "zero": 0,
+          "uv": 1,
+          "materials": 1
+        },
+        {
+          "name": "Building_Cottage_Gabled_Metal",
+          "vertices": 8,
+          "triangles": 12,
+          "nonmanifold": 0,
+          "boundary": 0,
+          "zero": 0,
+          "uv": 1,
+          "materials": 1
+        },
+        {
+          "name": "Building_Cottage_Gabled_Roof",
+          "vertices": 24,
+          "triangles": 44,
+          "nonmanifold": 0,
+          "boundary": 0,
+          "zero": 0,
+          "uv": 1,
+          "materials": 1
+        },
+        {
+          "name": "Building_Cottage_Gabled_Roof_Red",
+          "vertices": 72,
+          "triangles": 132,
+          "nonmanifold": 0,
+          "boundary": 0,
+          "zero": 0,
+          "uv": 1,
+          "materials": 1
+        },
+        {
+          "name": "Building_Cottage_Gabled_Trim",
+          "vertices": 288,
+          "triangles": 432,
+          "nonmanifold": 0,
+          "boundary": 0,
+          "zero": 0,
+          "uv": 1,
+          "materials": 1
+        },
+        {
+          "name": "Building_Cottage_Gabled_Wood",
+          "vertices": 24,
+          "triangles": 36,
+          "nonmanifold": 0,
+          "boundary": 0,
+          "zero": 0,
+          "uv": 1,
+          "materials": 1
+        }
+      ],
+      "glb": "glb/house_cottage_gabled.glb",
+      "bytes": 85436
+    },
+    "house_porched_blue": {
+      "kind": "building",
+      "root": "Building_House_Porched_Blue",
+      "dimensions": [
+        4.6,
+        4.4,
+        6.15
+      ],
+      "front_axis": "+Y (exports to Bevy -Z)",
+      "mesh_count": 8,
+      "vertices": 954,
+      "triangles": 1508,
+      "materials": 8,
+      "audit": [
+        {
+          "name": "Building_House_Porched_Blue_Blue",
+          "vertices": 42,
+          "triangles": 76,
+          "nonmanifold": 0,
+          "boundary": 0,
+          "zero": 0,
+          "uv": 1,
+          "materials": 1
+        },
+        {
+          "name": "Building_House_Porched_Blue_Concrete",
+          "vertices": 120,
+          "triangles": 220,
+          "nonmanifold": 0,
+          "boundary": 0,
+          "zero": 0,
+          "uv": 1,
+          "materials": 1
+        },
+        {
+          "name": "Building_House_Porched_Blue_Glass",
+          "vertices": 96,
+          "triangles": 144,
+          "nonmanifold": 0,
+          "boundary": 0,
+          "zero": 0,
+          "uv": 1,
+          "materials": 1
+        },
+        {
+          "name": "Building_House_Porched_Blue_Green",
+          "vertices": 48,
+          "triangles": 72,
+          "nonmanifold": 0,
+          "boundary": 0,
+          "zero": 0,
+          "uv": 1,
+          "materials": 1
+        },
+        {
+          "name": "Building_House_Porched_Blue_Metal",
+          "vertices": 8,
+          "triangles": 12,
+          "nonmanifold": 0,
+          "boundary": 0,
+          "zero": 0,
+          "uv": 1,
+          "materials": 1
+        },
+        {
+          "name": "Building_House_Porched_Blue_Roof_Dark",
+          "vertices": 72,
+          "triangles": 132,
+          "nonmanifold": 0,
+          "boundary": 0,
+          "zero": 0,
+          "uv": 1,
+          "materials": 1
+        },
+        {
+          "name": "Building_House_Porched_Blue_Trim",
+          "vertices": 544,
+          "triangles": 816,
+          "nonmanifold": 0,
+          "boundary": 0,
+          "zero": 0,
+          "uv": 1,
+          "materials": 1
+        },
+        {
+          "name": "Building_House_Porched_Blue_Wood",
+          "vertices": 24,
+          "triangles": 36,
+          "nonmanifold": 0,
+          "boundary": 0,
+          "zero": 0,
+          "uv": 1,
+          "materials": 1
+        }
+      ],
+      "glb": "glb/house_porched_blue.glb",
+      "bytes": 116900
+    },
+    "townhouse_brick": {
+      "kind": "building",
+      "root": "Building_Townhouse_Brick",
+      "dimensions": [
+        4.7,
+        4.3,
+        7.25
+      ],
+      "front_axis": "+Y (exports to Bevy -Z)",
+      "mesh_count": 9,
+      "vertices": 1272,
+      "triangles": 1972,
+      "materials": 8,
+      "audit": [
+        {
+          "name": "Building_Townhouse_Brick_Brick",
+          "vertices": 24,
+          "triangles": 44,
+          "nonmanifold": 0,
+          "boundary": 0,
+          "zero": 0,
+          "uv": 1,
+          "materials": 1
+        },
+        {
+          "name": "Building_Townhouse_Brick_Concrete",
+          "vertices": 96,
+          "triangles": 176,
+          "nonmanifold": 0,
+          "boundary": 0,
+          "zero": 0,
+          "uv": 1,
+          "materials": 1
+        },
+        {
+          "name": "Building_Townhouse_Brick_Glass",
+          "vertices": 144,
+          "triangles": 216,
+          "nonmanifold": 0,
+          "boundary": 0,
+          "zero": 0,
+          "uv": 1,
+          "materials": 1
+        },
+        {
+          "name": "Building_Townhouse_Brick_Green",
+          "vertices": 48,
+          "triangles": 72,
+          "nonmanifold": 0,
+          "boundary": 0,
+          "zero": 0,
+          "uv": 1,
+          "materials": 1
+        },
+        {
+          "name": "Building_Townhouse_Brick_Metal",
+          "vertices": 80,
+          "triangles": 120,
+          "nonmanifold": 0,
+          "boundary": 0,
+          "zero": 0,
+          "uv": 1,
+          "materials": 1
+        },
+        {
+          "name": "Building_Townhouse_Brick_Roof",
+          "vertices": 24,
+          "triangles": 44,
+          "nonmanifold": 0,
+          "boundary": 0,
+          "zero": 0,
+          "uv": 1,
+          "materials": 1
+        },
+        {
+          "name": "Building_Townhouse_Brick_Roof_Dark",
+          "vertices": 48,
+          "triangles": 88,
+          "nonmanifold": 0,
+          "boundary": 0,
+          "zero": 0,
+          "uv": 1,
+          "materials": 1
+        },
+        {
+          "name": "Building_Townhouse_Brick_Trim",
+          "vertices": 784,
+          "triangles": 1176,
+          "nonmanifold": 0,
+          "boundary": 0,
+          "zero": 0,
+          "uv": 1,
+          "materials": 1
+        },
+        {
+          "name": "Building_Townhouse_Brick_Wood",
+          "vertices": 24,
+          "triangles": 36,
+          "nonmanifold": 0,
+          "boundary": 0,
+          "zero": 0,
+          "uv": 1,
+          "materials": 1
+        }
+      ],
+      "glb": "glb/townhouse_brick.glb",
+      "bytes": 149656
+    },
+    "apartment_modern_balconies": {
+      "kind": "building",
+      "root": "Building_Apartment_Modern_Balconies",
+      "dimensions": [
+        4.95,
+        4.8,
+        8.55
+      ],
+      "front_axis": "+Y (exports to Bevy -Z)",
+      "mesh_count": 10,
+      "vertices": 1584,
+      "triangles": 2504,
+      "materials": 9,
+      "audit": [
+        {
+          "name": "Building_Apartment_Modern_Balconies_Concrete",
+          "vertices": 312,
+          "triangles": 572,
+          "nonmanifold": 0,
+          "boundary": 0,
+          "zero": 0,
+          "uv": 1,
+          "materials": 1
+        },
+        {
+          "name": "Building_Apartment_Modern_Balconies_Cream2",
+          "vertices": 24,
+          "triangles": 44,
+          "nonmanifold": 0,
+          "boundary": 0,
+          "zero": 0,
+          "uv": 1,
+          "materials": 1
+        },
+        {
+          "name": "Building_Apartment_Modern_Balconies_Glass",
+          "vertices": 152,
+          "triangles": 228,
+          "nonmanifold": 0,
+          "boundary": 0,
+          "zero": 0,
+          "uv": 1,
+          "materials": 1
+        },
+        {
+          "name": "Building_Apartment_Modern_Balconies_Green",
+          "vertices": 72,
+          "triangles": 108,
+          "nonmanifold": 0,
+          "boundary": 0,
+          "zero": 0,
+          "uv": 1,
+          "materials": 1
+        },
+        {
+          "name": "Building_Apartment_Modern_Balconies_Metal",
+          "vertices": 240,
+          "triangles": 360,
+          "nonmanifold": 0,
+          "boundary": 0,
+          "zero": 0,
+          "uv": 1,
+          "materials": 1
+        },
+        {
+          "name": "Building_Apartment_Modern_Balconies_Roof",
+          "vertices": 24,
+          "triangles": 44,
+          "nonmanifold": 0,
+          "boundary": 0,
+          "zero": 0,
+          "uv": 1,
+          "materials": 1
+        },
+        {
+          "name": "Building_Apartment_Modern_Balconies_Roof_Dark",
+          "vertices": 24,
+          "triangles": 44,
+          "nonmanifold": 0,
+          "boundary": 0,
+          "zero": 0,
+          "uv": 1,
+          "materials": 1
+        },
+        {
+          "name": "Building_Apartment_Modern_Balconies_Trim",
+          "vertices": 696,
+          "triangles": 1044,
+          "nonmanifold": 0,
+          "boundary": 0,
+          "zero": 0,
+          "uv": 1,
+          "materials": 1
+        },
+        {
+          "name": "Building_Apartment_Modern_Balconies_Wood",
+          "vertices": 32,
+          "triangles": 48,
+          "nonmanifold": 0,
+          "boundary": 0,
+          "zero": 0,
+          "uv": 1,
+          "materials": 1
+        },
+        {
+          "name": "Building_Apartment_Modern_Balconies_Wood2",
+          "vertices": 8,
+          "triangles": 12,
+          "nonmanifold": 0,
+          "boundary": 0,
+          "zero": 0,
+          "uv": 1,
+          "materials": 1
+        }
+      ],
+      "glb": "glb/apartment_modern_balconies.glb",
+      "bytes": 189952
+    },
+    "tree_urban_blocky": {
+      "kind": "prop",
+      "root": "Prop_Tree_Urban_Blocky",
+      "dimensions": [
+        1.45,
+        1.45,
+        3.4
+      ],
+      "front_axis": "+Y (exports to Bevy -Z)",
+      "mesh_count": 3,
+      "vertices": 40,
+      "triangles": 64,
+      "materials": 3,
+      "audit": [
+        {
+          "name": "Prop_Tree_Urban_Blocky_Green",
+          "vertices": 8,
+          "triangles": 12,
+          "nonmanifold": 0,
+          "boundary": 0,
+          "zero": 0,
+          "uv": 1,
+          "materials": 1
+        },
+        {
+          "name": "Prop_Tree_Urban_Blocky_Green2",
+          "vertices": 16,
+          "triangles": 24,
+          "nonmanifold": 0,
+          "boundary": 0,
+          "zero": 0,
+          "uv": 1,
+          "materials": 1
+        },
+        {
+          "name": "Prop_Tree_Urban_Blocky_Wood",
+          "vertices": 16,
+          "triangles": 28,
+          "nonmanifold": 0,
+          "boundary": 0,
+          "zero": 0,
+          "uv": 1,
+          "materials": 1
+        }
+      ],
+      "glb": "glb/tree_urban_blocky.glb",
+      "bytes": 7600
+    },
+    "streetlamp_classic": {
+      "kind": "prop",
+      "root": "Prop_Streetlamp_Classic",
+      "dimensions": [
+        0.95,
+        0.95,
+        3.25
+      ],
+      "front_axis": "+Y (exports to Bevy -Z)",
+      "mesh_count": 2,
+      "vertices": 72,
+      "triangles": 120,
+      "materials": 2,
+      "audit": [
+        {
+          "name": "Prop_Streetlamp_Classic_Glass",
+          "vertices": 8,
+          "triangles": 12,
+          "nonmanifold": 0,
+          "boundary": 0,
+          "zero": 0,
+          "uv": 1,
+          "materials": 1
+        },
+        {
+          "name": "Prop_Streetlamp_Classic_Metal",
+          "vertices": 64,
+          "triangles": 108,
+          "nonmanifold": 0,
+          "boundary": 0,
+          "zero": 0,
+          "uv": 1,
+          "materials": 1
+        }
+      ],
+      "glb": "glb/streetlamp_classic.glb",
+      "bytes": 10852
+    },
+    "bench_park": {
+      "kind": "prop",
+      "root": "Prop_Bench_Park",
+      "dimensions": [
+        1.8,
+        0.65,
+        1.05
+      ],
+      "front_axis": "+Y (exports to Bevy -Z)",
+      "mesh_count": 2,
+      "vertices": 88,
+      "triangles": 132,
+      "materials": 2,
+      "audit": [
+        {
+          "name": "Prop_Bench_Park_Bench",
+          "vertices": 40,
+          "triangles": 60,
+          "nonmanifold": 0,
+          "boundary": 0,
+          "zero": 0,
+          "uv": 1,
+          "materials": 1
+        },
+        {
+          "name": "Prop_Bench_Park_Metal",
+          "vertices": 48,
+          "triangles": 72,
+          "nonmanifold": 0,
+          "boundary": 0,
+          "zero": 0,
+          "uv": 1,
+          "materials": 1
+        }
+      ],
+      "glb": "glb/bench_park.glb",
+      "bytes": 11600
+    },
+    "mailbox_residential": {
+      "kind": "prop",
+      "root": "Prop_Mailbox_Residential",
+      "dimensions": [
+        0.78,
+        0.6,
+        1.48
+      ],
+      "front_axis": "+Y (exports to Bevy -Z)",
+      "mesh_count": 4,
+      "vertices": 56,
+      "triangles": 92,
+      "materials": 4,
+      "audit": [
+        {
+          "name": "Prop_Mailbox_Residential_Blue",
+          "vertices": 32,
+          "triangles": 56,
+          "nonmanifold": 0,
+          "boundary": 0,
+          "zero": 0,
+          "uv": 1,
+          "materials": 1
+        },
+        {
+          "name": "Prop_Mailbox_Residential_Metal",
+          "vertices": 8,
+          "triangles": 12,
+          "nonmanifold": 0,
+          "boundary": 0,
+          "zero": 0,
+          "uv": 1,
+          "materials": 1
+        },
+        {
+          "name": "Prop_Mailbox_Residential_Red",
+          "vertices": 8,
+          "triangles": 12,
+          "nonmanifold": 0,
+          "boundary": 0,
+          "zero": 0,
+          "uv": 1,
+          "materials": 1
+        },
+        {
+          "name": "Prop_Mailbox_Residential_Wood",
+          "vertices": 8,
+          "triangles": 12,
+          "nonmanifold": 0,
+          "boundary": 0,
+          "zero": 0,
+          "uv": 1,
+          "materials": 1
+        }
+      ],
+      "glb": "glb/mailbox_residential.glb",
+      "bytes": 10028
+    },
+    "hydrant_city": {
+      "kind": "prop",
+      "root": "Prop_Hydrant_City",
+      "dimensions": [
+        0.72,
+        0.72,
+        1.01
+      ],
+      "front_axis": "+Y (exports to Bevy -Z)",
+      "mesh_count": 2,
+      "vertices": 140,
+      "triangles": 252,
+      "materials": 2,
+      "audit": [
+        {
+          "name": "Prop_Hydrant_City_Metal",
+          "vertices": 16,
+          "triangles": 28,
+          "nonmanifold": 0,
+          "boundary": 0,
+          "zero": 0,
+          "uv": 1,
+          "materials": 1
+        },
+        {
+          "name": "Prop_Hydrant_City_Red",
+          "vertices": 124,
+          "triangles": 224,
+          "nonmanifold": 0,
+          "boundary": 0,
+          "zero": 0,
+          "uv": 1,
+          "materials": 1
+        }
+      ],
+      "glb": "glb/hydrant_city.glb",
+      "bytes": 18128
+    }
+  }
+}
