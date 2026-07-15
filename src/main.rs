@@ -22,6 +22,7 @@ mod settings;
 mod shaders;
 mod textures;
 mod touch;
+mod toy_shading;
 mod transparency;
 mod ui;
 mod world;
@@ -52,6 +53,7 @@ use settings::SettingsPlugin;
 use shaders::{ShaderPlugin, WaterMaterialPlugin};
 use textures::TexturesPlugin;
 use touch::TouchPlugin;
+use toy_shading::ToyShadingPlugin;
 use transparency::TransparencyPlugin;
 use ui::UiPlugin;
 use world::{WorldPlugin, WorldReviewPlugin};
@@ -135,7 +137,12 @@ fn main() {
                 brightness: 260.0,
                 ..default()
             })
-            .add_plugins((TexturesPlugin, CarReviewPlugin, CarReviewCameraPlugin));
+            .add_plugins((
+                TexturesPlugin,
+                ToyShadingPlugin,
+                CarReviewPlugin,
+                CarReviewCameraPlugin,
+            ));
         app.run();
         return;
     }
@@ -144,7 +151,12 @@ fn main() {
         // Smallest robust harness: production world/textures/rendering only.
         // No game state, car, HUD, audio, movement, timers, or recycling.
         app.add_plugins((WaterMaterialPlugin, ShaderPlugin))
-            .add_plugins((TexturesPlugin, WorldReviewCameraPlugin, WorldReviewPlugin));
+            .add_plugins((
+                TexturesPlugin,
+                ToyShadingPlugin,
+                WorldReviewCameraPlugin,
+                WorldReviewPlugin,
+            ));
         app.run();
         return;
     }
@@ -163,6 +175,7 @@ fn main() {
             AudioPlugin,
             ShaderPlugin,
             TexturesPlugin,
+            ToyShadingPlugin,
             PersistPlugin,
         ))
         // Registered separately so neither plugin tuple approaches Bevy's
