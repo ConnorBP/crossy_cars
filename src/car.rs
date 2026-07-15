@@ -2,7 +2,7 @@ use bevy::asset::RenderAssetUsages;
 use bevy::color::LinearRgba;
 use bevy::mesh::{Indices, PrimitiveTopology, VertexAttributeValues};
 use bevy::prelude::*;
-use std::f32::consts::{FRAC_PI_2, TAU};
+use std::f32::consts::{FRAC_PI_2, PI, TAU};
 
 use crate::difficulty::Traffic;
 use crate::game::events::ObstacleHit;
@@ -415,6 +415,128 @@ fn map_handbrake(shift_left: bool, shift_right: bool) -> bool {
 #[derive(Component)]
 struct CarBody;
 
+/// Selects the one player-car presentation assembled beneath the unchanged
+/// gameplay [`Car`] root. The imported concept is the production default;
+/// the procedural car remains available for review and regression testing.
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum PlayerCarVisual {
+    #[default]
+    ImportedConcept,
+    #[allow(dead_code)] // selected by inserting this resource before either plugin
+    LegacyProcedural,
+}
+
+const IMPORTED_CAR_SCENE: &str = "models/car_concept_final.glb#Scene0";
+const IMPORTED_CAR_Y: f32 = -0.112;
+const IMPORTED_CAR_SCALE: f32 = 0.60;
+const IMPORTED_BINDING_COUNT: usize = 8;
+
+/// Stable owner of the asynchronously instantiated imported scene. Camera and
+/// review integrations can use this together with [`ImportedCarReady`] without
+/// depending on names internal to the GLB.
+#[derive(Component)]
+pub(crate) struct ImportedCarSceneRoot;
+
+/// Added to [`ImportedCarSceneRoot`] only when every expected named animation
+/// target exists exactly once below that root and has captured its baseline.
+#[derive(Component)]
+pub(crate) struct ImportedCarReady;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ImportedCarBindingKind {
+    SteeringFl,
+    SteeringFr,
+    FrontRollProxyFl,
+    FrontRollHubFl,
+    FrontRollProxyFr,
+    FrontRollHubFr,
+    RearRollRl,
+    RearRollRr,
+}
+
+#[derive(Component, Debug, Clone, Copy)]
+struct ImportedCarBinding {
+    kind: ImportedCarBindingKind,
+    baseline: Quat,
+}
+
+#[derive(Component, Default)]
+struct ImportedCarAnimationState {
+    spin: f32,
+    steer: f32,
+}
+
+fn classify_imported_car_name(name: &str) -> Option<ImportedCarBindingKind> {
+    use ImportedCarBindingKind::*;
+    Some(match name {
+        "Steering_FL" => SteeringFl,
+        "Steering_FR" => SteeringFr,
+        "Proxy_Wheel_FL" => FrontRollProxyFl,
+        "Hub_FL" => FrontRollHubFl,
+        "Proxy_Wheel_FR" => FrontRollProxyFr,
+        "Hub_FR" => FrontRollHubFr,
+        "Wheel_RL" => RearRollRl,
+        "Wheel_RR" => RearRollRr,
+        _ => return None,
+    })
+}
+
+fn imported_binding_to_insert(
+    name: &str,
+    existing: Option<&ImportedCarBinding>,
+    baseline: Quat,
+) -> Option<ImportedCarBinding> {
+    if existing.is_some() {
+        return None;
+    }
+    Some(ImportedCarBinding {
+        kind: classify_imported_car_name(name)?,
+        baseline,
+    })
+}
+
+fn is_descendant_of(
+    mut entity: Entity,
+    root: Entity,
+    mut parent_of: impl FnMut(Entity) -> Option<Entity>,
+) -> bool {
+    while let Some(parent) = parent_of(entity) {
+        if parent == root {
+            return true;
+        }
+        if parent == entity {
+            return false;
+        }
+        entity = parent;
+    }
+    false
+}
+
+fn imported_bindings_ready(kinds: impl IntoIterator<Item = ImportedCarBindingKind>) -> bool {
+    use ImportedCarBindingKind::*;
+    let mut counts = [0_u8; IMPORTED_BINDING_COUNT];
+    for kind in kinds {
+        let index = match kind {
+            SteeringFl => 0,
+            SteeringFr => 1,
+            FrontRollProxyFl => 2,
+            FrontRollHubFl => 3,
+            FrontRollProxyFr => 4,
+            FrontRollHubFr => 5,
+            RearRollRl => 6,
+            RearRollRr => 7,
+        };
+        counts[index] = counts[index].saturating_add(1);
+    }
+    counts == [1; IMPORTED_BINDING_COUNT]
+}
+
+/// Rebuild an imported node's orientation from its authored baseline on every
+/// frame. Steering is local Y and wheel travel is local Z; neither accumulates.
+fn compose_imported_rotation(baseline: Quat, steering_y: f32, roll_z: f32) -> Quat {
+    baseline * Quat::from_rotation_y(steering_y) * Quat::from_rotation_z(roll_z)
+}
+
 /// Smoothed visual suspension state. This is deliberately kept on the body
 /// child so pitch and roll never feed back into the car's driving transform.
 #[derive(Component, Default)]
@@ -469,13 +591,26 @@ pub struct CarReviewPlugin;
 
 impl Plugin for CarReviewPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_car);
+        app.init_resource::<PlayerCarVisual>()
+            .init_resource::<PlayerInput>()
+            .init_resource::<Time>()
+            .add_systems(Startup, spawn_car)
+            .add_systems(
+                Update,
+                (
+                    bind_imported_scene_nodes,
+                    update_imported_car_ready,
+                    animate_imported_car,
+                )
+                    .chain(),
+            );
     }
 }
 
 impl Plugin for CarPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<InputFrozen>()
+        app.init_resource::<PlayerCarVisual>()
+            .init_resource::<InputFrozen>()
             .init_resource::<PlayerInput>()
             .init_resource::<Handbrake>()
             .configure_sets(
@@ -489,6 +624,10 @@ impl Plugin for CarPlugin {
             .add_systems(Update, read_keyboard_input.in_set(KeyboardInputSet))
             .add_systems(
                 Update,
+                (bind_imported_scene_nodes, update_imported_car_ready).chain(),
+            )
+            .add_systems(
+                Update,
                 // move_car first, then resolve curb hops + obstacle collisions,
                 // then knock cones flying, then the juice systems read the
                 // fresh speed.
@@ -497,6 +636,7 @@ impl Plugin for CarPlugin {
                     physics_collisions,
                     cone_collisions,
                     spin_wheels,
+                    animate_imported_car,
                     roll_body,
                     brake_lights,
                 )
@@ -1496,6 +1636,59 @@ fn spawn_car(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     textures: Res<TextureAssets>,
+    asset_server: Res<AssetServer>,
+    visual: Res<PlayerCarVisual>,
+) {
+    match *visual {
+        PlayerCarVisual::ImportedConcept => build_imported_car(&mut commands, &asset_server),
+        PlayerCarVisual::LegacyProcedural => {
+            build_legacy_car(&mut commands, &mut meshes, &mut materials, &textures)
+        }
+    }
+}
+
+fn build_imported_car(commands: &mut Commands, asset_server: &AssetServer) {
+    commands
+        .spawn((
+            Transform::from_xyz(0.0, 0.0, 0.0),
+            Visibility::default(),
+            Car {
+                speed: 0.0,
+                heading: 0.0,
+                drift: 0.0,
+            },
+            DriftLatch::default(),
+        ))
+        .with_children(|car| {
+            // Keep the production body-motion pivot regardless of visual. The
+            // scene transform is deliberately authored below this pivot.
+            car.spawn((
+                Transform::IDENTITY,
+                Visibility::default(),
+                CarBody,
+                BodyMotion::default(),
+            ))
+            .with_children(|body| {
+                body.spawn((
+                    WorldAssetRoot(asset_server.load(IMPORTED_CAR_SCENE)),
+                    Transform::from_xyz(0.0, IMPORTED_CAR_Y, 0.0)
+                        .with_rotation(Quat::from_rotation_y(-PI / 2.0))
+                        .with_scale(Vec3::splat(IMPORTED_CAR_SCALE)),
+                    ImportedCarSceneRoot,
+                    ImportedCarAnimationState::default(),
+                ));
+            });
+        });
+}
+
+/// Complete retained procedural assembly, selected by
+/// [`PlayerCarVisual::LegacyProcedural`]. Gameplay root/components are shared
+/// with the imported path; all legacy presentation geometry remains here.
+fn build_legacy_car(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    textures: &TextureAssets,
 ) {
     // --- Shared meshes/materials for the body's nested children ---
     // One cached mesh per greenhouse layer replaces the hard cabin box and
@@ -1693,6 +1886,86 @@ fn spawn_car(
                 });
             }
         });
+}
+
+fn bind_imported_scene_nodes(
+    mut commands: Commands,
+    roots: Query<Entity, (With<ImportedCarSceneRoot>, Without<ImportedCarReady>)>,
+    nodes: Query<(Entity, &Name, &Transform, Option<&ImportedCarBinding>)>,
+    parents: Query<&ChildOf>,
+) {
+    for root in &roots {
+        for (entity, name, transform, existing) in &nodes {
+            if !is_descendant_of(entity, root, |candidate| {
+                parents.get(candidate).ok().map(ChildOf::parent)
+            }) {
+                continue;
+            }
+            if matches!(name.as_str(), "Light_Tail_0.42" | "Light_Tail_-0.42") {
+                commands.entity(entity).insert(BrakeLight);
+            }
+            if let Some(binding) =
+                imported_binding_to_insert(name.as_str(), existing, transform.rotation)
+            {
+                commands.entity(entity).insert(binding);
+            }
+        }
+    }
+}
+
+fn update_imported_car_ready(
+    mut commands: Commands,
+    roots: Query<(Entity, Option<&ImportedCarReady>), With<ImportedCarSceneRoot>>,
+    bindings: Query<(Entity, &ImportedCarBinding)>,
+    parents: Query<&ChildOf>,
+) {
+    for (root, ready) in &roots {
+        let complete = imported_bindings_ready(bindings.iter().filter_map(|(entity, binding)| {
+            is_descendant_of(entity, root, |candidate| {
+                parents.get(candidate).ok().map(ChildOf::parent)
+            })
+            .then_some(binding.kind)
+        }));
+        match (complete, ready.is_some()) {
+            (true, false) => {
+                commands.entity(root).insert(ImportedCarReady);
+            }
+            (false, true) => {
+                commands.entity(root).remove::<ImportedCarReady>();
+            }
+            _ => {}
+        }
+    }
+}
+
+fn animate_imported_car(
+    cars: Query<&Car>,
+    mut roots: Query<&mut ImportedCarAnimationState, With<ImportedCarReady>>,
+    mut nodes: Query<(&mut Transform, &ImportedCarBinding)>,
+    input: Res<PlayerInput>,
+    time: Res<Time>,
+) {
+    let (Ok(car), Ok(mut state)) = (cars.single(), roots.single_mut()) else {
+        return;
+    };
+    let dt = time.delta_secs();
+    state.spin = (state.spin + car.speed.abs() * dt / WHEEL_RADIUS).rem_euclid(TAU);
+    let target_steer = input.steer.clamp(-1.0, 1.0) * 0.36;
+    state.steer += (target_steer - state.steer) * (1.0 - (-14.0 * dt).exp());
+
+    use ImportedCarBindingKind::*;
+    for (mut transform, binding) in &mut nodes {
+        let steering = match binding.kind {
+            SteeringFl | SteeringFr => state.steer,
+            _ => 0.0,
+        };
+        let roll = match binding.kind {
+            FrontRollProxyFl | FrontRollHubFl | FrontRollProxyFr | FrontRollHubFr | RearRollRl
+            | RearRollRr => state.spin,
+            SteeringFl | SteeringFr => 0.0,
+        };
+        transform.rotation = compose_imported_rotation(binding.baseline, steering, roll);
+    }
 }
 
 fn read_keyboard_input(
@@ -2208,14 +2481,148 @@ mod tests {
     }
 
     #[test]
-    fn review_plugin_spawns_one_complete_production_visual_assembly() {
+    fn imported_concept_is_the_default_visual() {
+        assert_eq!(PlayerCarVisual::default(), PlayerCarVisual::ImportedConcept);
+    }
+
+    #[test]
+    fn imported_name_classifier_is_exact() {
+        use ImportedCarBindingKind::*;
+        assert_eq!(classify_imported_car_name("Steering_FL"), Some(SteeringFl));
+        assert_eq!(classify_imported_car_name("Steering_FR"), Some(SteeringFr));
+        assert_eq!(
+            classify_imported_car_name("Proxy_Wheel_FL"),
+            Some(FrontRollProxyFl)
+        );
+        assert_eq!(classify_imported_car_name("Hub_FL"), Some(FrontRollHubFl));
+        assert_eq!(
+            classify_imported_car_name("Proxy_Wheel_FR"),
+            Some(FrontRollProxyFr)
+        );
+        assert_eq!(classify_imported_car_name("Hub_FR"), Some(FrontRollHubFr));
+        assert_eq!(classify_imported_car_name("Wheel_RL"), Some(RearRollRl));
+        assert_eq!(classify_imported_car_name("Wheel_RR"), Some(RearRollRr));
+        assert_eq!(classify_imported_car_name("Hub_RL"), None);
+        assert_eq!(classify_imported_car_name("steering_FL"), None);
+    }
+
+    #[test]
+    fn imported_binding_is_idempotent_and_captures_baseline() {
+        let baseline = Quat::from_euler(EulerRot::XYZ, 0.2, -0.3, 0.4);
+        let binding = imported_binding_to_insert("Steering_FL", None, baseline).unwrap();
+        assert_eq!(binding.kind, ImportedCarBindingKind::SteeringFl);
+        assert!(binding.baseline.abs_diff_eq(baseline, 1e-6));
+        assert!(
+            imported_binding_to_insert("Steering_FL", Some(&binding), Quat::IDENTITY).is_none()
+        );
+        assert!(imported_binding_to_insert("unrelated", None, baseline).is_none());
+    }
+
+    #[test]
+    fn ancestry_scoping_accepts_only_descendants_of_the_imported_root() {
+        let root = Entity::from_raw_u32(1).unwrap();
+        let branch = Entity::from_raw_u32(2).unwrap();
+        let target = Entity::from_raw_u32(3).unwrap();
+        let outside = Entity::from_raw_u32(4).unwrap();
+        let parent = |entity| match entity {
+            e if e == target => Some(branch),
+            e if e == branch => Some(root),
+            _ => None,
+        };
+        assert!(is_descendant_of(target, root, parent));
+        assert!(!is_descendant_of(outside, root, parent));
+        assert!(!is_descendant_of(root, root, parent));
+    }
+
+    #[test]
+    fn imported_readiness_requires_all_expected_bindings_exactly_once() {
+        use ImportedCarBindingKind::*;
+        let complete = [
+            SteeringFl,
+            SteeringFr,
+            FrontRollProxyFl,
+            FrontRollHubFl,
+            FrontRollProxyFr,
+            FrontRollHubFr,
+            RearRollRl,
+            RearRollRr,
+        ];
+        assert!(imported_bindings_ready(complete));
+        assert!(!imported_bindings_ready(complete[..7].iter().copied()));
+        assert!(!imported_bindings_ready(
+            complete.into_iter().chain([SteeringFl])
+        ));
+    }
+
+    #[test]
+    fn imported_rotation_composes_from_baseline_without_accumulation() {
+        let baseline = Quat::from_euler(EulerRot::XYZ, 0.2, -0.3, 0.4);
+        let expected = baseline * Quat::from_rotation_y(0.31) * Quat::from_rotation_z(1.27);
+        let first = compose_imported_rotation(baseline, 0.31, 1.27);
+        let second = compose_imported_rotation(baseline, 0.31, 1.27);
+        assert!(first.abs_diff_eq(expected, 1e-6));
+        assert!(second.abs_diff_eq(first, 1e-6));
+    }
+
+    fn review_app(visual: PlayerCarVisual) -> App {
         let mut app = App::new();
-        app.init_resource::<Assets<Mesh>>()
-            .init_resource::<Assets<Image>>()
-            .init_resource::<Assets<StandardMaterial>>()
-            .init_resource::<TextureAssets>()
-            .add_plugins(CarReviewPlugin);
+        app.add_plugins((
+            bevy::app::TaskPoolPlugin::default(),
+            bevy::asset::AssetPlugin::default(),
+        ))
+        .init_asset::<WorldAsset>()
+        .init_resource::<Assets<Mesh>>()
+        .init_resource::<Assets<Image>>()
+        .init_resource::<Assets<StandardMaterial>>()
+        .init_resource::<TextureAssets>()
+        .insert_resource(visual)
+        .add_plugins(CarReviewPlugin);
         app.update();
+        app
+    }
+
+    #[test]
+    fn imported_visual_has_exact_transform_and_one_gameplay_root() {
+        let mut app = review_app(PlayerCarVisual::ImportedConcept);
+        assert_eq!(app.world_mut().query::<&Car>().iter(app.world()).count(), 1);
+        assert_eq!(
+            app.world_mut()
+                .query::<&ImportedCarSceneRoot>()
+                .iter(app.world())
+                .count(),
+            1
+        );
+        assert_eq!(
+            app.world_mut()
+                .query::<&GreenhouseFrame>()
+                .iter(app.world())
+                .count(),
+            0
+        );
+        let imported = app
+            .world_mut()
+            .query_filtered::<Entity, With<ImportedCarSceneRoot>>()
+            .single(app.world())
+            .unwrap();
+        let body = app
+            .world_mut()
+            .query_filtered::<Entity, With<CarBody>>()
+            .single(app.world())
+            .unwrap();
+        assert_eq!(app.world().get::<ChildOf>(imported).unwrap().parent(), body);
+        let transform = app.world().get::<Transform>(imported).unwrap();
+        assert_eq!(transform.translation, Vec3::new(0.0, IMPORTED_CAR_Y, 0.0));
+        assert_eq!(transform.scale, Vec3::splat(IMPORTED_CAR_SCALE));
+        assert!(
+            transform
+                .rotation
+                .abs_diff_eq(Quat::from_rotation_y(-PI / 2.0), 1e-6)
+        );
+    }
+
+    #[test]
+    fn legacy_builder_spawns_one_complete_procedural_assembly() {
+        let mut app = review_app(PlayerCarVisual::LegacyProcedural);
 
         assert_eq!(app.world_mut().query::<&Car>().iter(app.world()).count(), 1);
         assert_eq!(
@@ -2248,6 +2655,112 @@ mod tests {
                 .count(),
             2
         );
+        assert_eq!(
+            app.world_mut().query::<&Wheel>().iter(app.world()).count(),
+            4
+        );
+        assert_eq!(
+            app.world_mut()
+                .query::<&ImportedCarSceneRoot>()
+                .iter(app.world())
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn imported_glb_is_the_reviewed_static_asset() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("assets/models/car_concept_final.glb");
+        let bytes = std::fs::read(path).expect("imported car GLB must exist");
+        assert_eq!(&bytes[..4], b"glTF");
+        assert_eq!(bytes.len(), 246_280);
+        // SHA-256, recorded when the reviewed source asset was integrated.
+        assert_eq!(
+            sha256(&bytes),
+            [
+                0x1b, 0x72, 0x3e, 0xf9, 0x6b, 0x55, 0xb0, 0x42, 0xd4, 0x76, 0x5c, 0x29, 0x3f, 0xe2,
+                0x08, 0xdb, 0x2e, 0xa9, 0xa4, 0x97, 0x64, 0x40, 0x11, 0x49, 0xb9, 0x0e, 0x9c, 0xe7,
+                0x77, 0xa1, 0xdc, 0x9d,
+            ]
+        );
+    }
+
+    fn sha256(input: &[u8]) -> [u8; 32] {
+        const K: [u32; 64] = [
+            0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
+            0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+            0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+            0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+            0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+            0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+            0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+            0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+            0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+            0xc67178f2,
+        ];
+        let mut data = input.to_vec();
+        let bit_len = (data.len() as u64) * 8;
+        data.push(0x80);
+        while data.len() % 64 != 56 {
+            data.push(0);
+        }
+        data.extend_from_slice(&bit_len.to_be_bytes());
+        let mut h = [
+            0x6a09e667_u32,
+            0xbb67ae85,
+            0x3c6ef372,
+            0xa54ff53a,
+            0x510e527f,
+            0x9b05688c,
+            0x1f83d9ab,
+            0x5be0cd19,
+        ];
+        for chunk in data.chunks_exact(64) {
+            let mut w = [0_u32; 64];
+            for (i, word) in chunk.chunks_exact(4).enumerate() {
+                w[i] = u32::from_be_bytes(word.try_into().unwrap());
+            }
+            for i in 16..64 {
+                let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
+                let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
+                w[i] = w[i - 16]
+                    .wrapping_add(s0)
+                    .wrapping_add(w[i - 7])
+                    .wrapping_add(s1);
+            }
+            let mut v = h;
+            for i in 0..64 {
+                let s1 = v[4].rotate_right(6) ^ v[4].rotate_right(11) ^ v[4].rotate_right(25);
+                let ch = (v[4] & v[5]) ^ (!v[4] & v[6]);
+                let t1 = v[7]
+                    .wrapping_add(s1)
+                    .wrapping_add(ch)
+                    .wrapping_add(K[i])
+                    .wrapping_add(w[i]);
+                let s0 = v[0].rotate_right(2) ^ v[0].rotate_right(13) ^ v[0].rotate_right(22);
+                let maj = (v[0] & v[1]) ^ (v[0] & v[2]) ^ (v[1] & v[2]);
+                let t2 = s0.wrapping_add(maj);
+                v = [
+                    t1.wrapping_add(t2),
+                    v[0],
+                    v[1],
+                    v[2],
+                    v[3].wrapping_add(t1),
+                    v[4],
+                    v[5],
+                    v[6],
+                ];
+            }
+            for i in 0..8 {
+                h[i] = h[i].wrapping_add(v[i]);
+            }
+        }
+        let mut digest = [0_u8; 32];
+        for (bytes, value) in digest.chunks_exact_mut(4).zip(h) {
+            bytes.copy_from_slice(&value.to_be_bytes());
+        }
+        digest
     }
 
     #[test]
