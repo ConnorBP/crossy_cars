@@ -25,13 +25,11 @@ pub struct ShaderPlugin;
 impl Plugin for ShaderPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(MaterialPlugin::<SkyMaterial>::default())
+            .init_resource::<EnvironmentAssets>()
             .add_systems(Startup, spawn_sky)
             .add_systems(Update, update_water)
             .add_systems(Update, (update_skydome, setup_environment_light))
-            .add_systems(
-                Update,
-                update_modifier_atmosphere.run_if(in_state(GameState::Playing)),
-            );
+            .add_systems(Update, update_modifier_atmosphere);
     }
 }
 
@@ -115,11 +113,24 @@ const ATMOSPHERE_LERP_RATE: f32 = 2.5;
 /// are created here.
 fn update_modifier_atmosphere(
     time: Res<Time>,
-    active: Res<ActiveModifier>,
+    active: Option<Res<ActiveModifier>>,
+    game_state: Option<Res<State<GameState>>>,
     skydomes: Query<&MeshMaterial3d<SkyMaterial>, With<Skydome>>,
     mut sky_materials: ResMut<Assets<SkyMaterial>>,
     mut cameras: Query<&mut EnvironmentMapLight, With<Camera3d>>,
 ) {
+    // ShaderPlugin is also used by the gameplay-free world-review harness.
+    // Preserve the production Playing-only behavior when game state exists,
+    // while making the rendering plugin safe in an isolated app.
+    if game_state
+        .as_ref()
+        .is_some_and(|state| *state.get() != GameState::Playing)
+    {
+        return;
+    }
+    let Some(active) = active else {
+        return;
+    };
     let target = atmosphere_descriptor(active.0);
     let amount = (1.0 - (-ATMOSPHERE_LERP_RATE * time.delta_secs()).exp()).clamp(0.0, 1.0);
 
@@ -245,20 +256,43 @@ const fn water_ripple_time(elapsed: f32, reduced_motion: bool) -> f32 {
 // chain required by Bevy's split-sum PBR shader. Both files are the known-good
 // Bevy 0.19 Pisa assets, used to validate the real IBL path before replacing
 // them with a similarly prefiltered Palermo Sidewalk pair.
+const ENVIRONMENT_DIFFUSE_PATH: &str = "environment_maps/pisa_diffuse_rgb9e5_zstd.ktx2";
+const ENVIRONMENT_SPECULAR_PATH: &str = "environment_maps/pisa_specular_rgb9e5_zstd.ktx2";
+
+/// Cached IBL handles shared by every camera configured by [`ShaderPlugin`].
+/// Loading once also guarantees late-spawned cameras reuse the same assets.
+#[derive(Resource)]
+pub struct EnvironmentAssets {
+    pub diffuse_map: Handle<Image>,
+    pub specular_map: Handle<Image>,
+}
+
+impl FromWorld for EnvironmentAssets {
+    fn from_world(world: &mut World) -> Self {
+        let asset_server = world.resource::<AssetServer>();
+        Self {
+            diffuse_map: asset_server.load(ENVIRONMENT_DIFFUSE_PATH),
+            specular_map: asset_server.load(ENVIRONMENT_SPECULAR_PATH),
+        }
+    }
+}
+
+/// Idempotently attach the cached environment to every unconfigured 3D view.
+/// Existing environments are intentionally left untouched (for example, a
+/// future camera may provide a deliberately authored studio environment).
 fn setup_environment_light(
     mut commands: Commands,
     cameras: Query<Entity, (With<Camera3d>, Without<EnvironmentMapLight>)>,
-    asset_server: Res<AssetServer>,
+    environment_assets: Res<EnvironmentAssets>,
 ) {
-    let Ok(camera) = cameras.single() else {
-        return;
-    };
-    commands.entity(camera).insert(EnvironmentMapLight {
-        diffuse_map: asset_server.load("environment_maps/pisa_diffuse_rgb9e5_zstd.ktx2"),
-        specular_map: asset_server.load("environment_maps/pisa_specular_rgb9e5_zstd.ktx2"),
-        intensity: atmosphere_descriptor(ModifierKind::Standard).environment_intensity,
-        ..default()
-    });
+    for camera in &cameras {
+        commands.entity(camera).insert(EnvironmentMapLight {
+            diffuse_map: environment_assets.diffuse_map.clone(),
+            specular_map: environment_assets.specular_map.clone(),
+            intensity: atmosphere_descriptor(ModifierKind::Standard).environment_intensity,
+            ..default()
+        });
+    }
 }
 
 #[cfg(test)]
@@ -285,6 +319,103 @@ mod tests {
             .add_plugins(WaterMaterialPlugin);
         assert!(app.world().contains_resource::<Assets<WaterMaterial>>());
         assert!(!app.world().contains_resource::<Assets<SkyMaterial>>());
+    }
+
+    fn environment_test_app() -> App {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()))
+            .init_asset::<Image>()
+            .init_resource::<EnvironmentAssets>()
+            .add_systems(Update, setup_environment_light);
+        app
+    }
+
+    #[test]
+    fn environment_attachment_is_safe_with_zero_cameras() {
+        let mut app = environment_test_app();
+        app.update();
+        let world = app.world_mut();
+        assert_eq!(world.query::<&EnvironmentMapLight>().iter(world).count(), 0);
+    }
+
+    #[test]
+    fn environment_attaches_to_every_camera_with_initial_intensity_and_reused_handles() {
+        let mut app = environment_test_app();
+        app.world_mut().spawn(Camera3d::default());
+        app.world_mut().spawn(Camera3d::default());
+
+        app.update();
+
+        let cached = app.world().resource::<EnvironmentAssets>();
+        let diffuse_id = cached.diffuse_map.id();
+        let specular_id = cached.specular_map.id();
+        let world = app.world_mut();
+        let mut environments = world.query::<(&Camera3d, &EnvironmentMapLight)>();
+        let environments: Vec<_> = environments.iter(world).collect();
+        assert_eq!(environments.len(), 2);
+        for (_, environment) in environments {
+            assert_eq!(environment.diffuse_map.id(), diffuse_id);
+            assert_eq!(environment.specular_map.id(), specular_id);
+            assert_eq!(
+                environment.intensity,
+                atmosphere_descriptor(ModifierKind::Standard).environment_intensity
+            );
+        }
+
+        // Idempotence: a later frame neither duplicates nor replaces them,
+        // and a late-spawned camera receives the same cached handles.
+        app.world_mut().spawn(Camera3d::default());
+        app.update();
+        let world = app.world_mut();
+        let mut environments = world.query::<(&Camera3d, &EnvironmentMapLight)>();
+        let environments: Vec<_> = environments.iter(world).collect();
+        assert_eq!(environments.len(), 3);
+        for (_, environment) in environments {
+            assert_eq!(environment.diffuse_map.id(), diffuse_id);
+            assert_eq!(environment.specular_map.id(), specular_id);
+        }
+    }
+
+    #[test]
+    fn existing_camera_environment_is_not_overwritten() {
+        let mut app = environment_test_app();
+        let (diffuse_map, specular_map) = {
+            let asset_server = app.world().resource::<AssetServer>();
+            (
+                asset_server.load("environment_maps/custom_diffuse.ktx2"),
+                asset_server.load("environment_maps/custom_specular.ktx2"),
+            )
+        };
+        let camera = app
+            .world_mut()
+            .spawn((
+                Camera3d::default(),
+                EnvironmentMapLight {
+                    diffuse_map: diffuse_map.clone(),
+                    specular_map: specular_map.clone(),
+                    intensity: 321.0,
+                    rotation: Quat::from_rotation_y(0.75),
+                    ..default()
+                },
+            ))
+            .id();
+
+        app.update();
+
+        let environment = app.world().get::<EnvironmentMapLight>(camera).unwrap();
+        assert_eq!(environment.diffuse_map.id(), diffuse_map.id());
+        assert_eq!(environment.specular_map.id(), specular_map.id());
+        assert_eq!(environment.intensity, 321.0);
+        assert_eq!(environment.rotation, Quat::from_rotation_y(0.75));
+    }
+
+    #[test]
+    fn modifier_update_is_safe_without_game_state_or_modifier_resources() {
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<Assets<SkyMaterial>>()
+            .add_systems(Update, update_modifier_atmosphere);
+        app.update();
     }
 
     #[test]

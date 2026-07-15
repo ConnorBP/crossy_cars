@@ -122,7 +122,7 @@ fn main() {
             // Tuned down for HDR + TonyMcMapface tonemapping (T9). 150.0 was
             // pre-HDR and washed the scene out once bloom/tonemapping landed;
             // the directional sun + IBL now carry the lighting.
-            brightness: 40.0,
+            brightness: 22.0,
             ..default()
         });
 
@@ -143,11 +143,8 @@ fn main() {
     if world_review {
         // Smallest robust harness: production world/textures/rendering only.
         // No game state, car, HUD, audio, movement, timers, or recycling.
-        app.add_plugins(WaterMaterialPlugin).add_plugins((
-            TexturesPlugin,
-            WorldReviewCameraPlugin,
-            WorldReviewPlugin,
-        ));
+        app.add_plugins((WaterMaterialPlugin, ShaderPlugin))
+            .add_plugins((TexturesPlugin, WorldReviewCameraPlugin, WorldReviewPlugin));
         app.run();
         return;
     }
