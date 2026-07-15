@@ -1,8 +1,8 @@
 //! Procedural textures generated entirely in code (no asset files).
 //!
 //! `TexturesPlugin` runs a `Startup` system that builds RGBA pixel data for
-//! grass, road, sidewalk, foliage, hay, and car paint, wraps each image in a
-//! repeating sampler, and stores ready-to-use `StandardMaterial` handles in
+//! grass, road, sidewalk, biome ground surfaces, foliage, hay, and car paint,
+//! wraps each image in a repeating sampler, and stores `StandardMaterial` handles in
 //! the `TextureAssets` resource so other systems only clone cached handles.
 //!
 //! Color textures use WebGL2-safe `Rgba8UnormSrgb`; normal maps use linear
@@ -25,6 +25,11 @@ const NORMAL_SIZE: u32 = 64;
 
 pub const FOLIAGE_VARIANTS: usize = 3;
 pub const HAY_VARIANTS: usize = 2;
+pub const GROUND_VARIANTS: usize = 2;
+
+const GROUND_FLECK_CELL_SIZE: u32 = 4;
+const ORCHARD_ROW_PERIOD: u32 = 16;
+const FIELD_FURROW_PERIOD: u32 = 16;
 
 // Grass structure uses periods that divide the 64px tile. Flecks use 4px
 // candidate cells, but only a small hash-selected subset receives a fleck.
@@ -54,6 +59,7 @@ const CONCRETE_SRGB: [f32; 3] = [0.72, 0.71, 0.68]; // palette::CONCRETE
 /// - `sidewalk`   → concrete sidewalk curbs
 /// - `foliage`    → three deterministic leaf palettes/species
 /// - `hay`        → `[field_straw, bale_straw]`
+/// - `park_ground`, `orchard_ground`, `field_ground` → two cached biome variants each
 /// - `car_paint`  → car body paint
 #[derive(Resource)]
 pub struct TextureAssets {
@@ -66,6 +72,12 @@ pub struct TextureAssets {
     pub foliage: [Handle<StandardMaterial>; FOLIAGE_VARIANTS],
     #[allow(dead_code)]
     pub hay: [Handle<StandardMaterial>; HAY_VARIANTS],
+    #[allow(dead_code)]
+    pub park_ground: [Handle<StandardMaterial>; GROUND_VARIANTS],
+    #[allow(dead_code)]
+    pub orchard_ground: [Handle<StandardMaterial>; GROUND_VARIANTS],
+    #[allow(dead_code)]
+    pub field_ground: [Handle<StandardMaterial>; GROUND_VARIANTS],
     pub car_paint: Handle<StandardMaterial>,
 }
 
@@ -82,7 +94,17 @@ impl Plugin for TexturesPlugin {
 impl FromWorld for TextureAssets {
     fn from_world(world: &mut World) -> Self {
         world.resource_scope::<Assets<Image>, _>(|world, mut images| {
-            let (grass, road, sidewalk, foliage, hay, car_paint) = {
+            let (
+                grass,
+                road,
+                sidewalk,
+                foliage,
+                hay,
+                park_ground,
+                orchard_ground,
+                field_ground,
+                car_paint,
+            ) = {
                 let mut materials = world.resource_mut::<Assets<StandardMaterial>>();
 
                 // --- Procedural normal maps ---
@@ -159,6 +181,40 @@ impl FromWorld for TextureAssets {
                     })
                 });
 
+                let park_ground = std::array::from_fn(|variant| {
+                    materials.add(StandardMaterial {
+                        base_color: Color::WHITE,
+                        base_color_texture: Some(images.add(park_ground_texture(variant))),
+                        normal_map_texture: Some(images.add(park_ground_normal_map(variant))),
+                        perceptual_roughness: 0.90,
+                        metallic: 0.0,
+                        uv_transform: Affine2::from_scale(Vec2::splat(10.0)),
+                        ..default()
+                    })
+                });
+                let orchard_ground = std::array::from_fn(|variant| {
+                    materials.add(StandardMaterial {
+                        base_color: Color::WHITE,
+                        base_color_texture: Some(images.add(orchard_ground_texture(variant))),
+                        normal_map_texture: Some(images.add(orchard_ground_normal_map(variant))),
+                        perceptual_roughness: 0.93,
+                        metallic: 0.0,
+                        uv_transform: Affine2::from_scale(Vec2::splat(8.0)),
+                        ..default()
+                    })
+                });
+                let field_ground = std::array::from_fn(|variant| {
+                    materials.add(StandardMaterial {
+                        base_color: Color::WHITE,
+                        base_color_texture: Some(images.add(field_ground_texture(variant))),
+                        normal_map_texture: Some(images.add(field_ground_normal_map(variant))),
+                        perceptual_roughness: 0.96,
+                        metallic: 0.0,
+                        uv_transform: Affine2::from_scale(Vec2::splat(6.0)),
+                        ..default()
+                    })
+                });
+
                 // Real red metallic paint. The rounded body supplies smooth
                 // normals; Bevy's PBR shader samples the camera's prefiltered
                 // diffuse/GGX environment maps. Clearcoat adds a glossy lacquer
@@ -172,7 +228,17 @@ impl FromWorld for TextureAssets {
                     ..default()
                 });
 
-                (grass, road, sidewalk, foliage, hay, car_paint)
+                (
+                    grass,
+                    road,
+                    sidewalk,
+                    foliage,
+                    hay,
+                    park_ground,
+                    orchard_ground,
+                    field_ground,
+                    car_paint,
+                )
             };
 
             TextureAssets {
@@ -181,6 +247,9 @@ impl FromWorld for TextureAssets {
                 sidewalk,
                 foliage,
                 hay,
+                park_ground,
+                orchard_ground,
+                field_ground,
                 car_paint,
             }
         })
@@ -491,6 +560,143 @@ fn hay_pixel(variant: usize, x: u32, y: u32) -> [u8; 4] {
 }
 
 // ---------------------------------------------------------------------------
+// Biome ground surfaces
+// ---------------------------------------------------------------------------
+
+/// Smooth explicitly wrapped noise; spacing divides 64, so interpolated
+/// structure crosses the repeat boundary without a hard seam.
+fn tileable_value_noise(x: u32, y: u32, spacing: u32, seed: u32) -> f32 {
+    let cells = TEX_SIZE / spacing;
+    let x = x % TEX_SIZE;
+    let y = y % TEX_SIZE;
+    let gx = x / spacing;
+    let gy = y / spacing;
+    let smooth = |v: f32| v * v * (3.0 - 2.0 * v);
+    let sx = smooth((x % spacing) as f32 / spacing as f32);
+    let sy = smooth((y % spacing) as f32 / spacing as f32);
+    let sample = |cx: u32, cy: u32| {
+        let h = noise2(
+            (cx % cells).wrapping_add(seed * 17),
+            (cy % cells).wrapping_add(seed * 31),
+        );
+        ((h >> 8) & 0xff) as f32 / 127.5 - 1.0
+    };
+    let a = sample(gx, gy) * (1.0 - sx) + sample(gx + 1, gy) * sx;
+    let b = sample(gx, gy + 1) * (1.0 - sx) + sample(gx + 1, gy + 1) * sx;
+    a * (1.0 - sy) + b * sy
+}
+
+fn park_ground_texture(variant: usize) -> Image {
+    assert!(variant < GROUND_VARIANTS);
+    make_image(move |x, y| park_ground_pixel(variant, x, y))
+}
+
+/// 0=turf, 1=soft three-pixel clover, 2=single warm leaf fleck.
+fn park_ground_fleck_kind(variant: usize, x: u32, y: u32) -> u8 {
+    let x = x % TEX_SIZE;
+    let y = y % TEX_SIZE;
+    let h = noise2(
+        x / GROUND_FLECK_CELL_SIZE + variant as u32 * 37,
+        y / GROUND_FLECK_CELL_SIZE + 83,
+    );
+    if h & 7 != 0 {
+        return 0;
+    }
+    let cx = 1 + ((h >> 8) & 1);
+    let cy = 1 + ((h >> 9) & 1);
+    let lx = x % GROUND_FLECK_CELL_SIZE;
+    let ly = y % GROUND_FLECK_CELL_SIZE;
+    let kind = 1 + ((h >> 17) & 1) as u8;
+    let clover_lobe = kind == 1 && ((lx + 1 == cx && ly == cy) || (lx == cx && ly + 1 == cy));
+    if (lx == cx && ly == cy) || clover_lobe {
+        kind
+    } else {
+        0
+    }
+}
+
+fn park_ground_pixel(variant: usize, x: u32, y: u32) -> [u8; 4] {
+    let x = x % TEX_SIZE;
+    let y = y % TEX_SIZE;
+    let b = [[103, 157, 76], [96, 151, 70]][variant];
+    let soft = (tileable_value_noise(x, y, 16, 3 + variant as u32) * 9.0).round() as i32;
+    let grain = signed_noise(x + variant as u32 * 11, y) * 3 / 128;
+    let fleck = match park_ground_fleck_kind(variant, x, y) {
+        1 => [4, 12, 1],
+        2 => [12, 7, -3],
+        _ => [0, 0, 0],
+    };
+    [
+        clamp_byte(b[0] + soft / 2 + grain + fleck[0]),
+        clamp_byte(b[1] + soft + grain + fleck[1]),
+        clamp_byte(b[2] + soft / 3 + grain + fleck[2]),
+        255,
+    ]
+}
+
+fn orchard_ground_texture(variant: usize) -> Image {
+    assert!(variant < GROUND_VARIANTS);
+    make_image(move |x, y| orchard_ground_pixel(variant, x, y))
+}
+
+fn orchard_ground_pixel(variant: usize, x: u32, y: u32) -> [u8; 4] {
+    let x = x % TEX_SIZE;
+    let y = y % TEX_SIZE;
+    let b = [[105, 108, 57], [98, 103, 52]][variant];
+    let (along, across) = if variant == 0 { (x, y) } else { (y, x) };
+    let phase = across % ORCHARD_ROW_PERIOD;
+    let row = ((phase as f32 / ORCHARD_ROW_PERIOD as f32 * std::f32::consts::TAU).cos() * 4.0)
+        .round() as i32;
+    let soil = (tileable_value_noise(x, y, 16, 11 + variant as u32) * 7.0).round() as i32;
+    let grain = signed_noise2(x + 29, y + variant as u32 * 43) * 4 / 128;
+    let mulch = if noise(along + variant as u32 * 17, across) & 0x3f == 0 {
+        -10
+    } else {
+        0
+    };
+    let leaf = if noise2(x + 101, y + variant as u32 * 53) & 0xff == 0 {
+        [13, 5, -9]
+    } else {
+        [0, 0, 0]
+    };
+    [
+        clamp_byte(b[0] + row + soil + grain + mulch + leaf[0]),
+        clamp_byte(b[1] + row + soil + grain + mulch + leaf[1]),
+        clamp_byte(b[2] + row / 2 + soil / 2 + grain + mulch / 2 + leaf[2]),
+        255,
+    ]
+}
+
+fn field_ground_texture(variant: usize) -> Image {
+    assert!(variant < GROUND_VARIANTS);
+    make_image(move |x, y| field_ground_pixel(variant, x, y))
+}
+
+fn field_ground_pixel(variant: usize, x: u32, y: u32) -> [u8; 4] {
+    let x = x % TEX_SIZE;
+    let y = y % TEX_SIZE;
+    let b = [[174, 126, 58], [166, 117, 51]][variant];
+    let (along, across) = if variant == 0 { (x, y) } else { (y, x) };
+    let phase = across % FIELD_FURROW_PERIOD;
+    let furrow = ((phase as f32 / FIELD_FURROW_PERIOD as f32 * std::f32::consts::TAU).cos() * 7.0)
+        .round() as i32;
+    let earth = (tileable_value_noise(x, y, 16, 19 + variant as u32) * 6.0).round() as i32;
+    let grain = signed_noise(along * 3 + variant as u32 * 31, across) * 5 / 128;
+    let h = noise2(across + variant as u32 * 47, along / 4);
+    let straw = if across % 8 == ((h >> 5) & 7) && along.wrapping_add(h >> 11) % 16 < 3 {
+        11
+    } else {
+        0
+    };
+    [
+        clamp_byte(b[0] + furrow + earth + grain + straw),
+        clamp_byte(b[1] + furrow * 3 / 4 + earth + grain + straw),
+        clamp_byte(b[2] + furrow / 3 + earth / 2 + grain / 2 + straw / 3),
+        255,
+    ]
+}
+
+// ---------------------------------------------------------------------------
 // Procedural normal maps
 // ---------------------------------------------------------------------------
 //
@@ -611,6 +817,44 @@ fn concrete_normal_map() -> Image {
     )
 }
 
+fn park_ground_normal_map(variant: usize) -> Image {
+    make_normal_map(
+        move |x, y| {
+            tileable_value_noise(x, y, 8, 31 + variant as u32) * 0.7
+                + signed_noise2(x * 3 + variant as u32 * 13, y * 3) as f32 / 128.0 * 0.12
+        },
+        0.38,
+    )
+}
+
+fn orchard_ground_normal_map(variant: usize) -> Image {
+    make_normal_map(
+        move |x, y| {
+            let across = if variant == 0 { y } else { x };
+            let row = ((across % ORCHARD_ROW_PERIOD) as f32 / ORCHARD_ROW_PERIOD as f32
+                * std::f32::consts::TAU)
+                .cos()
+                * 0.22;
+            row + tileable_value_noise(x, y, 8, 41 + variant as u32) * 0.55
+        },
+        0.42,
+    )
+}
+
+fn field_ground_normal_map(variant: usize) -> Image {
+    make_normal_map(
+        move |x, y| {
+            let across = if variant == 0 { y } else { x };
+            let furrow = ((across % FIELD_FURROW_PERIOD) as f32 / FIELD_FURROW_PERIOD as f32
+                * std::f32::consts::TAU)
+                .cos()
+                * 0.55;
+            furrow + tileable_value_noise(x, y, 8, 51 + variant as u32) * 0.25
+        },
+        0.5,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -619,13 +863,10 @@ mod tests {
         image.data.as_deref().expect("procedural image has data")
     }
 
-    fn assert_repeat_srgb(image: &Image) {
+    fn assert_repeat_format(image: &Image, format: TextureFormat) {
         assert_eq!(image.texture_descriptor.size.width, TEX_SIZE);
         assert_eq!(image.texture_descriptor.size.height, TEX_SIZE);
-        assert_eq!(
-            image.texture_descriptor.format,
-            TextureFormat::Rgba8UnormSrgb
-        );
+        assert_eq!(image.texture_descriptor.format, format);
         assert_eq!(pixels(image).len(), (TEX_SIZE * TEX_SIZE * 4) as usize);
         assert!(pixels(image).chunks_exact(4).all(|pixel| pixel[3] == 255));
         let ImageSampler::Descriptor(sampler) = &image.sampler else {
@@ -633,6 +874,38 @@ mod tests {
         };
         assert_eq!(sampler.address_mode_u, ImageAddressMode::Repeat);
         assert_eq!(sampler.address_mode_v, ImageAddressMode::Repeat);
+    }
+
+    fn assert_repeat_srgb(image: &Image) {
+        assert_repeat_format(image, TextureFormat::Rgba8UnormSrgb);
+    }
+
+    fn color_mean(image: &Image) -> [f32; 3] {
+        let count = (TEX_SIZE * TEX_SIZE) as f32;
+        let mut sum = [0u32; 3];
+        for pixel in pixels(image).chunks_exact(4) {
+            for channel in 0..3 {
+                sum[channel] += pixel[channel] as u32;
+            }
+        }
+        sum.map(|channel| channel as f32 / count)
+    }
+
+    fn max_opposite_edge_delta(image: &Image) -> u8 {
+        let data = pixels(image);
+        let pixel = |x: u32, y: u32| &data[((y * TEX_SIZE + x) * 4) as usize..][..3];
+        let mut maximum = 0;
+        for position in 0..TEX_SIZE {
+            for (a, b) in [
+                (pixel(0, position), pixel(TEX_SIZE - 1, position)),
+                (pixel(position, 0), pixel(position, TEX_SIZE - 1)),
+            ] {
+                for channel in 0..3 {
+                    maximum = maximum.max(a[channel].abs_diff(b[channel]));
+                }
+            }
+        }
+        maximum
     }
 
     fn luminance(pixel: [u8; 4]) -> u16 {
@@ -676,6 +949,109 @@ mod tests {
             }
         }
         assert_ne!(pixels(&hay_texture(0)), pixels(&hay_texture(1)));
+    }
+
+    #[test]
+    fn ground_images_and_normals_are_deterministic_webgl2_repeat_textures() {
+        for variant in 0..GROUND_VARIANTS {
+            let colors = [
+                park_ground_texture(variant),
+                orchard_ground_texture(variant),
+                field_ground_texture(variant),
+            ];
+            let colors_again = [
+                park_ground_texture(variant),
+                orchard_ground_texture(variant),
+                field_ground_texture(variant),
+            ];
+            let normals = [
+                park_ground_normal_map(variant),
+                orchard_ground_normal_map(variant),
+                field_ground_normal_map(variant),
+            ];
+            let normals_again = [
+                park_ground_normal_map(variant),
+                orchard_ground_normal_map(variant),
+                field_ground_normal_map(variant),
+            ];
+            for index in 0..colors.len() {
+                assert_repeat_format(&colors[index], TextureFormat::Rgba8UnormSrgb);
+                assert_repeat_format(&normals[index], TextureFormat::Rgba8Unorm);
+                assert_eq!(pixels(&colors[index]), pixels(&colors_again[index]));
+                assert_eq!(pixels(&normals[index]), pixels(&normals_again[index]));
+                // Tangent-space normals point outward and remain subtle.
+                assert!(
+                    pixels(&normals[index])
+                        .chunks_exact(4)
+                        .all(|pixel| pixel[2] >= 220)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ground_variants_are_distinct_and_have_the_requested_palette_order() {
+        let park = std::array::from_fn::<_, GROUND_VARIANTS, _>(park_ground_texture);
+        let orchard = std::array::from_fn::<_, GROUND_VARIANTS, _>(orchard_ground_texture);
+        let field = std::array::from_fn::<_, GROUND_VARIANTS, _>(field_ground_texture);
+        for family in [&park, &orchard, &field] {
+            assert_ne!(pixels(&family[0]), pixels(&family[1]));
+        }
+        for variant in 0..GROUND_VARIANTS {
+            let p = color_mean(&park[variant]);
+            let o = color_mean(&orchard[variant]);
+            let f = color_mean(&field[variant]);
+            assert!(p[1] > p[0] && p[0] > p[2], "park is bright green");
+            assert!(o[1] > o[2] + 35.0 && o[0] > o[2] + 35.0, "orchard is olive");
+            assert!(f[0] > f[1] + 35.0 && f[1] > f[2] + 45.0, "field is ochre");
+            let mean_luminance = |c: [f32; 3]| 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+            assert!(mean_luminance(p) > mean_luminance(o) + 20.0);
+        }
+    }
+
+    #[test]
+    fn ground_contrast_and_repeat_edges_are_bounded() {
+        for variant in 0..GROUND_VARIANTS {
+            for image in [
+                park_ground_texture(variant),
+                orchard_ground_texture(variant),
+                field_ground_texture(variant),
+            ] {
+                let luminances = pixels(&image)
+                    .chunks_exact(4)
+                    .map(|p| luminance([p[0], p[1], p[2], p[3]]))
+                    .collect::<Vec<_>>();
+                let range = luminances.iter().max().unwrap() - luminances.iter().min().unwrap();
+                assert!(
+                    range <= 42,
+                    "ground contrast should remain restrained: {range}"
+                );
+                assert!(
+                    max_opposite_edge_delta(&image) <= 32,
+                    "opposite repeat edges must remain filter-compatible"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn park_clover_and_leaf_flecks_are_sparse() {
+        assert_eq!(TEX_SIZE % GROUND_FLECK_CELL_SIZE, 0);
+        for variant in 0..GROUND_VARIANTS {
+            let mut counts = [0usize; 3];
+            for y in 0..TEX_SIZE {
+                for x in 0..TEX_SIZE {
+                    counts[park_ground_fleck_kind(variant, x, y) as usize] += 1;
+                    assert_eq!(
+                        park_ground_fleck_kind(variant, x, y),
+                        park_ground_fleck_kind(variant, x + TEX_SIZE, y + TEX_SIZE)
+                    );
+                }
+            }
+            let flecks = counts[1] + counts[2];
+            assert!(counts[1] > 0 && counts[2] > 0);
+            assert!(flecks > 20 && flecks < (TEX_SIZE * TEX_SIZE / 12) as usize);
+        }
     }
 
     #[test]
@@ -750,6 +1126,13 @@ mod tests {
                     assert_eq!(straw, hay_pixel(variant, x + TEX_SIZE, y));
                     assert_eq!(straw, hay_pixel(variant, x, y + TEX_SIZE));
                 }
+                for variant in 0..GROUND_VARIANTS {
+                    for pixel_fn in [park_ground_pixel, orchard_ground_pixel, field_ground_pixel] {
+                        let ground = pixel_fn(variant, x, y);
+                        assert_eq!(ground, pixel_fn(variant, x + TEX_SIZE, y));
+                        assert_eq!(ground, pixel_fn(variant, x, y + TEX_SIZE));
+                    }
+                }
             }
         }
     }
@@ -791,6 +1174,9 @@ mod tests {
             .foliage
             .iter()
             .chain(textures.hay.iter())
+            .chain(textures.park_ground.iter())
+            .chain(textures.orchard_ground.iter())
+            .chain(textures.field_ground.iter())
             .collect::<Vec<_>>();
         for a in 0..handles.len() {
             for b in (a + 1)..handles.len() {
@@ -811,6 +1197,21 @@ mod tests {
         for a in 0..image_ids.len() {
             for b in (a + 1)..image_ids.len() {
                 assert_ne!(image_ids[a], image_ids[b]);
+            }
+        }
+
+        for (family, roughness) in [
+            (&textures.park_ground, 0.90),
+            (&textures.orchard_ground, 0.93),
+            (&textures.field_ground, 0.96),
+        ] {
+            for handle in family {
+                let material = materials
+                    .get(handle)
+                    .expect("cached ground material exists");
+                assert_eq!(material.perceptual_roughness, roughness);
+                assert_eq!(material.metallic, 0.0);
+                assert!(material.normal_map_texture.is_some());
             }
         }
     }

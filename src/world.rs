@@ -48,7 +48,7 @@ use crate::game::resources::{RoundActive, Score, TimeLeft};
 use crate::game::state::GameState;
 use crate::palette;
 use crate::shaders::WaterMaterial;
-use crate::textures::{FOLIAGE_VARIANTS, TextureAssets};
+use crate::textures::{FOLIAGE_VARIANTS, GROUND_VARIANTS, TextureAssets};
 
 /// Gate real-time shadows off on WebGL2 for performance.
 const SHADOWS: bool = cfg!(not(target_arch = "wasm32"));
@@ -958,6 +958,15 @@ fn family_layout_seed(gx: i32, gz: i32, family: DistrictFamily) -> u32 {
     )
 }
 
+/// Pure presentation-only choice between the two cached biome ground
+/// materials. Its hash domain is isolated from topology, family selection,
+/// and the placement LCG, so changing ground art cannot perturb gameplay.
+fn ground_material_variant(layout_seed: u32, family: DistrictFamily) -> usize {
+    const GROUND_MATERIAL_DOMAIN: u32 = 0x6d47_a29b;
+    district_hash(layout_seed as i32, family as i32, GROUND_MATERIAL_DOMAIN) as usize
+        % GROUND_VARIANTS
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct UrbanFamilyPolicy {
     buildings: usize,
@@ -1451,7 +1460,6 @@ fn hay_bale_visual_scale(seed: u32, ordinal: usize) -> f32 {
 struct WorldMeshAssets {
     ground: Handle<Mesh>,
     unit_box: Handle<Mesh>,
-    field_ground: Handle<Mesh>,
     field_furrow: Handle<Mesh>,
     hay_bale: Handle<Mesh>,
     hay_sprig: Handle<Mesh>,
@@ -1498,10 +1506,7 @@ struct WorldMeshAssets {
 struct WorldMaterialAssets {
     line: Handle<StandardMaterial>,
     shadow: Handle<StandardMaterial>,
-    park: Handle<StandardMaterial>,
-    field: Handle<StandardMaterial>,
     field_furrow: Handle<StandardMaterial>,
-    orchard: Handle<StandardMaterial>,
     farm_wood: Handle<StandardMaterial>,
     trunk: Handle<StandardMaterial>,
     building_body: [Handle<StandardMaterial>; 3],
@@ -1533,7 +1538,6 @@ impl FromWorld for WorldAssets {
             unit_box: a.add(Cuboid::new(1.0, 1.0, 1.0)),
             // Countryside geometry is procedural but created once and cached;
             // recycled blocks only clone these lightweight handles.
-            field_ground: a.add(Plane3d::default().mesh().size(40.0, 40.0)),
             field_furrow: a.add(Cuboid::new(36.0, 0.025, 0.16)),
             hay_bale: a.add(Cylinder::new(HAY_BALE_RADIUS, HAY_BALE_LENGTH)),
             hay_sprig: a.add(Cuboid::new(0.055, 0.42, 0.055)),
@@ -1598,23 +1602,8 @@ impl FromWorld for WorldAssets {
                         alpha_mode: AlphaMode::Blend,
                         ..default()
                     }),
-                    park: a.add(StandardMaterial {
-                        base_color: Color::srgb(0.24, 0.52, 0.20),
-                        perceptual_roughness: 1.0,
-                        ..default()
-                    }),
-                    field: a.add(StandardMaterial {
-                        base_color: Color::srgb(0.55, 0.43, 0.16),
-                        perceptual_roughness: 1.0,
-                        ..default()
-                    }),
                     field_furrow: a.add(StandardMaterial {
                         base_color: Color::srgb(0.31, 0.23, 0.09),
-                        perceptual_roughness: 1.0,
-                        ..default()
-                    }),
-                    orchard: a.add(StandardMaterial {
-                        base_color: Color::srgb(0.27, 0.43, 0.16),
                         perceptual_roughness: 1.0,
                         ..default()
                     }),
@@ -1755,6 +1744,11 @@ impl FromWorld for WorldAssets {
 
 pub struct WorldPlugin;
 
+/// Marker for the one persistent directional sun owned by the production
+/// world. Review lighting is deliberately separate and does not carry it.
+#[derive(Component)]
+pub struct ProductionSun;
+
 /// Explicit review-harness gate. This resource is never inserted by
 /// `WorldPlugin`, so production entities keep their normal archetypes.
 #[derive(Resource, Default)]
@@ -1797,7 +1791,7 @@ impl Plugin for WorldPlugin {
             .init_resource::<LastRecycledCell>()
             .init_resource::<PendingRecycle>()
             .init_resource::<WorldAssets>()
-            .add_systems(Startup, spawn_initial_grid)
+            .add_systems(Startup, (spawn_production_sun, spawn_initial_grid))
             // Coin spin + pickup still live here (coins are environment now).
             .add_systems(
                 Update,
@@ -1824,10 +1818,23 @@ impl Plugin for WorldPlugin {
     }
 }
 
-/// Spawn the directional sun + the initial count×count grid of blocks
-/// centered on the origin (for count=5: gx,gz in -2..=2). Run once at
-/// Startup. The sun is Startup-only and persists — it is NOT re-spawned by
-/// `reset_grid`.
+/// Spawn the production world's only sun. It is Startup-only and persists;
+/// grid resets and streaming never create another directional light.
+fn spawn_production_sun(mut commands: Commands) {
+    commands.spawn((
+        DirectionalLight {
+            color: Color::srgb(1.0, 0.94, 0.82),
+            illuminance: 25_000.0,
+            shadow_maps_enabled: SHADOWS,
+            ..default()
+        },
+        Transform::from_xyz(30.0, 25.0, 15.0).looking_at(Vec3::ZERO, Vec3::Y),
+        ProductionSun,
+    ));
+}
+
+/// Spawn the initial count×count grid of blocks centered on the origin (for
+/// count=5: gx,gz in -2..=2). Run once at Startup.
 fn spawn_initial_grid(
     mut commands: Commands,
     cfg: Res<GridConfig>,
@@ -1836,16 +1843,6 @@ fn spawn_initial_grid(
     world_assets: Res<WorldAssets>,
     mut last_recycled_cell: ResMut<LastRecycledCell>,
 ) {
-    // --- Sun: warm directional light (shadows gated for web) ---
-    commands.spawn((
-        DirectionalLight {
-            color: Color::srgb(1.0, 0.94, 0.82),
-            shadow_maps_enabled: SHADOWS,
-            ..default()
-        },
-        Transform::from_xyz(30.0, 25.0, 15.0).looking_at(Vec3::ZERO, Vec3::Y),
-    ));
-
     spawn_grid_window(&mut commands, &cfg, &mut meshes, &textures, &world_assets);
     last_recycled_cell.record_completed((0, 0));
 }
@@ -2993,42 +2990,31 @@ pub fn populate_block(
     let interior_max_z_hi = if road_n { half - 6.0 } else { half - 1.0 };
 
     let shadow_mat = world_assets.materials.shadow.clone();
-    let park_mat = world_assets.materials.park.clone();
-    let field_mat = world_assets.materials.field.clone();
-    let orchard_mat = world_assets.materials.orchard.clone();
 
     // Family detail uses a separate domain; the legacy seed remains dedicated
     // to topology-independent generic decoration such as coins.
     let layout_seed = family_layout_seed(gx, gz, family);
+    let ground_variant = ground_material_variant(layout_seed, family);
+    let ground_mat = match presentation {
+        DistrictPresentation::Park => textures.park_ground[ground_variant].clone(),
+        DistrictPresentation::Field => textures.field_ground[ground_variant].clone(),
+        DistrictPresentation::Orchard => textures.orchard_ground[ground_variant].clone(),
+        DistrictPresentation::Urban => textures.grass.clone(),
+    };
+    let ground_height = if presentation == DistrictPresentation::Urban {
+        0.0
+    } else {
+        0.01
+    };
 
     commands.entity(root).with_children(|p| {
         // --- Ground cell (exactly block-wide; neighbours only touch edges) ---
-        // Countryside variants use only cached procedural meshes/materials.
-        if is_park {
-            p.spawn((
-                Mesh3d(world_assets.meshes.ground.clone()),
-                MeshMaterial3d(park_mat.clone()),
-                Transform::from_xyz(0.0, 0.01, 0.0),
-            ));
-        } else if is_field {
-            p.spawn((
-                Mesh3d(world_assets.meshes.field_ground.clone()),
-                MeshMaterial3d(field_mat.clone()),
-                Transform::from_xyz(0.0, 0.01, 0.0),
-            ));
-        } else if is_orchard {
-            p.spawn((
-                Mesh3d(world_assets.meshes.ground.clone()),
-                MeshMaterial3d(orchard_mat.clone()),
-                Transform::from_xyz(0.0, 0.01, 0.0),
-            ));
-        } else {
-            p.spawn((
-                Mesh3d(world_assets.meshes.ground.clone()),
-                MeshMaterial3d(textures.grass.clone()),
-                Transform::from_xyz(0.0, 0.0, 0.0),
-            ));
-        }
+        // Every presentation clones one cached material and the shared mesh.
+        p.spawn((
+            Mesh3d(world_assets.meshes.ground.clone()),
+            MeshMaterial3d(ground_mat.clone()),
+            Transform::from_xyz(0.0, ground_height, 0.0),
+        ));
 
         // --- Centre-connected road topology ---
         // Every road-bearing tile owns exactly one 8x8 junction pad and one
@@ -4849,6 +4835,28 @@ fn update_cone_motion(
 mod tests {
     use super::*;
 
+    #[test]
+    fn production_startup_spawns_exactly_one_tuned_sun() {
+        let mut app = App::new();
+        app.add_systems(Startup, spawn_production_sun);
+        app.update();
+        // Startup schedules do not run again on subsequent updates.
+        app.update();
+
+        let world = app.world_mut();
+        let mut suns = world.query::<(&ProductionSun, &DirectionalLight, &Transform)>();
+        let suns: Vec<_> = suns.iter(world).collect();
+        assert_eq!(suns.len(), 1);
+        let (_, light, transform) = suns[0];
+        assert_eq!(light.color, Color::srgb(1.0, 0.94, 0.82));
+        assert_eq!(light.illuminance, 25_000.0);
+        assert_eq!(light.shadow_maps_enabled, SHADOWS);
+        assert_eq!(transform.translation, Vec3::new(30.0, 25.0, 15.0));
+
+        let mut all_directional_lights = world.query::<&DirectionalLight>();
+        assert_eq!(all_directional_lights.iter(world).count(), 1);
+    }
+
     fn connector_pavement_contains(kind: TileKind, cell: IVec2, point: Vec2) -> bool {
         let center = cell.as_vec2() * ROAD_BLOCK_SIZE;
         let local = point - center;
@@ -5776,6 +5784,39 @@ mod tests {
     }
 
     #[test]
+    fn ground_material_selector_is_deterministic_bounded_and_visually_isolated() {
+        let mut variants = BTreeSet::new();
+        for family in FAMILY_CATALOG {
+            for gx in -32..=32 {
+                for gz in -32..=32 {
+                    let layout_seed = family_layout_seed(gx, gz, family);
+                    let first = ground_material_variant(layout_seed, family);
+                    assert_eq!(first, ground_material_variant(layout_seed, family));
+                    assert!(first < GROUND_VARIANTS);
+                    variants.insert(first);
+
+                    // Calling the selector cannot advance the placement LCG
+                    // or alter the values feeding topology and family layout.
+                    let kind_before = tile_from_edges(gx, gz);
+                    let family_before = district_family_for(gx, gz, family_district(family));
+                    let mut lcg_before = seed_for(gx, gz);
+                    let next_before = rand(&mut lcg_before);
+                    let _ = ground_material_variant(layout_seed, family);
+                    let mut lcg_after = seed_for(gx, gz);
+                    assert_eq!(kind_before, tile_from_edges(gx, gz));
+                    assert_eq!(
+                        family_before,
+                        district_family_for(gx, gz, family_district(family))
+                    );
+                    assert_eq!(layout_seed, family_layout_seed(gx, gz, family));
+                    assert_eq!(next_before, rand(&mut lcg_after));
+                }
+            }
+        }
+        assert_eq!(variants, (0..GROUND_VARIANTS).collect());
+    }
+
+    #[test]
     fn family_selection_is_deterministic_reachable_and_balanced() {
         let mut counts = [0usize; 15];
         for district in [
@@ -6077,6 +6118,68 @@ mod tests {
         assert!(hay_strip_count > 0);
         assert!(bale_count > 0);
         assert!(sprig_count > 0);
+    }
+
+    #[test]
+    fn review_grounds_reuse_shared_mesh_and_cached_presentation_materials() {
+        let mut app = App::new();
+        app.init_resource::<Assets<Mesh>>()
+            .init_resource::<Assets<Image>>()
+            .init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<Assets<WaterMaterial>>()
+            .init_resource::<TextureAssets>()
+            .insert_resource(WorldReviewMode)
+            .init_resource::<WorldAssets>();
+        let meshes_before = app.world().resource::<Assets<Mesh>>().len();
+        let materials_before = app.world().resource::<Assets<StandardMaterial>>().len();
+        app.add_systems(Startup, spawn_review_world);
+        app.update();
+        assert_eq!(app.world().resource::<Assets<Mesh>>().len(), meshes_before);
+        assert_eq!(
+            app.world().resource::<Assets<StandardMaterial>>().len(),
+            materials_before
+        );
+
+        let (ground_mesh_id, grass_id, park_ids, field_ids, orchard_ids) = {
+            let world = app.world();
+            let world_assets = world.resource::<WorldAssets>();
+            let textures = world.resource::<TextureAssets>();
+            (
+                world_assets.meshes.ground.id(),
+                textures.grass.id(),
+                textures.park_ground.each_ref().map(|handle| handle.id()),
+                textures.field_ground.each_ref().map(|handle| handle.id()),
+                textures.orchard_ground.each_ref().map(|handle| handle.id()),
+            )
+        };
+
+        let world = app.world_mut();
+        let block_count = world.query::<&Block>().iter(world).count();
+        let mut grounds_per_block = BTreeMap::new();
+        let mut grounds = world.query::<(&Mesh3d, &MeshMaterial3d<StandardMaterial>, &ChildOf)>();
+        for (mesh, material, child_of) in grounds.iter(world) {
+            if mesh.0.id() != ground_mesh_id {
+                continue;
+            }
+            let block = world
+                .get::<Block>(child_of.parent())
+                .expect("shared ground mesh must be a direct child of a block");
+            *grounds_per_block.entry(child_of.parent()).or_insert(0usize) += 1;
+            let variant = ground_material_variant(
+                family_layout_seed(block.gx, block.gz, block.family),
+                block.family,
+            );
+            let expected = match district_presentation(block.district) {
+                DistrictPresentation::Urban => grass_id,
+                // WaterPark deliberately shares the Park presentation cache.
+                DistrictPresentation::Park => park_ids[variant],
+                DistrictPresentation::Field => field_ids[variant],
+                DistrictPresentation::Orchard => orchard_ids[variant],
+            };
+            assert_eq!(material.0.id(), expected);
+        }
+        assert_eq!(grounds_per_block.len(), block_count);
+        assert!(grounds_per_block.values().all(|&count| count == 1));
     }
 
     #[test]
