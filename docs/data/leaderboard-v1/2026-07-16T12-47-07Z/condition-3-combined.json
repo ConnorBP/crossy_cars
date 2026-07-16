@@ -1,0 +1,212 @@
+{
+  "apiVersion": "v1",
+  "capturedAt": "2026-07-16T12:47:07Z",
+  "condition": 3,
+  "entries": [
+    {
+      "condition": 3,
+      "name": "MODZ",
+      "rank": 1,
+      "score": 323,
+      "submittedAt": 1783989690091
+    },
+    {
+      "condition": 3,
+      "name": "01337",
+      "rank": 2,
+      "score": 267,
+      "submittedAt": 1784168146097
+    },
+    {
+      "condition": 3,
+      "name": "01337",
+      "rank": 3,
+      "score": 230,
+      "submittedAt": 1784131524646
+    },
+    {
+      "condition": 3,
+      "name": "01337",
+      "rank": 4,
+      "score": 228,
+      "submittedAt": 1784156307949
+    },
+    {
+      "condition": 3,
+      "name": "01337",
+      "rank": 5,
+      "score": 164,
+      "submittedAt": 1784154400714
+    },
+    {
+      "condition": 3,
+      "name": "MODZ",
+      "rank": 6,
+      "score": 160,
+      "submittedAt": 1783988431068
+    },
+    {
+      "condition": 3,
+      "name": "MODZ",
+      "rank": 7,
+      "score": 137,
+      "submittedAt": 1783989210000
+    },
+    {
+      "condition": 3,
+      "name": "01337",
+      "rank": 8,
+      "score": 87,
+      "submittedAt": 1784120769660
+    },
+    {
+      "condition": 3,
+      "name": "SGFLT",
+      "rank": 9,
+      "score": 83,
+      "submittedAt": 1784078947092
+    },
+    {
+      "condition": 3,
+      "name": "SGFLT",
+      "rank": 10,
+      "score": 73,
+      "submittedAt": 1784034254806
+    },
+    {
+      "condition": 3,
+      "name": "01337",
+      "rank": 11,
+      "score": 68,
+      "submittedAt": 1784120390694
+    },
+    {
+      "condition": 3,
+      "name": "SGFLT",
+      "rank": 12,
+      "score": 67,
+      "submittedAt": 1784048627475
+    },
+    {
+      "condition": 3,
+      "name": "MODZ",
+      "rank": 13,
+      "score": 65,
+      "submittedAt": 1783988608858
+    },
+    {
+      "condition": 3,
+      "name": "SGFLT",
+      "rank": 14,
+      "score": 57,
+      "submittedAt": 1783895610648
+    },
+    {
+      "condition": 3,
+      "name": "SGFLT",
+      "rank": 15,
+      "score": 56,
+      "submittedAt": 1784044691415
+    },
+    {
+      "condition": 3,
+      "name": "SGFLT",
+      "rank": 16,
+      "score": 45,
+      "submittedAt": 1784071557961
+    },
+    {
+      "condition": 3,
+      "name": "01337",
+      "rank": 17,
+      "score": 30,
+      "submittedAt": 1784119449588
+    },
+    {
+      "condition": 3,
+      "name": "SGFLT",
+      "rank": 18,
+      "score": 28,
+      "submittedAt": 1783898777548
+    },
+    {
+      "condition": 3,
+      "name": "PP420",
+      "rank": 19,
+      "score": 27,
+      "submittedAt": 1783974736798
+    },
+    {
+      "condition": 3,
+      "name": "SGFLT",
+      "rank": 20,
+      "score": 27,
+      "submittedAt": 1784073472023
+    },
+    {
+      "condition": 3,
+      "name": "SGFLT",
+      "rank": 21,
+      "score": 19,
+      "submittedAt": 1783898321835
+    },
+    {
+      "condition": 3,
+      "name": "SGFLT",
+      "rank": 22,
+      "score": 14,
+      "submittedAt": 1783954857009
+    },
+    {
+      "condition": 3,
+      "name": "BUNZ",
+      "rank": 23,
+      "score": 12,
+      "submittedAt": 1784093327260
+    },
+    {
+      "condition": 3,
+      "name": "BINKY",
+      "rank": 24,
+      "score": 8,
+      "submittedAt": 1783998139996
+    },
+    {
+      "condition": 3,
+      "name": "CIA",
+      "rank": 25,
+      "score": 8,
+      "submittedAt": 1784090134319
+    },
+    {
+      "condition": 3,
+      "name": "CIA",
+      "rank": 26,
+      "score": 7,
+      "submittedAt": 1784089843553
+    },
+    {
+      "condition": 3,
+      "name": "SGFLT",
+      "rank": 27,
+      "score": 6,
+      "submittedAt": 1783961751665
+    },
+    {
+      "condition": 3,
+      "name": "CIA",
+      "rank": 28,
+      "score": 2,
+      "submittedAt": 1784089560990
+    },
+    {
+      "condition": 3,
+      "name": "SGFLT",
+      "rank": 29,
+      "score": 0,
+      "submittedAt": 1783898990697
+    }
+  ],
+  "entryCount": 29,
+  "source": "https://roady-leaderboard.connor-postma.workers.dev/v1/leaderboard"
+}

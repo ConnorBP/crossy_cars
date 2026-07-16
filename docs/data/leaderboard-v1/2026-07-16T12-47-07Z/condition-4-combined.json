@@ -1,0 +1,149 @@
+{
+  "apiVersion": "v1",
+  "capturedAt": "2026-07-16T12:47:07Z",
+  "condition": 4,
+  "entries": [
+    {
+      "condition": 4,
+      "name": "01337",
+      "rank": 1,
+      "score": 278,
+      "submittedAt": 1784131615901
+    },
+    {
+      "condition": 4,
+      "name": "01337",
+      "rank": 2,
+      "score": 243,
+      "submittedAt": 1784159421025
+    },
+    {
+      "condition": 4,
+      "name": "MODZ",
+      "rank": 3,
+      "score": 240,
+      "submittedAt": 1784168190744
+    },
+    {
+      "condition": 4,
+      "name": "SGFLT",
+      "rank": 4,
+      "score": 170,
+      "submittedAt": 1784034312005
+    },
+    {
+      "condition": 4,
+      "name": "SGFLT",
+      "rank": 5,
+      "score": 158,
+      "submittedAt": 1784050766420
+    },
+    {
+      "condition": 4,
+      "name": "01337",
+      "rank": 6,
+      "score": 115,
+      "submittedAt": 1784119490509
+    },
+    {
+      "condition": 4,
+      "name": "01337",
+      "rank": 7,
+      "score": 101,
+      "submittedAt": 1784119088420
+    },
+    {
+      "condition": 4,
+      "name": "MODZ",
+      "rank": 8,
+      "score": 79,
+      "submittedAt": 1783989248899
+    },
+    {
+      "condition": 4,
+      "name": "SGFLT",
+      "rank": 9,
+      "score": 79,
+      "submittedAt": 1784042528534
+    },
+    {
+      "condition": 4,
+      "name": "SGFLT",
+      "rank": 10,
+      "score": 55,
+      "submittedAt": 1783898385666
+    },
+    {
+      "condition": 4,
+      "name": "01337",
+      "rank": 11,
+      "score": 51,
+      "submittedAt": 1784168254267
+    },
+    {
+      "condition": 4,
+      "name": "SGFLT",
+      "rank": 12,
+      "score": 32,
+      "submittedAt": 1784047958242
+    },
+    {
+      "condition": 4,
+      "name": "BINKY",
+      "rank": 13,
+      "score": 15,
+      "submittedAt": 1784044833622
+    },
+    {
+      "condition": 4,
+      "name": "CIA",
+      "rank": 14,
+      "score": 15,
+      "submittedAt": 1784089252440
+    },
+    {
+      "condition": 4,
+      "name": "SGFLT",
+      "rank": 15,
+      "score": 12,
+      "submittedAt": 1783898802622
+    },
+    {
+      "condition": 4,
+      "name": "CIA",
+      "rank": 16,
+      "score": 11,
+      "submittedAt": 1784089891744
+    },
+    {
+      "condition": 4,
+      "name": "SGFLT",
+      "rank": 17,
+      "score": 10,
+      "submittedAt": 1783961774046
+    },
+    {
+      "condition": 4,
+      "name": "CIA",
+      "rank": 18,
+      "score": 9,
+      "submittedAt": 1784090176060
+    },
+    {
+      "condition": 4,
+      "name": "OIJFA",
+      "rank": 19,
+      "score": 4,
+      "submittedAt": 1783977673618
+    },
+    {
+      "condition": 4,
+      "name": "SGFLT",
+      "rank": 20,
+      "score": 2,
+      "submittedAt": 1783954921832
+    }
+  ],
+  "entryCount": 20,
+  "source": "https://roady-leaderboard.connor-postma.workers.dev/v1/leaderboard"
+}

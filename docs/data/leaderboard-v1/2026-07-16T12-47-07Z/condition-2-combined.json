@@ -1,0 +1,401 @@
+{
+  "apiVersion": "v1",
+  "capturedAt": "2026-07-16T12:47:07Z",
+  "condition": 2,
+  "entries": [
+    {
+      "condition": 2,
+      "name": "MODZ",
+      "rank": 1,
+      "score": 1614,
+      "submittedAt": 1784034925000
+    },
+    {
+      "condition": 2,
+      "name": "MODZ",
+      "rank": 2,
+      "score": 1043,
+      "submittedAt": 1784035919871
+    },
+    {
+      "condition": 2,
+      "name": "01337",
+      "rank": 3,
+      "score": 971,
+      "submittedAt": 1784154247816
+    },
+    {
+      "condition": 2,
+      "name": "SGFLT",
+      "rank": 4,
+      "score": 621,
+      "submittedAt": 1784041372854
+    },
+    {
+      "condition": 2,
+      "name": "EAGLE",
+      "rank": 5,
+      "score": 576,
+      "submittedAt": 1783966125011
+    },
+    {
+      "condition": 2,
+      "name": "MODZ",
+      "rank": 6,
+      "score": 574,
+      "submittedAt": 1784035731430
+    },
+    {
+      "condition": 2,
+      "name": "MODZ",
+      "rank": 7,
+      "score": 568,
+      "submittedAt": 1784035434368
+    },
+    {
+      "condition": 2,
+      "name": "MODZ",
+      "rank": 8,
+      "score": 519,
+      "submittedAt": 1784035552459
+    },
+    {
+      "condition": 2,
+      "name": "MODZ",
+      "rank": 9,
+      "score": 495,
+      "submittedAt": 1784035073201
+    },
+    {
+      "condition": 2,
+      "name": "MODZ",
+      "rank": 10,
+      "score": 485,
+      "submittedAt": 1784045514935
+    },
+    {
+      "condition": 2,
+      "name": "MODZ",
+      "rank": 11,
+      "score": 431,
+      "submittedAt": 1784035355577
+    },
+    {
+      "condition": 2,
+      "name": "MODZ",
+      "rank": 12,
+      "score": 427,
+      "submittedAt": 1784034880932
+    },
+    {
+      "condition": 2,
+      "name": "MODZ",
+      "rank": 13,
+      "score": 414,
+      "submittedAt": 1784035621127
+    },
+    {
+      "condition": 2,
+      "name": "MODZ",
+      "rank": 14,
+      "score": 410,
+      "submittedAt": 1783989421707
+    },
+    {
+      "condition": 2,
+      "name": "01337",
+      "rank": 15,
+      "score": 372,
+      "submittedAt": 1784156071082
+    },
+    {
+      "condition": 2,
+      "name": "MODZ",
+      "rank": 16,
+      "score": 371,
+      "submittedAt": 1783989608981
+    },
+    {
+      "condition": 2,
+      "name": "MODZ",
+      "rank": 17,
+      "score": 333,
+      "submittedAt": 1784035215265
+    },
+    {
+      "condition": 2,
+      "name": "SGFLT",
+      "rank": 18,
+      "score": 331,
+      "submittedAt": 1784038799373
+    },
+    {
+      "condition": 2,
+      "name": "MODZ",
+      "rank": 19,
+      "score": 321,
+      "submittedAt": 1784034794699
+    },
+    {
+      "condition": 2,
+      "name": "MODZ",
+      "rank": 20,
+      "score": 294,
+      "submittedAt": 1784168256574
+    },
+    {
+      "condition": 2,
+      "name": "MODZ",
+      "rank": 21,
+      "score": 289,
+      "submittedAt": 1783990268624
+    },
+    {
+      "condition": 2,
+      "name": "SGFLT",
+      "rank": 22,
+      "score": 285,
+      "submittedAt": 1784071056352
+    },
+    {
+      "condition": 2,
+      "name": "01337",
+      "rank": 23,
+      "score": 285,
+      "submittedAt": 1784167877360
+    },
+    {
+      "condition": 2,
+      "name": "MODZ",
+      "rank": 24,
+      "score": 276,
+      "submittedAt": 1783988163908
+    },
+    {
+      "condition": 2,
+      "name": "SGFLT",
+      "rank": 25,
+      "score": 262,
+      "submittedAt": 1784061707198
+    },
+    {
+      "condition": 2,
+      "name": "01337",
+      "rank": 26,
+      "score": 256,
+      "submittedAt": 1784131470647
+    },
+    {
+      "condition": 2,
+      "name": "MODZ",
+      "rank": 27,
+      "score": 242,
+      "submittedAt": 1783990008216
+    },
+    {
+      "condition": 2,
+      "name": "01337",
+      "rank": 28,
+      "score": 242,
+      "submittedAt": 1784120680224
+    },
+    {
+      "condition": 2,
+      "name": "01337",
+      "rank": 29,
+      "score": 218,
+      "submittedAt": 1784119681739
+    },
+    {
+      "condition": 2,
+      "name": "SGFLT",
+      "rank": 30,
+      "score": 199,
+      "submittedAt": 1784034196537
+    },
+    {
+      "condition": 2,
+      "name": "SGFLT",
+      "rank": 31,
+      "score": 199,
+      "submittedAt": 1784048545594
+    },
+    {
+      "condition": 2,
+      "name": "01337",
+      "rank": 32,
+      "score": 199,
+      "submittedAt": 1784119396744
+    },
+    {
+      "condition": 2,
+      "name": "01337",
+      "rank": 33,
+      "score": 196,
+      "submittedAt": 1784132194105
+    },
+    {
+      "condition": 2,
+      "name": "SGFLT",
+      "rank": 34,
+      "score": 144,
+      "submittedAt": 1784042271172
+    },
+    {
+      "condition": 2,
+      "name": "MODZ",
+      "rank": 35,
+      "score": 142,
+      "submittedAt": 1783990213902
+    },
+    {
+      "condition": 2,
+      "name": "CIA",
+      "rank": 36,
+      "score": 141,
+      "submittedAt": 1784089475073
+    },
+    {
+      "condition": 2,
+      "name": "01337",
+      "rank": 37,
+      "score": 133,
+      "submittedAt": 1784118438254
+    },
+    {
+      "condition": 2,
+      "name": "SGFLT",
+      "rank": 38,
+      "score": 121,
+      "submittedAt": 1784050571395
+    },
+    {
+      "condition": 2,
+      "name": "BUNZ",
+      "rank": 39,
+      "score": 121,
+      "submittedAt": 1784093295127
+    },
+    {
+      "condition": 2,
+      "name": "SGFLT",
+      "rank": 40,
+      "score": 117,
+      "submittedAt": 1784047873222
+    },
+    {
+      "condition": 2,
+      "name": "SGFLT",
+      "rank": 41,
+      "score": 116,
+      "submittedAt": 1784073421813
+    },
+    {
+      "condition": 2,
+      "name": "SGFLT",
+      "rank": 42,
+      "score": 110,
+      "submittedAt": 1783898280009
+    },
+    {
+      "condition": 2,
+      "name": "SGFLT",
+      "rank": 43,
+      "score": 107,
+      "submittedAt": 1784071476670
+    },
+    {
+      "condition": 2,
+      "name": "SGFLT",
+      "rank": 44,
+      "score": 94,
+      "submittedAt": 1783895518110
+    },
+    {
+      "condition": 2,
+      "name": "SGFLT",
+      "rank": 45,
+      "score": 91,
+      "submittedAt": 1784078875485
+    },
+    {
+      "condition": 2,
+      "name": "CIA",
+      "rank": 46,
+      "score": 90,
+      "submittedAt": 1784089813109
+    },
+    {
+      "condition": 2,
+      "name": "SGFLT",
+      "rank": 47,
+      "score": 87,
+      "submittedAt": 1783898706549
+    },
+    {
+      "condition": 2,
+      "name": "SGFLT",
+      "rank": 48,
+      "score": 79,
+      "submittedAt": 1784034602388
+    },
+    {
+      "condition": 2,
+      "name": "01337",
+      "rank": 49,
+      "score": 63,
+      "submittedAt": 1784152410176
+    },
+    {
+      "condition": 2,
+      "name": "OIJFA",
+      "rank": 50,
+      "score": 50,
+      "submittedAt": 1783977842658
+    },
+    {
+      "condition": 2,
+      "name": "PP420",
+      "rank": 51,
+      "score": 49,
+      "submittedAt": 1783974685340
+    },
+    {
+      "condition": 2,
+      "name": "BINKY",
+      "rank": 52,
+      "score": 31,
+      "submittedAt": 1784044731324
+    },
+    {
+      "condition": 2,
+      "name": "SGFLT",
+      "rank": 53,
+      "score": 26,
+      "submittedAt": 1783898868129
+    },
+    {
+      "condition": 2,
+      "name": "PENIS",
+      "rank": 54,
+      "score": 19,
+      "submittedAt": 1784007080281
+    },
+    {
+      "condition": 2,
+      "name": "SGFLT",
+      "rank": 55,
+      "score": 9,
+      "submittedAt": 1783984128301
+    },
+    {
+      "condition": 2,
+      "name": "SGFLT",
+      "rank": 56,
+      "score": 5,
+      "submittedAt": 1783961731182
+    }
+  ],
+  "entryCount": 56,
+  "source": "https://roady-leaderboard.connor-postma.workers.dev/v1/leaderboard"
+}

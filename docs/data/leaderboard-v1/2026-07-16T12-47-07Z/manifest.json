@@ -1,0 +1,175 @@
+{
+  "boards": [
+    {
+      "board": "global",
+      "combinedFile": "global-combined.json",
+      "combinedSha256": "d867b0df837cfc194b7fd1b0a36ad1cef483a714f32549953840faa2486f1ff2",
+      "condition": "global",
+      "entryCount": 204,
+      "pageCount": 3,
+      "pages": [
+        {
+          "bytes": 8102,
+          "entries": 100,
+          "file": "global-offset-000000.json",
+          "generatedAt": 1784206026547,
+          "offset": 0,
+          "sha256": "2c827bf71b208a4eeee3943f4cffe27154082e0f0ce4427f5e5dc16b645da9ac",
+          "url": "https://roady-leaderboard.connor-postma.workers.dev/v1/leaderboard?limit=100&offset=0"
+        },
+        {
+          "bytes": 8111,
+          "entries": 100,
+          "file": "global-offset-000100.json",
+          "generatedAt": 1784206028811,
+          "offset": 100,
+          "sha256": "fd3021fc14b898d6def1430cfc7cc3a926e708a8a0b94a7ff6c4f3faf761fbc7",
+          "url": "https://roady-leaderboard.connor-postma.workers.dev/v1/leaderboard?limit=100&offset=100"
+        },
+        {
+          "bytes": 380,
+          "entries": 4,
+          "file": "global-offset-000200.json",
+          "generatedAt": 1784206031080,
+          "offset": 200,
+          "sha256": "04961763a451a066892eca0943319ca1a80064f93939f31c3437ea838ddbbfe5",
+          "url": "https://roady-leaderboard.connor-postma.workers.dev/v1/leaderboard?limit=100&offset=200"
+        }
+      ]
+    },
+    {
+      "board": "condition-0",
+      "combinedFile": "condition-0-combined.json",
+      "combinedSha256": "c587471564eefa69436ede080affdcddad68f6b4050c237f2230a1ee3a732102",
+      "condition": 0,
+      "entryCount": 55,
+      "pageCount": 1,
+      "pages": [
+        {
+          "bytes": 4438,
+          "entries": 55,
+          "file": "condition-0-offset-000000.json",
+          "generatedAt": 1784206033345,
+          "offset": 0,
+          "sha256": "245db28c88075c5c0a9f76df5b97b4f69c91728bfd190698b576074a3e023e1f",
+          "url": "https://roady-leaderboard.connor-postma.workers.dev/v1/leaderboard?limit=100&offset=0&condition=0"
+        }
+      ]
+    },
+    {
+      "board": "condition-1",
+      "combinedFile": "condition-1-combined.json",
+      "combinedSha256": "e3ee2b4a2e008c55dfb6ef64dce087c60f3e8b448b696da7e7879fa2c911c5c6",
+      "condition": 1,
+      "entryCount": 44,
+      "pageCount": 1,
+      "pages": [
+        {
+          "bytes": 3560,
+          "entries": 44,
+          "file": "condition-1-offset-000000.json",
+          "generatedAt": 1784206035609,
+          "offset": 0,
+          "sha256": "c4109d442d7cd9eb7f415a94763a8bc127d8f0be3c9e58e24a59f4218ad63605",
+          "url": "https://roady-leaderboard.connor-postma.workers.dev/v1/leaderboard?limit=100&offset=0&condition=1"
+        }
+      ]
+    },
+    {
+      "board": "condition-2",
+      "combinedFile": "condition-2-combined.json",
+      "combinedSha256": "309e4f1e75186cafca016708dc35c96e2ddd660261b56279289511e8e9c64497",
+      "condition": 2,
+      "entryCount": 56,
+      "pageCount": 1,
+      "pages": [
+        {
+          "bytes": 4545,
+          "entries": 56,
+          "file": "condition-2-offset-000000.json",
+          "generatedAt": 1784206037877,
+          "offset": 0,
+          "sha256": "e13b8ab10f2a09db0d8cb70277255adf64413bbf52fb6356e6e0c9148239e6f9",
+          "url": "https://roady-leaderboard.connor-postma.workers.dev/v1/leaderboard?limit=100&offset=0&condition=2"
+        }
+      ]
+    },
+    {
+      "board": "condition-3",
+      "combinedFile": "condition-3-combined.json",
+      "combinedSha256": "6587d4be1d21af4b2e5d310759ba947f3af8a947dd2d3dcac54bbed65ded62d2",
+      "condition": 3,
+      "entryCount": 29,
+      "pageCount": 1,
+      "pages": [
+        {
+          "bytes": 2356,
+          "entries": 29,
+          "file": "condition-3-offset-000000.json",
+          "generatedAt": 1784206040137,
+          "offset": 0,
+          "sha256": "2167a83940d4a754b508e7e696f7f58ac57bf74f4297a5082b353696093ab37f",
+          "url": "https://roady-leaderboard.connor-postma.workers.dev/v1/leaderboard?limit=100&offset=0&condition=3"
+        }
+      ]
+    },
+    {
+      "board": "condition-4",
+      "combinedFile": "condition-4-combined.json",
+      "combinedSha256": "53687fcfa4a41681dd0a84170c9ac5be293266847e832142887ef9b40eb3ede9",
+      "condition": 4,
+      "entryCount": 20,
+      "pageCount": 1,
+      "pages": [
+        {
+          "bytes": 1642,
+          "entries": 20,
+          "file": "condition-4-offset-000000.json",
+          "generatedAt": 1784206042405,
+          "offset": 0,
+          "sha256": "11e2908f9f8089709ed746ac86138dd145eefd8b718c94a683198a36a35b2dfa",
+          "url": "https://roady-leaderboard.connor-postma.workers.dev/v1/leaderboard?limit=100&offset=0&condition=4"
+        }
+      ]
+    }
+  ],
+  "capturedAt": "2026-07-16T12:47:07Z",
+  "completionRule": "Each board was paginated until the API returned fewer than 100 entries.",
+  "excluded": [
+    "hidden/deleted scores",
+    "sessions and proofs",
+    "IP hashes",
+    "moderation logs and notes",
+    "admin restorations metadata not exposed by the public API",
+    "secrets and rate-limit identifiers"
+  ],
+  "legacyConditions": [
+    {
+      "id": 0,
+      "name": "Standard"
+    },
+    {
+      "id": 1,
+      "name": "Rush Hour"
+    },
+    {
+      "id": 2,
+      "name": "Chicken Frenzy"
+    },
+    {
+      "id": 3,
+      "name": "Stampede"
+    },
+    {
+      "id": 4,
+      "name": "Glass Cannon"
+    }
+  ],
+  "ordering": "terminal_total DESC, submitted_at ASC, id ASC",
+  "pageSize": 100,
+  "repositorySourceCommit": "cb6a872",
+  "requestOrigin": "https://car.segfault.site",
+  "schema": "roady-public-v1-leaderboard-archive.v1",
+  "scope": "Public status=live rows exposed by GET /v1/leaderboard only.",
+  "sourceBaseUrl": "https://roady-leaderboard.connor-postma.workers.dev/v1/leaderboard"
+}
