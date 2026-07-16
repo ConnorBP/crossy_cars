@@ -17,6 +17,8 @@ use bevy::image::{Image, ImageAddressMode, ImageFilterMode, ImageSampler, ImageS
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
+use crate::textures::PbrDetailAssets;
+
 /// Canonical PBR finishes for procedural miniature-town materials.
 ///
 /// The palette deliberately owns only the five finish controls below. Applying
@@ -299,21 +301,42 @@ fn classify_world_material(name: &str) -> Option<WorldMaterialSemantic> {
     None
 }
 
-fn apply_world_semantic(material: &mut StandardMaterial, semantic: WorldMaterialSemantic) {
+fn apply_world_semantic(
+    material: &mut StandardMaterial,
+    semantic: WorldMaterialSemantic,
+    details: Option<&PbrDetailAssets>,
+) {
     use WorldMaterialSemantic::*;
-    // Reuse the procedural world's canonical finishes. Authored base color,
-    // every texture, alpha mode, and emissive fields remain untouched.
-    let family = match semantic {
+    // Imported GLBs have UV0 but no authored tangents. Apply only safe ORM
+    // modulation; normal detail remains on tangent-bearing procedural meshes.
+    let (family, detail) = match semantic {
         Glass => return,
-        PaintedWood => ToyMaterialFamily::PaintedWood,
-        RawWood => ToyMaterialFamily::RawWood,
-        Concrete => ToyMaterialFamily::Concrete,
-        Metal => ToyMaterialFamily::BareMetal,
-        Clay => ToyMaterialFamily::Clay,
-        Coated => ToyMaterialFamily::CoatedPlastic,
-        Foliage => ToyMaterialFamily::Foliage,
+        PaintedWood => (ToyMaterialFamily::PaintedWood, None),
+        RawWood => (
+            ToyMaterialFamily::RawWood,
+            details.map(|assets| &assets.wood_orm),
+        ),
+        Concrete => (
+            ToyMaterialFamily::Concrete,
+            details.map(|assets| &assets.concrete_orm),
+        ),
+        Metal => (ToyMaterialFamily::BareMetal, None),
+        Clay => (ToyMaterialFamily::Clay, None),
+        Coated => (
+            ToyMaterialFamily::CoatedPlastic,
+            details.map(|assets| &assets.plastic_orm),
+        ),
+        Foliage => (ToyMaterialFamily::Foliage, None),
     };
     apply_toy_material(material, family);
+    if let Some(orm) = detail {
+        if material.metallic_roughness_texture.is_none() {
+            material.metallic_roughness_texture = Some(orm.clone());
+        }
+        if material.occlusion_texture.is_none() {
+            material.occlusion_texture = Some(orm.clone());
+        }
+    }
 }
 
 fn has_imported_world_ancestor(
@@ -341,6 +364,7 @@ fn tune_imported_world_materials(
     parents: Query<&ChildOf>,
     world_roots: Query<(), With<ImportedWorldVisual>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    details: Option<Res<PbrDetailAssets>>,
     mut tuned: ResMut<TunedWorldMaterials>,
 ) {
     for (entity, name, material_handle) in &primitives {
@@ -358,7 +382,7 @@ fn tune_imported_world_materials(
         }
         if let Some(mut material) = materials.get_mut(id) {
             tuned.0.insert(id);
-            apply_world_semantic(&mut material, semantic);
+            apply_world_semantic(&mut material, semantic, details.as_deref());
         }
     }
 }
@@ -783,7 +807,7 @@ mod tests {
             ..default()
         };
         let before = material.clone();
-        apply_world_semantic(&mut material, WorldMaterialSemantic::Glass);
+        apply_world_semantic(&mut material, WorldMaterialSemantic::Glass, None);
         assert_eq!(material.metallic, before.metallic);
         assert_eq!(material.perceptual_roughness, before.perceptual_roughness);
         assert_eq!(material.reflectance, before.reflectance);

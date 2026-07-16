@@ -47,6 +47,7 @@ use crate::game::resources::RoundActive;
 use crate::game::state::GameState;
 use crate::modifiers::ActiveModifier;
 use crate::run_events::ActiveEvent;
+use crate::textures::PbrDetailAssets;
 use crate::touch::{
     TOUCH_LEVEL_HEIGHT, TOUCH_LEVEL_RIGHT, TOUCH_LEVEL_TOP, TOUCH_LEVEL_WIDTH, TouchControlsActive,
 };
@@ -1100,6 +1101,7 @@ fn bind_imported_traffic_paint(
     )>,
     parents: Query<&ChildOf>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    details: Option<Res<PbrDetailAssets>>,
 ) {
     for (wrapper, visual, wrapper_parent, mut instance_material) in &mut wrappers {
         let owner = wrapper_parent.parent();
@@ -1121,6 +1123,16 @@ fn bind_imported_traffic_paint(
                     continue;
                 };
                 cloned.base_color = TRAFFIC_PAINT_COLORS[visual.paint_index];
+                // Traffic GLBs have UV0 but no tangents, so add only shared
+                // plastic roughness/AO detail and preserve authored maps.
+                if let Some(details) = details.as_deref() {
+                    if cloned.metallic_roughness_texture.is_none() {
+                        cloned.metallic_roughness_texture = Some(details.plastic_orm.clone());
+                    }
+                    if cloned.occlusion_texture.is_none() {
+                        cloned.occlusion_texture = Some(details.plastic_orm.clone());
+                    }
+                }
                 let handle = materials.add(cloned);
                 instance_material.0 = Some(handle.clone());
                 handle

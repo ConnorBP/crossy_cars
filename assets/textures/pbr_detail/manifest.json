@@ -1,0 +1,157 @@
+{
+  "color_space": "linear",
+  "generator": "build_pbr_details.py",
+  "license": "User-confirmed free to use",
+  "orm_channels": {
+    "a": 255,
+    "b": "metallic multiplier (255)",
+    "g": "roughness multiplier",
+    "r": "ambient occlusion"
+  },
+  "outputs": {
+    "concrete_normal": {
+      "bytes": 40106,
+      "path": "assets/textures/pbr_detail/concrete_normal.png",
+      "sha256": "ecda35918b757c70a33b83e07ef649ccdf2bc516d853a9c3ec991561112a5204"
+    },
+    "concrete_orm": {
+      "bytes": 62040,
+      "path": "assets/textures/pbr_detail/concrete_orm.png",
+      "sha256": "80f18ae9aa2a4a91d1c161b466692b38ac0514838743bc5038f01365ee0613c1"
+    },
+    "grass_normal": {
+      "bytes": 76264,
+      "path": "assets/textures/pbr_detail/grass_normal.png",
+      "sha256": "1693499719377b7235310b095547ab5bcbb039e4254eccb62c2f23ebe7ca4bd1"
+    },
+    "grass_orm": {
+      "bytes": 81175,
+      "path": "assets/textures/pbr_detail/grass_orm.png",
+      "sha256": "84529e7d257f4c6faa1d312febf7944137ee0908434cba57642c1b905f2c5813"
+    },
+    "plastic_normal": {
+      "bytes": 2570,
+      "path": "assets/textures/pbr_detail/plastic_normal.png",
+      "sha256": "a939c2263345d912fb7ab6f254411399cb2e2f258c8e83b04a9ba0f627cd9aa8"
+    },
+    "plastic_orm": {
+      "bytes": 56426,
+      "path": "assets/textures/pbr_detail/plastic_orm.png",
+      "sha256": "9cbbb155e918cbe583e8c9f86fcdddd0104d5f5eb6ed8f2ace8f1ab444dd8705"
+    },
+    "soil_orm": {
+      "bytes": 60302,
+      "path": "assets/textures/pbr_detail/soil_orm.png",
+      "sha256": "dfe392f3d1c9397433081ae8b815adfe49f42cb2742e28292676a5c90160fde4"
+    },
+    "wood_normal": {
+      "bytes": 38359,
+      "path": "assets/textures/pbr_detail/wood_normal.png",
+      "sha256": "b1850979e58cffcd940f34f1347a3270f30784bb1661bfe0c998cb5c60dd6274"
+    },
+    "wood_orm": {
+      "bytes": 50217,
+      "path": "assets/textures/pbr_detail/wood_orm.png",
+      "sha256": "5cdae3e5afb89c6c1a9570a41b91c9c62cf163a0144aa57118ffc2ac457ebc34"
+    }
+  },
+  "resolution": [
+    256,
+    256
+  ],
+  "schema": "roady.pbr-detail.v1",
+  "sources": {
+    "concrete": {
+      "ao_floor": 228,
+      "archive": "concrete_wall_01_4k.zip",
+      "archive_sha256": "b213d01ec8781d784812d7f7cb8aeee3eda46f65469dd12ce6a8fa4dfd4b2113",
+      "entries": {
+        "ao": {
+          "path": "concrete_wall_01_4k/concrete_wall_01_ambient_occlusion_4k.png",
+          "sha256": "ff1b4276ea64834f3fd25df7ff557a5efdfce439171993680863c011800a2313"
+        },
+        "normal": {
+          "path": "concrete_wall_01_4k/concrete_wall_01_normal_gl_4k.png",
+          "sha256": "ea6b62efe64b13cd175a385a695b62fdf4dd4e46edbdf109155d437cc1d3b637"
+        },
+        "roughness": {
+          "path": "concrete_wall_01_4k/concrete_wall_01_roughness_4k.png",
+          "sha256": "f14d8e9aebc44f10cd7642843578b98407492cb4f0105bed1a82c2bccfaa1a0a"
+        }
+      },
+      "normal_strength": 0.32,
+      "roughness_floor": 210
+    },
+    "grass": {
+      "ao_floor": 232,
+      "archive": "whispy-grass-meadow-bl.zip",
+      "archive_sha256": "b6b34b9b1a7e4e60fb54832975cbb7b364e6c66736995eeb8f020ccdfee57821",
+      "entries": {
+        "ao": {
+          "path": "whispy-grass-meadow-bl/wispy-grass-meadow_ao.png",
+          "sha256": "2b2c706b96ac3cc72b8d2b2796e36afd84928a44dc01a64418227c531faa1f9d"
+        },
+        "normal": {
+          "path": "whispy-grass-meadow-bl/wispy-grass-meadow_normal-ogl.png",
+          "sha256": "ff88422ed70bbe3299e956cd98025bc207a6f77b05459ec016a09c6e59b7fae7"
+        },
+        "roughness": {
+          "path": "whispy-grass-meadow-bl/wispy-grass-meadow_roughness.png",
+          "sha256": "39b811cf934d66fa96aec7a932c6a3cc48d4849c0f14fb1aded3dfd7a2058f46"
+        }
+      },
+      "normal_strength": 0.22,
+      "roughness_floor": 220
+    },
+    "plastic": {
+      "ao_floor": 232,
+      "archive": "scuffed-plastic-1-bl.zip",
+      "archive_sha256": "5b8953bcbc5d016c36c5c412a2c78cc44b465ed07ab7e5cd9399a5ee1036cb1e",
+      "entries": {
+        "ao": {
+          "path": "scuffed-plastic-1-bl/scuffed-plastic-ao.png",
+          "sha256": "cb98672f2811142893186fde2e164c36ae7922ffb431b25922654d6daa7b7774"
+        },
+        "normal": {
+          "path": "scuffed-plastic-1-bl/scuffed-plastic-normal.png",
+          "sha256": "debb5963154a50d0816c720d8f53e062098341cc84cb36aff6540a540c7ede7d"
+        },
+        "roughness": {
+          "path": "scuffed-plastic-1-bl/scuffed-plastic-rough.png",
+          "sha256": "f820ee86c6dbc1196640a62ea4b55e3acfb11ce99de44719c6e75bdb8b1ded44"
+        }
+      },
+      "normal_strength": 0.2,
+      "roughness_floor": 205
+    },
+    "soil": {
+      "ao_floor": 232,
+      "recovery": "Pillow LOAD_TRUNCATED_IMAGES=true; complete 4096x4096 RGB decoded",
+      "roughness_floor": 210,
+      "source": "Smudges01_4K.png",
+      "source_sha256": "2fb6c8f6490fc3f77ebaebc23942f5ea9022d96ba9b778b09ea6e82db14ebbed",
+      "tiling": "128px Lanczos sample mirrored in both axes into a seamless 256px tile"
+    },
+    "wood": {
+      "ao_floor": 228,
+      "archive": "wood_01_4k.zip",
+      "archive_sha256": "96d07abedfe1fbab86cf0a8918108a42e8e868a73c3938d7373f694acda35e7c",
+      "entries": {
+        "ao": {
+          "path": "wood_01_4k/wood_01_ambient_occlusion_4k.png",
+          "sha256": "3579176b49f251afe915c58704a982e15d88862548c06fab0577c368160fef7b"
+        },
+        "normal": {
+          "path": "wood_01_4k/wood_01_normal_gl_4k.png",
+          "sha256": "715bb11f110d4820bbdd43ecac63f799fcb320aba61f242d5953fb295c3dc956"
+        },
+        "roughness": {
+          "path": "wood_01_4k/wood_01_roughness_4k.png",
+          "sha256": "1d4753a115e92c11d065df6b8cbcb5b1cf1692a601304cc9e7c117b9264239f2"
+        }
+      },
+      "normal_strength": 0.27,
+      "roughness_floor": 205
+    }
+  }
+}
