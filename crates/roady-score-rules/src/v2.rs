@@ -6,6 +6,9 @@
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 
+/// Canonical big-endian session, schedule, ledger, evidence, root, and score bytes.
+pub mod canonical;
+
 pub const PROTOCOL_VERSION: u8 = 2;
 pub const RULES_VERSION: u8 = 2;
 pub const POLICY_VERSION: u8 = 1;

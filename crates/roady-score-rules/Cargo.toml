@@ -9,3 +9,7 @@ description = "Engine-independent scoring rules for Roady"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+
+[dev-dependencies]
+base64 = "0.22"
+hmac = "0.12"
