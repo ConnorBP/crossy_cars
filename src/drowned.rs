@@ -14,6 +14,7 @@ use crate::world::PondFootprint;
 const DROWN_DURATION: f32 = 0.8;
 const DROWN_SPEED_DECAY: f32 = 5.0;
 const DROWN_LOWER_DISTANCE: f32 = 0.62;
+const DROWN_TERMINAL_LOWER_DISTANCE: f32 = 1.45;
 const DROWN_TILT: f32 = 0.34;
 const RIPPLE_DURATION: f32 = 0.8;
 const CAR_HALF_EXTENTS: Vec2 = Vec2::new(0.56, 1.0);
@@ -250,8 +251,14 @@ pub(crate) fn drowned_car_transform(
 ) -> Transform {
     let progress = progress.clamp(0.0, 1.0);
     let eased = progress * progress * (3.0 - 2.0 * progress);
+    // Keep most of the 0.8-second descent readable, then carry the complete
+    // toy car beneath the opaque surface instead of leaving clipped panels.
+    let terminal = ((progress - 0.72) / 0.28).clamp(0.0, 1.0);
+    let terminal_eased = terminal * terminal * (3.0 - 2.0 * terminal);
+    let depth = DROWN_LOWER_DISTANCE * eased
+        + (DROWN_TERMINAL_LOWER_DISTANCE - DROWN_LOWER_DISTANCE) * terminal_eased;
     Transform {
-        translation: entry_position - Vec3::Y * (DROWN_LOWER_DISTANCE * eased),
+        translation: entry_position - Vec3::Y * depth,
         rotation: Quat::from_rotation_y(heading)
             * Quat::from_rotation_x(DROWN_TILT * eased)
             * Quat::from_rotation_z(-DROWN_TILT * 0.55 * eased),
