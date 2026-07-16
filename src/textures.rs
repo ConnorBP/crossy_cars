@@ -60,9 +60,11 @@ const CONCRETE_SRGB: [f32; 3] = [0.72, 0.71, 0.68]; // palette::CONCRETE
 /// Every handle is loaded once and reused by cached materials.
 #[derive(Resource, Clone)]
 pub(crate) struct PbrDetailAssets {
+    pub(crate) plastic_normal: Handle<Image>,
     pub(crate) plastic_orm: Handle<Image>,
     pub(crate) concrete_normal: Handle<Image>,
     pub(crate) concrete_orm: Handle<Image>,
+    pub(crate) wood_normal: Handle<Image>,
     pub(crate) wood_orm: Handle<Image>,
     pub(crate) grass_normal: Handle<Image>,
     pub(crate) grass_orm: Handle<Image>,
@@ -90,9 +92,11 @@ impl FromWorld for PbrDetailAssets {
                 .load(path)
         };
         Self {
+            plastic_normal: load("textures/pbr_detail/plastic_normal.png"),
             plastic_orm: load("textures/pbr_detail/plastic_orm.png"),
             concrete_normal: load("textures/pbr_detail/concrete_normal.png"),
             concrete_orm: load("textures/pbr_detail/concrete_orm.png"),
+            wood_normal: load("textures/pbr_detail/wood_normal.png"),
             wood_orm: load("textures/pbr_detail/wood_orm.png"),
             grass_normal: load("textures/pbr_detail/grass_normal.png"),
             grass_orm: load("textures/pbr_detail/grass_orm.png"),
