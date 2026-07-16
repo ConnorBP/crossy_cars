@@ -10,49 +10,49 @@
   },
   "outputs": {
     "concrete_normal": {
-      "bytes": 40106,
+      "bytes": 61270,
       "path": "assets/textures/pbr_detail/concrete_normal.png",
-      "sha256": "ecda35918b757c70a33b83e07ef649ccdf2bc516d853a9c3ec991561112a5204"
+      "sha256": "9ca0122384697a9143d831ac46fc5bea2189de74d15db852f85e5fb9abc61a44"
     },
     "concrete_orm": {
-      "bytes": 62040,
+      "bytes": 79303,
       "path": "assets/textures/pbr_detail/concrete_orm.png",
-      "sha256": "80f18ae9aa2a4a91d1c161b466692b38ac0514838743bc5038f01365ee0613c1"
+      "sha256": "3086cf63483eb3f19865a0e96b021c8620f1b9a4672163c4d8267492c3ebdb2a"
     },
     "grass_normal": {
-      "bytes": 76264,
+      "bytes": 98727,
       "path": "assets/textures/pbr_detail/grass_normal.png",
-      "sha256": "1693499719377b7235310b095547ab5bcbb039e4254eccb62c2f23ebe7ca4bd1"
+      "sha256": "95b0a697a325525a6939e8447967de44b7f911e5f419a6277acadc0b3d4386aa"
     },
     "grass_orm": {
-      "bytes": 81175,
+      "bytes": 100085,
       "path": "assets/textures/pbr_detail/grass_orm.png",
-      "sha256": "84529e7d257f4c6faa1d312febf7944137ee0908434cba57642c1b905f2c5813"
+      "sha256": "f12985f08b1dc2841311871fc291b082fd107a398412863782be6ccbdf27b652"
     },
     "plastic_normal": {
-      "bytes": 2570,
+      "bytes": 62808,
       "path": "assets/textures/pbr_detail/plastic_normal.png",
-      "sha256": "a939c2263345d912fb7ab6f254411399cb2e2f258c8e83b04a9ba0f627cd9aa8"
+      "sha256": "fe434e955dcce87e1be6c7a08af9145ca36a73c80317abc713675455f52de4cb"
     },
     "plastic_orm": {
-      "bytes": 56426,
+      "bytes": 69244,
       "path": "assets/textures/pbr_detail/plastic_orm.png",
-      "sha256": "9cbbb155e918cbe583e8c9f86fcdddd0104d5f5eb6ed8f2ace8f1ab444dd8705"
+      "sha256": "9b53c9d4c36702f7afc82af149804918db04ffe1865276a242791728b3766ac5"
     },
     "soil_orm": {
-      "bytes": 60302,
+      "bytes": 73325,
       "path": "assets/textures/pbr_detail/soil_orm.png",
-      "sha256": "dfe392f3d1c9397433081ae8b815adfe49f42cb2742e28292676a5c90160fde4"
+      "sha256": "ab28f300078982e902aa1affca74780059953734a2733c2c03a4e060aa086586"
     },
     "wood_normal": {
-      "bytes": 38359,
+      "bytes": 51997,
       "path": "assets/textures/pbr_detail/wood_normal.png",
-      "sha256": "b1850979e58cffcd940f34f1347a3270f30784bb1661bfe0c998cb5c60dd6274"
+      "sha256": "037c0220c6505dfb8ab42a3ec1413cfefa4b16168fbf496d60cfb4464238d5dc"
     },
     "wood_orm": {
-      "bytes": 50217,
+      "bytes": 64402,
       "path": "assets/textures/pbr_detail/wood_orm.png",
-      "sha256": "5cdae3e5afb89c6c1a9570a41b91c9c62cf163a0144aa57118ffc2ac457ebc34"
+      "sha256": "c319e8198a957fd0b51c153a3ff0c8a8b62b56cbfe5c4a5d50a0545a68d4a888"
     }
   },
   "resolution": [
@@ -62,7 +62,7 @@
   "schema": "roady.pbr-detail.v1",
   "sources": {
     "concrete": {
-      "ao_floor": 228,
+      "ao_floor": 195,
       "archive": "concrete_wall_01_4k.zip",
       "archive_sha256": "b213d01ec8781d784812d7f7cb8aeee3eda46f65469dd12ce6a8fa4dfd4b2113",
       "entries": {
@@ -79,11 +79,33 @@
           "sha256": "f14d8e9aebc44f10cd7642843578b98407492cb4f0105bed1a82c2bccfaa1a0a"
         }
       },
-      "normal_strength": 0.32,
-      "roughness_floor": 210
+      "normal_generation": {
+        "method": "attenuated source normal",
+        "strength": 0.75
+      },
+      "normal_strength": 0.75,
+      "normal_validation": {
+        "advisors": {
+          "amplitude_max": [
+            0.14,
+            0.17
+          ],
+          "amplitude_mean": [
+            0.015,
+            0.025
+          ],
+          "length_error_max": 0.01,
+          "seam_max": 0.07
+        },
+        "amplitude_max": 0.151375,
+        "amplitude_mean": 0.017657,
+        "length_error_max": 0.004053,
+        "seam_max": 0.064676
+      },
+      "roughness_floor": 185
     },
     "grass": {
-      "ao_floor": 232,
+      "ao_floor": 205,
       "archive": "whispy-grass-meadow-bl.zip",
       "archive_sha256": "b6b34b9b1a7e4e60fb54832975cbb7b364e6c66736995eeb8f020ccdfee57821",
       "entries": {
@@ -100,11 +122,33 @@
           "sha256": "39b811cf934d66fa96aec7a932c6a3cc48d4849c0f14fb1aded3dfd7a2058f46"
         }
       },
-      "normal_strength": 0.22,
-      "roughness_floor": 220
+      "normal_generation": {
+        "method": "attenuated source normal",
+        "strength": 0.45
+      },
+      "normal_strength": 0.45,
+      "normal_validation": {
+        "advisors": {
+          "amplitude_max": [
+            0.14,
+            0.17
+          ],
+          "amplitude_mean": [
+            0.032,
+            0.045
+          ],
+          "length_error_max": 0.01,
+          "seam_max": 0.2
+        },
+        "amplitude_max": 0.151375,
+        "amplitude_mean": 0.037673,
+        "length_error_max": 0.004251,
+        "seam_max": 0.19387
+      },
+      "roughness_floor": 200
     },
     "plastic": {
-      "ao_floor": 232,
+      "ao_floor": 205,
       "archive": "scuffed-plastic-1-bl.zip",
       "archive_sha256": "5b8953bcbc5d016c36c5c412a2c78cc44b465ed07ab7e5cd9399a5ee1036cb1e",
       "entries": {
@@ -121,19 +165,41 @@
           "sha256": "f820ee86c6dbc1196640a62ea4b55e3acfb11ce99de44719c6e75bdb8b1ded44"
         }
       },
-      "normal_strength": 0.2,
-      "roughness_floor": 205
+      "normal_generation": {
+        "gaussian_blur_radius": 1.5,
+        "height_strength": 4.0,
+        "method": "central finite differences of mirrored, normalized AO height"
+      },
+      "normal_validation": {
+        "advisors": {
+          "amplitude_max": [
+            0.22,
+            0.32
+          ],
+          "amplitude_mean": [
+            0.035,
+            0.055
+          ],
+          "length_error_max": 0.01,
+          "seam_max": 0.0
+        },
+        "amplitude_max": 0.270617,
+        "amplitude_mean": 0.038529,
+        "length_error_max": 0.004362,
+        "seam_max": 0.0
+      },
+      "roughness_floor": 185
     },
     "soil": {
-      "ao_floor": 232,
+      "ao_floor": 205,
       "recovery": "Pillow LOAD_TRUNCATED_IMAGES=true; complete 4096x4096 RGB decoded",
-      "roughness_floor": 210,
+      "roughness_floor": 185,
       "source": "Smudges01_4K.png",
       "source_sha256": "2fb6c8f6490fc3f77ebaebc23942f5ea9022d96ba9b778b09ea6e82db14ebbed",
       "tiling": "128px Lanczos sample mirrored in both axes into a seamless 256px tile"
     },
     "wood": {
-      "ao_floor": 228,
+      "ao_floor": 195,
       "archive": "wood_01_4k.zip",
       "archive_sha256": "96d07abedfe1fbab86cf0a8918108a42e8e868a73c3938d7373f694acda35e7c",
       "entries": {
@@ -150,8 +216,30 @@
           "sha256": "1d4753a115e92c11d065df6b8cbcb5b1cf1692a601304cc9e7c117b9264239f2"
         }
       },
-      "normal_strength": 0.27,
-      "roughness_floor": 205
+      "normal_generation": {
+        "method": "attenuated source normal",
+        "strength": 0.45
+      },
+      "normal_strength": 0.45,
+      "normal_validation": {
+        "advisors": {
+          "amplitude_max": [
+            0.24,
+            0.27
+          ],
+          "amplitude_mean": [
+            0.038,
+            0.05
+          ],
+          "length_error_max": 0.01,
+          "seam_max": 0.23
+        },
+        "amplitude_max": 0.255655,
+        "amplitude_mean": 0.042295,
+        "length_error_max": 0.004802,
+        "seam_max": 0.222115
+      },
+      "roughness_floor": 180
     }
   }
 }
