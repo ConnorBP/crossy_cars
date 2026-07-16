@@ -714,6 +714,28 @@ pub struct CarPlugin;
 /// movement, collision, or gameplay-state systems.
 pub struct CarReviewPlugin;
 
+/// Pond-review-only production car assembly. It installs only asynchronous
+/// visual binding/polish systems: no input, movement, collision or game state.
+pub struct PondReviewCarPlugin;
+
+impl Plugin for PondReviewCarPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<PlayerCarVisual>()
+            .init_resource::<ImportedCarPaint>()
+            .init_resource::<ToyShadingAssets>()
+            .add_systems(Startup, spawn_pond_review_cars)
+            .add_systems(
+                Update,
+                (
+                    apply_imported_car_paint_polish,
+                    bind_imported_scene_nodes,
+                    update_imported_car_ready,
+                )
+                    .chain(),
+            );
+    }
+}
+
 impl Plugin for CarReviewPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<PlayerCarVisual>()
@@ -1788,7 +1810,7 @@ fn spawn_car(
 ) {
     match *visual {
         PlayerCarVisual::ImportedConcept => {
-            build_imported_car(&mut commands, &asset_server, &toy_shading)
+            build_imported_car(&mut commands, &asset_server, &toy_shading);
         }
         PlayerCarVisual::LegacyProcedural => build_legacy_car(
             &mut commands,
@@ -1828,7 +1850,7 @@ fn build_imported_car(
     commands: &mut Commands,
     asset_server: &AssetServer,
     toy_shading: &ToyShadingAssets,
-) {
+) -> Entity {
     commands
         .spawn((
             Transform::from_xyz(0.0, 0.0, 0.0),
@@ -1860,7 +1882,31 @@ fn build_imported_car(
                     ImportedCarAnimationState::default(),
                 ));
             });
-        });
+        })
+        .id()
+}
+
+fn spawn_pond_review_cars(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    toy_shading: Res<ToyShadingAssets>,
+) {
+    // Stages are laid out left-to-right beside the corresponding review ponds.
+    // These use the same imported production hierarchy as the player car.
+    let stages = [
+        (Vec3::new(-12.0, 0.06, -4.8), std::f32::consts::PI, 0.0),
+        (Vec3::new(0.0, 0.06, 0.0), 0.3, 0.0),
+        (Vec3::new(11.0, 0.06, -0.8), -0.25, 0.52),
+        (Vec3::new(14.0, 0.06, 1.1), 0.2, 1.0),
+    ];
+    for (entry, heading, progress) in stages {
+        let entity = build_imported_car(&mut commands, &asset_server, &toy_shading);
+        commands
+            .entity(entity)
+            .insert(crate::drowned::drowned_car_transform(
+                entry, heading, progress,
+            ));
+    }
 }
 
 /// Complete retained procedural assembly, selected by

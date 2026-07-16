@@ -128,6 +128,30 @@ pub struct WorldReviewCameraPlugin;
 /// production world, UI, follow, shake or gameplay systems are installed.
 pub struct CarReviewCameraPlugin;
 
+/// Fixed isometric camera for the static pond review tableau.
+pub struct PondReviewCameraPlugin;
+
+impl Plugin for PondReviewCameraPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(Startup, spawn_pond_review_camera);
+    }
+}
+
+fn spawn_pond_review_camera(mut commands: Commands) {
+    let mut camera = commands.spawn((
+        Camera3d::default(),
+        Tonemapping::TonyMcMapface,
+        Projection::from(OrthographicProjection {
+            scaling_mode: ScalingMode::FixedVertical {
+                viewport_height: 26.0,
+            },
+            ..OrthographicProjection::default_3d()
+        }),
+        Transform::from_xyz(23.0, 25.0, 28.0).looking_at(Vec3::new(0.0, 0.0, 1.2), Vec3::Y),
+    ));
+    configure_platform_safe_camera(&mut camera);
+}
+
 impl Plugin for CarReviewCameraPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<CarReviewReadyDelay>()

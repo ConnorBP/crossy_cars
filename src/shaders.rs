@@ -280,18 +280,30 @@ impl WaterFamilyPreset {
     }
 }
 
+/// Review-only water motion choice. Production never inserts this resource.
+#[derive(Resource)]
+pub(crate) struct WaterReviewMotion {
+    pub(crate) reduced: bool,
+}
+
 /// Advance only the ripple phase every frame. `Assets::iter_mut` yields
 /// `(AssetId, &mut Asset)` pairs, so we discard the id.
 fn update_water(
     time: Res<Time>,
     settings: Option<Res<Settings>>,
+    review_motion: Option<Res<WaterReviewMotion>>,
     mut water_materials: ResMut<Assets<WaterMaterial>>,
 ) {
     // The review harness deliberately has no SettingsPlugin. Treat that mode
     // as reduced motion so captures remain pixel-stable at phase exactly zero.
-    let reduced_motion = settings
-        .as_ref()
-        .is_none_or(|settings| settings.reduced_motion);
+    let reduced_motion = review_motion.as_ref().map_or_else(
+        || {
+            settings
+                .as_ref()
+                .is_none_or(|settings| settings.reduced_motion)
+        },
+        |motion| motion.reduced,
+    );
     let phase = water_ripple_time(time.elapsed_secs(), reduced_motion);
     for (_, material) in water_materials.iter_mut() {
         set_water_phase(material, phase);

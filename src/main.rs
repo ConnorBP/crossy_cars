@@ -34,8 +34,10 @@ use bevy::asset::{AssetMetaCheck, AssetPlugin};
 use bevy::prelude::*;
 
 use audio::AudioPlugin;
-use camera::{CameraPlugin, CarReviewCameraPlugin, WorldReviewCameraPlugin};
-use car::{CarPlugin, CarReviewPlugin};
+use camera::{
+    CameraPlugin, CarReviewCameraPlugin, PondReviewCameraPlugin, WorldReviewCameraPlugin,
+};
+use car::{CarPlugin, CarReviewPlugin, PondReviewCarPlugin};
 use chickens::ChickensPlugin;
 use combos::CombosPlugin;
 use countdown::CountdownPlugin;
@@ -56,13 +58,13 @@ use readiness::ReadinessPlugin;
 use round_intro::RoundIntroPlugin;
 use run_events::RunEventsPlugin;
 use settings::SettingsPlugin;
-use shaders::{ShaderPlugin, WaterMaterialPlugin};
+use shaders::{ShaderPlugin, WaterMaterialPlugin, WaterReviewMotion};
 use textures::TexturesPlugin;
 use touch::TouchPlugin;
 use toy_shading::ToyShadingPlugin;
 use transparency::TransparencyPlugin;
 use ui::UiPlugin;
-use world::{WorldPlugin, WorldReviewPlugin};
+use world::{PondReviewPlugin, WorldPlugin, WorldReviewPlugin};
 
 /// Shared exact query/native-env flag parser. Review modes remain explicit;
 /// normal production startup is unchanged.
@@ -100,9 +102,45 @@ fn car_review_requested() -> bool {
     query_flag_requested("car_review", "ROADY_CAR_REVIEW")
 }
 
+/// Explicit opt-in only: URL `?pond_review=1` on WASM, or native
+/// `ROADY_POND_REVIEW=1`. Pond review takes precedence over broader reviews.
+fn pond_review_requested() -> bool {
+    query_flag_requested("pond_review", "ROADY_POND_REVIEW")
+}
+
+fn pond_review_reduced_motion() -> bool {
+    !query_flag_requested("pond_motion", "ROADY_POND_REVIEW_MOTION")
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StartupMode {
+    Production,
+    CarReview,
+    WorldReview,
+    PondReview,
+}
+
+fn startup_mode(pond: bool, world: bool, car: bool) -> StartupMode {
+    if pond {
+        StartupMode::PondReview
+    } else if world {
+        StartupMode::WorldReview
+    } else if car {
+        StartupMode::CarReview
+    } else {
+        StartupMode::Production
+    }
+}
+
 fn main() {
-    let world_review = world_review_requested();
-    let car_review = car_review_requested();
+    let mode = startup_mode(
+        pond_review_requested(),
+        world_review_requested(),
+        car_review_requested(),
+    );
+    let pond_review = mode == StartupMode::PondReview;
+    let world_review = mode == StartupMode::WorldReview;
+    let car_review = mode == StartupMode::CarReview;
     let mut app = App::new();
     let defaults = DefaultPlugins
         .set(AssetPlugin {
@@ -133,6 +171,27 @@ fn main() {
             brightness: 40.0,
             ..default()
         });
+
+    if pond_review {
+        // Static review-only tableau. Production gameplay, game state, score,
+        // persistence, UI, audio and network plugins are intentionally absent.
+        app.insert_resource(ClearColor(Color::srgb(0.36, 0.55, 0.68)))
+            // Default freezes water for repeatable captures; `pond_motion=1`
+            // (or ROADY_POND_REVIEW_MOTION=1) enables normal shader motion.
+            .insert_resource(WaterReviewMotion {
+                reduced: pond_review_reduced_motion(),
+            })
+            .add_plugins((WaterMaterialPlugin, ShaderPlugin))
+            .add_plugins((
+                TexturesPlugin,
+                ToyShadingPlugin,
+                PondReviewCarPlugin,
+                PondReviewCameraPlugin,
+                PondReviewPlugin,
+            ));
+        app.run();
+        return;
+    }
 
     if car_review {
         // Controlled visual-review harness: production car rendering only,
@@ -224,4 +283,17 @@ fn main() {
         // on native or when LEADERBOARD_API_URL is not set at build time.
         .add_plugins(LeaderboardPlugin)
         .run();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn review_flag_precedence_is_pond_then_world_then_car() {
+        assert_eq!(startup_mode(true, true, true), StartupMode::PondReview);
+        assert_eq!(startup_mode(false, true, true), StartupMode::WorldReview);
+        assert_eq!(startup_mode(false, false, true), StartupMode::CarReview);
+        assert_eq!(startup_mode(false, false, false), StartupMode::Production);
+    }
 }

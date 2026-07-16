@@ -19,7 +19,7 @@ const RIPPLE_DURATION: f32 = 0.8;
 const CAR_HALF_EXTENTS: Vec2 = Vec2::new(0.56, 1.0);
 
 #[derive(Resource)]
-struct DrownedPresentationAssets {
+pub(crate) struct DrownedPresentationAssets {
     ripple_mesh: Handle<Mesh>,
     ripple_material: Handle<StandardMaterial>,
     splash_mesh: Handle<Mesh>,
@@ -65,6 +65,7 @@ struct DrownedPresentation;
 
 #[derive(Component, Clone, Copy)]
 struct Ripple {
+    origin: Vec3,
     elapsed: f32,
     phase: f32,
     initial_scale: f32,
@@ -228,11 +229,7 @@ pub(crate) fn advance_drowning(
         car.speed = 0.0;
     }
     let progress = (drowning.elapsed / DROWN_DURATION).clamp(0.0, 1.0);
-    let eased = progress * progress * (3.0 - 2.0 * progress);
-    transform.translation.y = drowning.entry_position.y - DROWN_LOWER_DISTANCE * eased;
-    transform.rotation = Quat::from_rotation_y(car.heading)
-        * Quat::from_rotation_x(DROWN_TILT * eased)
-        * Quat::from_rotation_z(-DROWN_TILT * 0.55 * eased);
+    *transform = drowned_car_transform(drowning.entry_position, car.heading, progress);
 
     if drowning.elapsed >= DROWN_DURATION {
         car.speed = 0.0;
@@ -243,45 +240,86 @@ pub(crate) fn advance_drowning(
     }
 }
 
+/// The authoritative sink pose shared by gameplay and deterministic review.
+/// `progress` is linear time progress; presentation easing stays centralized
+/// here so staged evidence cannot drift from the real drowned sequence.
+pub(crate) fn drowned_car_transform(
+    entry_position: Vec3,
+    heading: f32,
+    progress: f32,
+) -> Transform {
+    let progress = progress.clamp(0.0, 1.0);
+    let eased = progress * progress * (3.0 - 2.0 * progress);
+    Transform {
+        translation: entry_position - Vec3::Y * (DROWN_LOWER_DISTANCE * eased),
+        rotation: Quat::from_rotation_y(heading)
+            * Quat::from_rotation_x(DROWN_TILT * eased)
+            * Quat::from_rotation_z(-DROWN_TILT * 0.55 * eased),
+        ..default()
+    }
+}
+
+fn ripple_transform(ripple: Ripple, height: f32) -> Transform {
+    let progress = ((ripple.elapsed - ripple.phase) / RIPPLE_DURATION).clamp(0.0, 1.0);
+    let scale = ripple.initial_scale + progress * ripple.growth;
+    Transform::from_translation(
+        ripple.origin + Vec3::Y * (height - ripple.elapsed.max(0.0) * ripple.sink_rate),
+    )
+    .with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2))
+    // Preserve the production animation's original scale axes exactly.
+    .with_scale(Vec3::new(scale, ripple.initial_scale, scale))
+}
+
+/// Spawn the real splash/ring presentation at a deterministic elapsed time.
+/// Gameplay passes zero and animates the components; pond review passes a
+/// fixed snapshot and deliberately installs no animation system.
+pub(crate) fn spawn_drowned_presentation_snapshot(
+    commands: &mut Commands,
+    assets: &DrownedPresentationAssets,
+    position: Vec3,
+    elapsed: f32,
+) {
+    for (phase, scale) in [(0.0, 1.0), (0.16, 0.72)] {
+        let ripple = Ripple {
+            origin: position,
+            elapsed,
+            phase,
+            initial_scale: scale,
+            growth: 2.1,
+            sink_rate: 0.008,
+        };
+        commands.spawn((
+            Mesh3d(assets.ripple_mesh.clone()),
+            MeshMaterial3d(assets.ripple_material.clone()),
+            ripple_transform(ripple, 0.085),
+            ripple,
+            DrownedPresentation,
+        ));
+    }
+    let splash = Ripple {
+        origin: position,
+        elapsed,
+        phase: 0.08,
+        initial_scale: 1.8,
+        growth: 0.65,
+        sink_rate: 0.012,
+    };
+    commands.spawn((
+        Mesh3d(assets.splash_mesh.clone()),
+        MeshMaterial3d(assets.splash_material.clone()),
+        ripple_transform(splash, 0.10),
+        splash,
+        DrownedPresentation,
+    ));
+}
+
 fn spawn_drowned_presentation(
     mut commands: Commands,
     mut events: MessageReader<PondEntered>,
     assets: Res<DrownedPresentationAssets>,
 ) {
     for event in events.read() {
-        let flat = Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2);
-        for (phase, scale) in [(0.0, 1.0), (0.16, 0.72)] {
-            commands.spawn((
-                Mesh3d(assets.ripple_mesh.clone()),
-                MeshMaterial3d(assets.ripple_material.clone()),
-                Transform::from_translation(event.position + Vec3::Y * 0.085)
-                    .with_rotation(flat)
-                    .with_scale(Vec3::splat(scale)),
-                Ripple {
-                    elapsed: 0.0,
-                    phase,
-                    initial_scale: scale,
-                    growth: 2.1,
-                    sink_rate: 0.008,
-                },
-                DrownedPresentation,
-            ));
-        }
-        commands.spawn((
-            Mesh3d(assets.splash_mesh.clone()),
-            MeshMaterial3d(assets.splash_material.clone()),
-            Transform::from_translation(event.position + Vec3::Y * 0.10)
-                .with_rotation(flat)
-                .with_scale(Vec3::splat(1.8)),
-            Ripple {
-                elapsed: 0.0,
-                phase: 0.08,
-                initial_scale: 1.8,
-                growth: 0.65,
-                sink_rate: 0.012,
-            },
-            DrownedPresentation,
-        ));
+        spawn_drowned_presentation_snapshot(&mut commands, &assets, event.position, 0.0);
     }
 }
 
@@ -293,11 +331,14 @@ fn animate_drowned_presentation(
     let dt = time.delta_secs().max(0.0);
     for (entity, mut transform, mut ripple) in &mut ripples {
         ripple.elapsed += dt;
-        let progress = ((ripple.elapsed - ripple.phase) / RIPPLE_DURATION).clamp(0.0, 1.0);
-        let scale = ripple.initial_scale + progress * ripple.growth;
-        transform.scale.x = scale;
-        transform.scale.z = scale;
-        transform.translation.y -= dt * ripple.sink_rate;
+        *transform = ripple_transform(
+            *ripple,
+            if ripple.initial_scale > 1.0 {
+                0.10
+            } else {
+                0.085
+            },
+        );
         if ripple.elapsed >= RIPPLE_DURATION + ripple.phase {
             commands.entity(entity).despawn();
         }

@@ -2050,6 +2050,19 @@ enum ReviewTileSource {
 /// placement, and reporting differ from the streaming game world.
 pub struct WorldReviewPlugin;
 
+/// Small static pond review scene using the production pond geometry,
+/// materials and deterministic shoreline layout only.
+pub struct PondReviewPlugin;
+
+impl Plugin for PondReviewPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<WorldAssets>()
+            .init_resource::<crate::drowned::DrownedPresentationAssets>()
+            .add_systems(Startup, spawn_pond_review_scene)
+            .add_systems(Update, publish_pond_review_metadata);
+    }
+}
+
 impl Plugin for WorldReviewPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(WorldReviewMode)
@@ -4478,6 +4491,109 @@ fn spawn_static_cast_shadow(
         kind,
         ToyCastShadow,
     ));
+}
+
+fn spawn_pond_review_scene(
+    mut commands: Commands,
+    assets: Res<WorldAssets>,
+    toy_shading: Res<ToyShadingAssets>,
+    drowned_assets: Res<crate::drowned::DrownedPresentationAssets>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    let ground = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.23, 0.38, 0.20),
+        perceptual_roughness: 0.95,
+        ..default()
+    });
+    commands.spawn((
+        Mesh3d(meshes.add(Plane3d::default().mesh().size(44.0, 24.0))),
+        MeshMaterial3d(ground),
+        Transform::from_xyz(0.0, -0.01, 0.0),
+    ));
+    commands.spawn((
+        DirectionalLight {
+            color: Color::srgb(1.0, 0.94, 0.84),
+            illuminance: 11_000.0,
+            shadow_maps_enabled: false,
+            ..default()
+        },
+        Transform::from_xyz(-12.0, 20.0, -16.0).looking_at(Vec3::ZERO, Vec3::Y),
+    ));
+
+    let families = [
+        DistrictFamily::WaterGardenOval,
+        DistrictFamily::WaterReedMarsh,
+        DistrictFamily::WaterFarmReservoir,
+    ];
+    for (index, family) in families.into_iter().enumerate() {
+        let center = Vec2::new((index as f32 - 1.0) * 12.0, 0.0);
+        let (radii, rotation) = pond_family_shape(family, 0x50ad_0000 + index as u32)
+            .expect("review contains only pond families");
+        let footprint = PondFootprint {
+            family: PondFamily::from_district_family(family).unwrap(),
+            center,
+            radii,
+            rotation,
+        };
+        let root = commands
+            .spawn((Transform::IDENTITY, Visibility::default()))
+            .id();
+        commands.entity(root).with_children(|parent| {
+            spawn_pond(
+                parent,
+                family,
+                footprint,
+                0x50ad_1000 + index as u32,
+                &assets,
+                &toy_shading.contact_plane,
+                &toy_shading.contact_material,
+            );
+        });
+    }
+
+    // Snapshot the real presentation during the splash stage. The remaining
+    // car roots show pre-entry, mid-sink and fully sunk transforms.
+    crate::drowned::spawn_drowned_presentation_snapshot(
+        &mut commands,
+        &drowned_assets,
+        Vec3::new(0.0, 0.06, 0.0),
+        0.28,
+    );
+}
+
+fn publish_pond_review_metadata(
+    motion: Res<crate::shaders::WaterReviewMotion>,
+    imported_cars: Query<(), With<crate::car::ImportedCarReady>>,
+    mut published: Local<bool>,
+) {
+    if *published || imported_cars.iter().count() != 4 {
+        return;
+    }
+    let motion_name = if motion.reduced { "reduced" } else { "normal" };
+    let json = format!(
+        r#"{{"schema":"roady-pond-review-v1","ready":true,"motion":"{motion_name}","materials":["GardenOval","ReedMarsh","FarmReservoir"],"stages":["pre-entry","splash-rings","mid-sink","sunk"]}}"#
+    );
+    #[cfg(target_arch = "wasm32")]
+    if let Some(window) = web_sys::window() {
+        let _ = js_sys::Reflect::set(
+            window.as_ref(),
+            &"__ROADY_POND_REVIEW__".into(),
+            &json.clone().into(),
+        );
+        if let Some(root) = window
+            .document()
+            .and_then(|document| document.document_element())
+        {
+            let _ = root.set_attribute("data-roady-pond-review-ready", "true");
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        println!("ROADY_POND_REVIEW_JSON={json}");
+        println!("ROADY_POND_REVIEW_READY=1");
+    }
+    *published = true;
 }
 
 fn spawn_pond(
@@ -8092,6 +8208,25 @@ mod tests {
             query.iter(world).count()
         };
         assert_eq!(review_tiles, 0);
+    }
+
+    #[test]
+    fn pond_review_plugin_installs_no_gameplay_or_world_streaming_resources() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()));
+        app.init_resource::<Assets<Mesh>>()
+            .init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<Assets<WaterMaterial>>();
+        app.add_plugins(PondReviewPlugin);
+
+        assert!(!app.world().contains_resource::<GridConfig>());
+        assert!(!app.world().contains_resource::<RoundActive>());
+        assert!(
+            !app.world()
+                .contains_resource::<crate::game::resources::Drowning>()
+        );
+        assert!(!app.world().contains_resource::<State<GameState>>());
+        assert!(!app.world().contains_resource::<WorldReviewMode>());
     }
 
     #[test]
