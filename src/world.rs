@@ -1723,6 +1723,78 @@ const PRODUCTION_SUN_SOURCE: Vec3 = Vec3::new(30.0, 25.0, 15.0);
 const BUILDING_CONTACT_FOOTPRINT_SCALE: f32 = 1.35;
 const MAX_HOME_DECOR: usize = 9;
 
+const PICKET_FENCE_WIDTH: f32 = 4.0;
+const PICKET_FENCE_DEPTH: f32 = 0.12;
+const PICKET_FENCE_HEIGHT: f32 = 0.90;
+const PICKET_COUNT: usize = 7;
+const PICKET_SPACING: f32 = 0.45;
+
+#[derive(Clone, Copy)]
+struct PicketFencePart {
+    center: Vec3,
+    size: Vec3,
+}
+
+/// Authored solid pieces for one four-metre panel. Pickets sit in front of
+/// two rails and leave broad openings between them; the two progressively
+/// narrower top blocks give each picket a cheap stepped point.
+fn picket_fence_parts() -> Vec<PicketFencePart> {
+    let mut parts = Vec::with_capacity(2 + 2 + PICKET_COUNT * 3);
+    for center_y in [0.29, 0.58] {
+        parts.push(PicketFencePart {
+            // Recess the rails behind the pickets so overlapping cuboid faces
+            // do not z-fight while the complete panel stays 0.12 m deep.
+            center: Vec3::new(0.0, center_y, PICKET_FENCE_DEPTH * 5.0 / 24.0),
+            size: Vec3::new(
+                PICKET_FENCE_WIDTH - 0.2,
+                0.10,
+                PICKET_FENCE_DEPTH * 7.0 / 12.0,
+            ),
+        });
+    }
+    for center_x in [
+        -PICKET_FENCE_WIDTH * 0.5 + 0.1,
+        PICKET_FENCE_WIDTH * 0.5 - 0.1,
+    ] {
+        parts.push(PicketFencePart {
+            center: Vec3::new(
+                center_x,
+                PICKET_FENCE_HEIGHT * 0.5,
+                -PICKET_FENCE_DEPTH * 5.0 / 24.0,
+            ),
+            size: Vec3::new(0.20, PICKET_FENCE_HEIGHT, PICKET_FENCE_DEPTH * 7.0 / 12.0),
+        });
+    }
+    for index in 0..PICKET_COUNT {
+        let center_x = (index as f32 - (PICKET_COUNT - 1) as f32 * 0.5) * PICKET_SPACING;
+        for (center_y, width, height) in
+            [(0.335, 0.16, 0.67), (0.72, 0.12, 0.10), (0.835, 0.07, 0.13)]
+        {
+            parts.push(PicketFencePart {
+                center: Vec3::new(center_x, center_y, -PICKET_FENCE_DEPTH * 5.0 / 24.0),
+                size: Vec3::new(width, height, PICKET_FENCE_DEPTH * 7.0 / 12.0),
+            });
+        }
+    }
+    parts
+}
+
+/// One merged low-poly panel mesh, created only while [`WorldAssets`] is
+/// initialized. Streamed and review fences clone its cached handle.
+fn picket_fence_mesh() -> Mesh {
+    let mut parts = picket_fence_parts().into_iter();
+    let first = parts.next().expect("picket fence has authored parts");
+    let mut mesh = Mesh::from(Cuboid::new(first.size.x, first.size.y, first.size.z))
+        .transformed_by(Transform::from_translation(first.center));
+    for part in parts {
+        let piece = Mesh::from(Cuboid::new(part.size.x, part.size.y, part.size.z))
+            .transformed_by(Transform::from_translation(part.center));
+        mesh.merge(&piece)
+            .expect("picket fence cuboids have compatible mesh layouts");
+    }
+    mesh
+}
+
 /// Deterministic visual-only tree yaw. This hashes the layout identity and
 /// never advances the placement LCG.
 fn tree_visual_yaw(seed: u32, ordinal: usize) -> f32 {
@@ -1750,6 +1822,7 @@ fn hay_bale_visual_scale(seed: u32, ordinal: usize) -> f32 {
 struct WorldMeshAssets {
     ground: Handle<Mesh>,
     unit_box: Handle<Mesh>,
+    picket_fence: Handle<Mesh>,
     field_furrow: Handle<Mesh>,
     hay_bale: Handle<Mesh>,
     hay_sprig: Handle<Mesh>,
@@ -1802,6 +1875,7 @@ impl FromWorld for WorldAssets {
             // Streaming and respawning therefore never append building,
             // window, path, parking, or podium meshes to Assets<Mesh>.
             unit_box: a.add(Cuboid::new(1.0, 1.0, 1.0)),
+            picket_fence: a.add(picket_fence_mesh()),
             // Countryside geometry is procedural but created once and cached;
             // recycled blocks only clone these lightweight handles.
             field_furrow: a.add(Cuboid::new(36.0, 0.025, 0.16)),
@@ -3418,6 +3492,7 @@ pub fn populate_block(
         // --- Shared obstacle assets ---
         let a = world_assets;
         let unit_box_mesh = a.meshes.unit_box.clone();
+        let picket_fence_mesh = a.meshes.picket_fence.clone();
         let coin_mesh = a.meshes.coin.clone();
         let coin_mat = a.materials.coin.clone();
         let cone_body_mesh = a.meshes.cone_body.clone();
@@ -4041,7 +4116,7 @@ pub fn populate_block(
                     &placed,
                     layout_seed,
                     sock,
-                    &unit_box_mesh,
+                    &picket_fence_mesh,
                     &farm_wood_mat,
                     &scene_assets.mailbox,
                     &contact_plane,
@@ -4319,7 +4394,7 @@ fn spawn_home_decor(
     placed: &[[f32; 4]],
     seed: u32,
     sock: [Edge; 4],
-    mesh: &Handle<Mesh>,
+    picket_fence_mesh: &Handle<Mesh>,
     wood: &Handle<StandardMaterial>,
     mailbox_scene: &Handle<WorldAsset>,
     contact_plane: &Handle<Mesh>,
@@ -4364,11 +4439,9 @@ fn spawn_home_decor(
                 ))
                 .with_children(|fence| {
                     fence.spawn((
-                        Mesh3d(mesh.clone()),
+                        Mesh3d(picket_fence_mesh.clone()),
                         MeshMaterial3d(wood.clone()),
-                        Transform::from_xyz(0.0, 0.45, 0.0)
-                            .with_rotation(Quat::from_rotation_y(decor.rotation))
-                            .with_scale(Vec3::new(4.0, 0.9, 0.12)),
+                        Transform::from_rotation(Quat::from_rotation_y(decor.rotation)),
                     ));
                     fence.spawn((
                         Mesh3d(contact_plane.clone()),
@@ -6342,6 +6415,75 @@ mod tests {
         }
         assert_eq!(actual, expected);
         assert_eq!(rand(&mut actual), rand(&mut expected));
+    }
+
+    #[test]
+    fn picket_fence_geometry_has_real_open_gaps() {
+        let parts = picket_fence_parts();
+        let contains = |point: Vec3| {
+            parts.iter().any(|part| {
+                let half = part.size * 0.5;
+                let delta = (point - part.center).abs();
+                delta.x <= half.x && delta.y <= half.y && delta.z <= half.z
+            })
+        };
+
+        // Halfway between adjacent pickets and between the rails is open;
+        // the equivalent point in the old scaled cuboid was solid.
+        assert!(!contains(Vec3::new(PICKET_SPACING * 0.5, 0.45, 0.0)));
+        assert!(contains(Vec3::new(0.0, 0.45, 0.0)));
+        assert!(contains(Vec3::new(PICKET_SPACING * 0.5, 0.58, 0.0)));
+
+        let mesh = picket_fence_mesh();
+        let positions = mesh.attribute(Mesh::ATTRIBUTE_POSITION).unwrap();
+        let bevy::mesh::VertexAttributeValues::Float32x3(positions) = positions else {
+            panic!("picket fence positions must be Float32x3");
+        };
+        assert!(positions.len() > 24, "panel must be more than one cuboid");
+        assert!(
+            positions
+                .iter()
+                .all(|position| position[0].abs() <= PICKET_FENCE_WIDTH * 0.5 + 1e-6)
+        );
+        assert!(
+            positions
+                .iter()
+                .all(|position| position[1] >= -1e-6 && position[1] <= PICKET_FENCE_HEIGHT + 1e-6)
+        );
+    }
+
+    #[test]
+    fn streamed_picket_fences_reuse_cached_mesh_handle_and_collider() {
+        let mut app = review_test_app();
+        let cached_mesh = app
+            .world()
+            .resource::<WorldAssets>()
+            .meshes
+            .picket_fence
+            .id();
+        let world = app.world_mut();
+        let mut fence_roots = world.query_filtered::<(Entity, &Collider), With<PicketFencePanel>>();
+        let fences: BTreeMap<_, _> = fence_roots
+            .iter(world)
+            .map(|(entity, collider)| (entity, Vec2::new(collider.half_x, collider.half_z)))
+            .collect();
+        assert!(fences.len() > 1);
+        assert!(
+            fences
+                .values()
+                .all(|half| { *half == Vec2::new(2.0, 0.12) || *half == Vec2::new(0.12, 2.0) })
+        );
+
+        let mut visuals_per_fence = BTreeMap::<Entity, usize>::new();
+        let mut visuals = world.query::<(&Mesh3d, &ChildOf)>();
+        for (mesh, child_of) in visuals.iter(world) {
+            if mesh.0.id() == cached_mesh {
+                assert!(fences.contains_key(&child_of.parent()));
+                *visuals_per_fence.entry(child_of.parent()).or_default() += 1;
+            }
+        }
+        assert_eq!(visuals_per_fence.len(), fences.len());
+        assert!(visuals_per_fence.values().all(|count| *count == 1));
     }
 
     #[test]
