@@ -170,14 +170,19 @@ pub struct Bench;
 #[derive(Component)]
 pub struct Hedge;
 
-/// Visual-only pond surface, shoreline and dressing markers. None of these
-/// entities carries `Collider`, `Curb`, or gameplay event/message components.
+/// Pond surface and shoreline markers. The water owns the authoritative
+/// [`PondFootprint`]; water, shore, and reeds are deliberately non-solid.
+/// Shoreline rocks are ordinary individual `Collider` obstacles.
 #[derive(Component)]
 struct Pond;
 #[derive(Component)]
 struct PondShore;
 #[derive(Component)]
 struct PondProp;
+#[derive(Component)]
+struct PondReed;
+#[derive(Component)]
+struct PondRock;
 
 #[derive(Component)]
 struct TreeShadow;
@@ -2886,15 +2891,238 @@ const POND_ROAD_CLEARANCE: f32 = 0.65;
 const POND_BLOCK_CLEARANCE: f32 = 0.5;
 const POND_DECOR_CLEARANCE: f32 = 1.0;
 const MAX_POND_PROPS: usize = 10;
+const POND_ROCK_HALF_EXTENTS: Vec2 = Vec2::new(0.45, 0.36);
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct PondFootprint {
-    center: Vec2,
-    radii: Vec2,
-    rotation: f32,
+/// Stable gameplay family stored with the generated water geometry. Keeping
+/// this separate from `DistrictFamily` prevents a future hazard system from
+/// having to infer water identity from district presentation metadata.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PondFamily {
+    GardenOval,
+    ReedMarsh,
+    FarmReservoir,
 }
 
+impl PondFamily {
+    fn from_district_family(family: DistrictFamily) -> Option<Self> {
+        Some(match family {
+            DistrictFamily::WaterGardenOval => Self::GardenOval,
+            DistrictFamily::WaterReedMarsh => Self::ReedMarsh,
+            DistrictFamily::WaterFarmReservoir => Self::FarmReservoir,
+            _ => return None,
+        })
+    }
+}
+
+/// Exact generated water ellipse in block-local XZ coordinates.
+///
+/// The component is persisted on the water entity. Streamed block roots have
+/// translation only, so world helpers take that translation explicitly and
+/// remain pure (there is no dependency on transform propagation timing).
+#[derive(Component, Clone, Copy, Debug, PartialEq)]
+pub(crate) struct PondFootprint {
+    pub(crate) family: PondFamily,
+    pub(crate) center: Vec2,
+    pub(crate) radii: Vec2,
+    pub(crate) rotation: f32,
+}
+
+// Geometry is intentionally exposed now as foundation for the later hazard
+// system; production gameplay does not consume it until that follow-up.
+#[allow(dead_code)]
 impl PondFootprint {
+    fn ellipse_local_point(self, block_local_point: Vec2) -> Vec2 {
+        let delta = block_local_point - self.center;
+        let (sin, cos) = self.rotation.sin_cos();
+        Vec2::new(
+            cos * delta.x + sin * delta.y,
+            -sin * delta.x + cos * delta.y,
+        )
+    }
+
+    fn normalized_point(self, block_local_point: Vec2) -> Option<Vec2> {
+        if !block_local_point.is_finite()
+            || !self.center.is_finite()
+            || !self.radii.is_finite()
+            || !self.rotation.is_finite()
+            || self.radii.x <= 0.0
+            || self.radii.y <= 0.0
+        {
+            return None;
+        }
+        Some(self.ellipse_local_point(block_local_point) / self.radii)
+    }
+
+    /// Strict water containment in block-local coordinates. Exact boundary
+    /// tangency is not containment, matching solid-contact tangency semantics
+    /// and preventing a car merely grazing a shoreline from counting as entry.
+    pub(crate) fn contains_local_point(self, block_local_point: Vec2) -> bool {
+        self.normalized_point(block_local_point)
+            .is_some_and(|point| point.length_squared() < 1.0)
+    }
+
+    /// Strict water containment in world XZ coordinates. `block_world_origin`
+    /// is the XZ translation of the owning streamed block root.
+    pub(crate) fn contains_world_point(self, block_world_origin: Vec2, world_point: Vec2) -> bool {
+        block_world_origin.is_finite()
+            && world_point.is_finite()
+            && self.contains_local_point(world_point - block_world_origin)
+    }
+
+    /// Earliest segment parameter whose point enters the strict ellipse, in
+    /// block-local coordinates. Returns `Some(0)` when starting in (or exactly
+    /// on the boundary while travelling into) water. A tangent-only touch and
+    /// an outside-to-boundary endpoint return `None`.
+    pub(crate) fn swept_local_entry(self, start: Vec2, end: Vec2) -> Option<f32> {
+        self.swept_local_entry_with_scale(start, end, 1.0)
+    }
+
+    /// World-coordinate counterpart to [`Self::swept_local_entry`]. Analytic
+    /// segment/ellipse intersection catches arbitrarily high-speed crossings.
+    pub(crate) fn swept_world_entry(
+        self,
+        block_world_origin: Vec2,
+        start: Vec2,
+        end: Vec2,
+    ) -> Option<f32> {
+        if !block_world_origin.is_finite() {
+            return None;
+        }
+        self.swept_local_entry(start - block_world_origin, end - block_world_origin)
+    }
+
+    /// Conservative swept entry for an oriented rectangular car footprint.
+    /// Every car corner is measured in normalized ellipse space; the maximum
+    /// corner radius expands the unit ellipse via the triangle inequality.
+    /// Thus this can warn early, but cannot miss a true footprint overlap.
+    pub(crate) fn swept_world_car_entry(
+        self,
+        block_world_origin: Vec2,
+        start: Vec2,
+        end: Vec2,
+        car_heading: f32,
+        car_half_extents: Vec2,
+    ) -> Option<f32> {
+        if !block_world_origin.is_finite() {
+            return None;
+        }
+        self.swept_local_car_entry(
+            start - block_world_origin,
+            end - block_world_origin,
+            car_heading,
+            car_half_extents,
+        )
+    }
+
+    /// Block-local conservative car-footprint segment entry.
+    pub(crate) fn swept_local_car_entry(
+        self,
+        start: Vec2,
+        end: Vec2,
+        car_heading: f32,
+        car_half_extents: Vec2,
+    ) -> Option<f32> {
+        let radius = 1.0 + self.normalized_car_radius(car_heading, car_half_extents)?;
+        self.swept_local_entry_with_scale(start, end, radius)
+    }
+
+    /// Conservative current overlap counterpart to
+    /// [`Self::swept_world_car_entry`]. Boundary-only tangency is outside.
+    pub(crate) fn contains_world_car(
+        self,
+        block_world_origin: Vec2,
+        car_center: Vec2,
+        car_heading: f32,
+        car_half_extents: Vec2,
+    ) -> bool {
+        block_world_origin.is_finite()
+            && self.contains_local_car(
+                car_center - block_world_origin,
+                car_heading,
+                car_half_extents,
+            )
+    }
+
+    /// Block-local conservative car-footprint containment.
+    pub(crate) fn contains_local_car(
+        self,
+        car_center: Vec2,
+        car_heading: f32,
+        car_half_extents: Vec2,
+    ) -> bool {
+        let Some(car_radius) = self.normalized_car_radius(car_heading, car_half_extents) else {
+            return false;
+        };
+        self.normalized_point(car_center)
+            .is_some_and(|point| point.length_squared() < (1.0 + car_radius).powi(2))
+    }
+
+    fn normalized_car_radius(self, car_heading: f32, car_half_extents: Vec2) -> Option<f32> {
+        // Also validates all footprint fields before division below.
+        self.normalized_point(self.center)?;
+        if !car_heading.is_finite()
+            || !car_half_extents.is_finite()
+            || car_half_extents.cmplt(Vec2::ZERO).any()
+        {
+            return None;
+        }
+        let side = Vec2::new(car_heading.cos(), -car_heading.sin());
+        let forward = Vec2::new(-car_heading.sin(), -car_heading.cos());
+        let (sin, cos) = self.rotation.sin_cos();
+        let mut radius = 0.0_f32;
+        for side_sign in [-1.0, 1.0] {
+            for forward_sign in [-1.0, 1.0] {
+                let corner = side * (side_sign * car_half_extents.x)
+                    + forward * (forward_sign * car_half_extents.y);
+                let ellipse_local = Vec2::new(
+                    cos * corner.x + sin * corner.y,
+                    -sin * corner.x + cos * corner.y,
+                );
+                radius = radius.max((ellipse_local / self.radii).length());
+            }
+        }
+        Some(radius)
+    }
+
+    fn swept_local_entry_with_scale(self, start: Vec2, end: Vec2, radius: f32) -> Option<f32> {
+        let start = self.normalized_point(start)?;
+        let end = self.normalized_point(end)?;
+        if !radius.is_finite() || radius <= 0.0 {
+            return None;
+        }
+
+        // Use f64 for stable discriminants at rotated tangency while keeping
+        // the public geometry in Bevy's native f32 coordinate type.
+        let px = f64::from(start.x);
+        let py = f64::from(start.y);
+        let dx = f64::from(end.x - start.x);
+        let dy = f64::from(end.y - start.y);
+        let radius_sq = f64::from(radius) * f64::from(radius);
+        let c = px * px + py * py - radius_sq;
+        if c < 0.0 {
+            return Some(0.0);
+        }
+        let a = dx * dx + dy * dy;
+        if a == 0.0 {
+            return None;
+        }
+        let b = 2.0 * (px * dx + py * dy);
+        let discriminant = b * b - 4.0 * a * c;
+        // Inputs originate as f32, so classify f32-scale discriminant noise
+        // as tangency rather than using an unrealistically tiny f64 epsilon.
+        let roundoff = f64::from(f32::EPSILON) * 64.0 * (b * b + (4.0 * a * c).abs() + 1.0);
+        if discriminant <= roundoff {
+            return None;
+        }
+        let root = discriminant.sqrt();
+        let enter = (-b - root) / (2.0 * a);
+        let exit = (-b + root) / (2.0 * a);
+        let interval_start = enter.max(0.0);
+        let interval_end = exit.min(1.0);
+        (interval_start < interval_end && interval_end > 0.0 && interval_start < 1.0)
+            .then_some(interval_start as f32)
+    }
+
     /// Conservative block-local AABB including the visible shoreline. The
     /// absolute rotation matrix contains the entire rotated ellipse/shore.
     fn shore_aabb_half_extents(self) -> Vec2 {
@@ -2961,6 +3189,8 @@ fn pond_layout(
         (district_hash(seed as i32, family as i32, 0x701d_c0de) as usize) % CANDIDATES.len();
     for offset in 0..CANDIDATES.len() {
         let footprint = PondFootprint {
+            family: PondFamily::from_district_family(family)
+                .expect("pond shape only exists for a pond family"),
             center: CANDIDATES[(start + offset) % CANDIDATES.len()],
             radii,
             rotation,
@@ -4195,6 +4425,7 @@ fn spawn_pond(
             .with_rotation(rotation * flat)
             .with_scale(Vec3::new(footprint.radii.x, footprint.radii.y, 1.0)),
         Pond,
+        footprint,
     ));
 
     let (props, count) = pond_prop_layout(family, footprint, seed);
@@ -4207,6 +4438,7 @@ fn spawn_pond(
                             .with_rotation(Quat::from_rotation_y(prop.rotation)),
                         Visibility::default(),
                         PondProp,
+                        PondReed,
                     ))
                     .with_children(|reed| {
                         reed.spawn((
@@ -4223,12 +4455,22 @@ fn spawn_pond(
                     });
             }
             PondPropKind::Rock => {
+                let (sin, cos) = prop.rotation.sin_cos();
+                let collider_half = Vec2::new(
+                    cos.abs() * POND_ROCK_HALF_EXTENTS.x + sin.abs() * POND_ROCK_HALF_EXTENTS.y,
+                    sin.abs() * POND_ROCK_HALF_EXTENTS.x + cos.abs() * POND_ROCK_HALF_EXTENTS.y,
+                );
                 parent
                     .spawn((
                         Transform::from_xyz(prop.position.x, 0.0, prop.position.y)
                             .with_rotation(Quat::from_rotation_y(prop.rotation)),
                         Visibility::default(),
                         PondProp,
+                        PondRock,
+                        Collider {
+                            half_x: collider_half.x,
+                            half_z: collider_half.y,
+                        },
                     ))
                     .with_children(|rock| {
                         rock.spawn((
@@ -6119,6 +6361,7 @@ mod tests {
             let (_, prop_count) = pond_prop_layout(
                 family,
                 PondFootprint {
+                    family: PondFamily::from_district_family(family).unwrap(),
                     center: Vec2::ZERO,
                     radii: shape,
                     rotation,
@@ -6129,6 +6372,96 @@ mod tests {
         })
         .collect();
         assert_eq!(pond_signatures.len(), 3);
+    }
+
+    fn test_pond_footprint() -> PondFootprint {
+        PondFootprint {
+            family: PondFamily::GardenOval,
+            center: Vec2::new(3.0, -2.0),
+            radii: Vec2::new(5.0, 2.0),
+            rotation: 0.63,
+        }
+    }
+
+    fn ellipse_world_point(pond: PondFootprint, local_normalized: Vec2) -> Vec2 {
+        let scaled = local_normalized * pond.radii;
+        let (sin, cos) = pond.rotation.sin_cos();
+        pond.center
+            + Vec2::new(
+                cos * scaled.x - sin * scaled.y,
+                sin * scaled.x + cos * scaled.y,
+            )
+    }
+
+    #[test]
+    fn rotated_pond_containment_is_strict_and_world_translation_agrees() {
+        let pond = test_pond_footprint();
+        let inside = ellipse_world_point(pond, Vec2::new(0.35, -0.4));
+        let boundary = ellipse_world_point(pond, Vec2::X);
+        let outside = ellipse_world_point(pond, Vec2::new(1.0001, 0.0));
+        assert!(pond.contains_local_point(inside));
+        assert!(!pond.contains_local_point(boundary), "tangency is outside");
+        assert!(!pond.contains_local_point(outside));
+
+        let block_origin = Vec2::new(120.0, -80.0);
+        assert!(pond.contains_world_point(block_origin, block_origin + inside));
+        assert!(!pond.contains_world_point(block_origin, block_origin + boundary));
+        assert!(!pond.contains_world_point(block_origin, block_origin + outside));
+    }
+
+    #[test]
+    fn pond_sweep_handles_inside_outside_tangency_and_high_speed_entry() {
+        let pond = test_pond_footprint();
+        let left = ellipse_world_point(pond, Vec2::new(-4.0, 0.0));
+        let right = ellipse_world_point(pond, Vec2::new(4.0, 0.0));
+        let entry = pond.swept_local_entry(left, right).unwrap();
+        assert!((entry - 0.375).abs() < 1e-5, "analytic high-speed entry");
+        assert_eq!(pond.swept_local_entry(pond.center, right), Some(0.0));
+
+        let tangent_start = ellipse_world_point(pond, Vec2::new(-2.0, 1.0));
+        let tangent_end = ellipse_world_point(pond, Vec2::new(2.0, 1.0));
+        assert_eq!(pond.swept_local_entry(tangent_start, tangent_end), None);
+        let boundary_end = ellipse_world_point(pond, Vec2::X);
+        assert_eq!(pond.swept_local_entry(right, boundary_end), None);
+
+        let world_origin = Vec2::new(-400.0, 900.0);
+        let world_entry = pond
+            .swept_world_entry(world_origin, world_origin + left, world_origin + right)
+            .unwrap();
+        assert!((world_entry - entry).abs() < 1e-5);
+    }
+
+    #[test]
+    fn swept_car_footprint_is_conservative_and_preserves_tangency_semantics() {
+        let pond = test_pond_footprint();
+        let origin = Vec2::new(20.0, 30.0);
+        let half = Vec2::new(0.56, 1.0);
+        let center_entry = pond
+            .swept_world_entry(
+                origin,
+                origin + ellipse_world_point(pond, Vec2::new(-3.0, 0.0)),
+                origin + ellipse_world_point(pond, Vec2::new(3.0, 0.0)),
+            )
+            .unwrap();
+        let car_entry = pond
+            .swept_world_car_entry(
+                origin,
+                origin + ellipse_world_point(pond, Vec2::new(-3.0, 0.0)),
+                origin + ellipse_world_point(pond, Vec2::new(3.0, 0.0)),
+                0.41,
+                half,
+            )
+            .unwrap();
+        assert!(car_entry < center_entry);
+        assert!(pond.contains_world_car(origin, origin + pond.center, 0.41, half));
+
+        let radius = pond.normalized_car_radius(0.41, half).unwrap();
+        let tangent_start = origin + ellipse_world_point(pond, Vec2::new(-3.0, 1.0 + radius));
+        let tangent_end = origin + ellipse_world_point(pond, Vec2::new(3.0, 1.0 + radius));
+        assert_eq!(
+            pond.swept_world_car_entry(origin, tangent_start, tangent_end, 0.41, half),
+            None
+        );
     }
 
     #[test]
@@ -6152,6 +6485,21 @@ mod tests {
                         half,
                         POND_ROAD_CLEARANCE
                     ));
+                    let (props, count) = pond_prop_layout(family, pond, 0x1234_5678);
+                    assert_eq!(
+                        (props, count),
+                        pond_prop_layout(family, pond, 0x1234_5678),
+                        "shoreline layout must recycle deterministically"
+                    );
+                    for prop in props.into_iter().take(count) {
+                        let prop_half = if prop.kind == PondPropKind::Rock {
+                            Vec2::splat(POND_ROCK_HALF_EXTENTS.max_element())
+                        } else {
+                            Vec2::splat(0.05)
+                        };
+                        assert!(prop.position.x.abs() + prop_half.x <= 20.0);
+                        assert!(prop.position.y.abs() + prop_half.y <= 20.0);
+                    }
                     // The conservative AABB contains sampled points on the
                     // rotated outer ellipse, including non-axis-aligned yaws.
                     let outer = pond.radii + Vec2::splat(POND_SHORE_WIDTH);
@@ -7014,6 +7362,119 @@ mod tests {
             .iter(world)
             .count();
         assert_eq!(card_count, roots.len());
+    }
+
+    #[test]
+    fn shoreline_rocks_have_transform_matching_individual_colliders_only() {
+        let mut app = review_test_app();
+        let world = app.world_mut();
+        let rocks: Vec<_> = world
+            .query_filtered::<(&Transform, &Collider, &ChildOf), With<PondRock>>()
+            .iter(world)
+            .map(|(transform, collider, parent)| {
+                (
+                    *transform,
+                    Vec2::new(collider.half_x, collider.half_z),
+                    parent.parent(),
+                )
+            })
+            .collect();
+        assert!(!rocks.is_empty());
+        assert_eq!(
+            rocks.len(),
+            world
+                .query_filtered::<Entity, (With<PondProp>, With<Collider>)>()
+                .iter(world)
+                .count(),
+            "only shoreline rocks among pond props are solid"
+        );
+        for (transform, collider, block_entity) in rocks {
+            let block = world.get::<Block>(block_entity).unwrap();
+            let pond = pond_layout(
+                block.family,
+                family_layout_seed(block.gx, block.gz, block.family),
+                sockets(block.kind),
+                20.0,
+            )
+            .unwrap();
+            let (placements, count) = pond_prop_layout(
+                block.family,
+                pond,
+                family_layout_seed(block.gx, block.gz, block.family),
+            );
+            let expected_placement = placements.into_iter().take(count).find(|placement| {
+                placement.kind == PondPropKind::Rock
+                    && (placement.position - transform.translation.xz()).length() < 1e-5
+            });
+            assert!(
+                expected_placement.is_some(),
+                "rock count/placement drifted from layout"
+            );
+            let (yaw, _, _) = transform.rotation.to_euler(EulerRot::YXZ);
+            let (sin, cos) = yaw.sin_cos();
+            let expected = Vec2::new(
+                cos.abs() * POND_ROCK_HALF_EXTENTS.x + sin.abs() * POND_ROCK_HALF_EXTENTS.y,
+                sin.abs() * POND_ROCK_HALF_EXTENTS.x + cos.abs() * POND_ROCK_HALF_EXTENTS.y,
+            );
+            assert!((collider - expected).abs().max_element() < 1e-5);
+        }
+
+        assert_eq!(
+            world
+                .query_filtered::<Entity, (With<Pond>, With<Collider>)>()
+                .iter(world)
+                .count(),
+            0
+        );
+        assert_eq!(
+            world
+                .query_filtered::<Entity, (With<PondShore>, With<Collider>)>()
+                .iter(world)
+                .count(),
+            0
+        );
+        assert_eq!(
+            world
+                .query_filtered::<Entity, (With<PondReed>, With<Collider>)>()
+                .iter(world)
+                .count(),
+            0
+        );
+        assert_eq!(
+            world
+                .query_filtered::<Entity, (With<Pond>, With<PondFootprint>)>()
+                .iter(world)
+                .count(),
+            world
+                .query_filtered::<Entity, With<Pond>>()
+                .iter(world)
+                .count()
+        );
+    }
+
+    #[test]
+    fn pond_geometry_and_rocks_are_owned_by_streamed_block_cleanup() {
+        let mut app = review_test_app();
+        let world = app.world_mut();
+        let pond = world
+            .query_filtered::<(Entity, &ChildOf), With<Pond>>()
+            .iter(world)
+            .next()
+            .map(|(entity, parent)| (entity, parent.parent()))
+            .expect("family atlas has ponds");
+        let owned_rocks: Vec<_> = world
+            .query_filtered::<(Entity, &ChildOf), With<PondRock>>()
+            .iter(world)
+            .filter_map(|(entity, parent)| (parent.parent() == pond.1).then_some(entity))
+            .collect();
+        assert!(!owned_rocks.is_empty());
+        world.entity_mut(pond.1).despawn();
+        assert!(world.get_entity(pond.0).is_err());
+        assert!(
+            owned_rocks
+                .into_iter()
+                .all(|entity| world.get_entity(entity).is_err())
+        );
     }
 
     #[test]
