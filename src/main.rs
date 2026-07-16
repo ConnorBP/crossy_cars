@@ -10,6 +10,7 @@ mod effects;
 mod game;
 mod health;
 mod leaderboard;
+mod menu;
 mod minimap;
 mod modifiers;
 mod objectives;
@@ -42,6 +43,7 @@ use effects::EffectsPlugin;
 use game::GamePlugin;
 use health::HealthPlugin;
 use leaderboard::LeaderboardPlugin;
+use menu::MenuPlugin;
 use minimap::MinimapPlugin;
 use modifiers::ModifiersPlugin;
 use objectives::ObjectivesPlugin;
@@ -187,6 +189,8 @@ fn main() {
         // Modifier selection must be registered independently of the feature
         // tuple so adding it cannot approach Bevy's plugin tuple limit.
         .add_plugins(ModifiersPlugin)
+        // Responsive presentation consumes only authoritative game resources.
+        .add_plugins(MenuPlugin)
         // Bonus objectives own their deterministic round state and HUD, and
         // remain independent of persistence and the main feature tuple.
         .add_plugins(ObjectivesPlugin)

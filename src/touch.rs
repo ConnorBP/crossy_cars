@@ -628,7 +628,9 @@ fn merge_touch_input(
 
 fn touch_state_action(state: GameState, position: Vec2) -> StateAction {
     match state {
-        GameState::Menu => StateAction::Playing,
+        // Menu touches select cards or press DRIVE through Bevy UI. A generic
+        // touch must never start a run or steal a carousel swipe.
+        GameState::Menu => StateAction::None,
         GameState::Playing => {
             if is_pause_hitbox(position) {
                 StateAction::Paused
@@ -1601,7 +1603,7 @@ mod tests {
     fn state_actions_cover_menu_pause_thirds_and_gameover() {
         assert_eq!(
             touch_state_action(GameState::Menu, Vec2::ZERO),
-            StateAction::Playing
+            StateAction::None
         );
         assert_eq!(
             touch_state_action(GameState::Playing, Vec2::new(0.5, 0.1)),

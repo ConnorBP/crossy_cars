@@ -175,7 +175,8 @@ fn load_best_score(
 /// app lifetime; the number span is refreshed each frame by
 /// `update_best_score_text`.
 const fn best_score_visible(state: GameState, touch_active: bool) -> bool {
-    !(touch_active && matches!(state, GameState::Playing | GameState::Paused))
+    !matches!(state, GameState::Menu)
+        && !(touch_active && matches!(state, GameState::Playing | GameState::Paused))
 }
 
 fn update_best_score_visibility(
@@ -605,15 +606,11 @@ mod tests {
 
     #[test]
     fn touch_best_score_visibility_avoids_playing_and_pause_controls() {
-        for state in [
-            GameState::Menu,
-            GameState::Playing,
-            GameState::Paused,
-            GameState::GameOver,
-        ] {
+        assert!(!best_score_visible(GameState::Menu, false));
+        for state in [GameState::Playing, GameState::Paused, GameState::GameOver] {
             assert!(best_score_visible(state, false), "desktop {state:?}");
         }
-        assert!(best_score_visible(GameState::Menu, true));
+        assert!(!best_score_visible(GameState::Menu, true));
         assert!(!best_score_visible(GameState::Playing, true));
         assert!(!best_score_visible(GameState::Paused, true));
         assert!(best_score_visible(GameState::GameOver, true));

@@ -136,6 +136,11 @@ impl ModifierKind {
 #[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ActiveModifier(pub ModifierKind);
 
+/// Player-selected condition for the next fresh round. Pause/resume never
+/// consumes or overwrites this choice.
+#[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SelectedModifier(pub ModifierKind);
+
 // Delegate the tuning API from the resource to its value. Systems can read a
 // `Res<ActiveModifier>` directly without coupling themselves to tuple layout;
 // the same pure API remains available on `ModifierKind` for value-level code.
@@ -179,41 +184,10 @@ impl ActiveModifier {
     }
 }
 
-/// Number of fresh rounds selected in this process.
-///
-/// It starts at zero and advances once, immediately after selecting each
-/// fresh round. It deliberately is not persisted.
-#[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct RoundIndex(pub u64);
-
-/// A short cycle is preferable to randomness here: runs are reproducible and
-/// every modifier is guaranteed to be reached. Index zero is explicitly the
-/// baseline round.
-const MODIFIER_CYCLE: [ModifierKind; 5] = [
-    ModifierKind::Standard,
-    ModifierKind::RushHour,
-    ModifierKind::ChickenFrenzy,
-    ModifierKind::Stampede,
-    ModifierKind::GlassCannon,
-];
-
-const fn modifier_for_round(index: u64) -> ModifierKind {
-    MODIFIER_CYCLE[(index % MODIFIER_CYCLE.len() as u64) as usize]
-}
-
-/// Pure transition used by the Bevy system: `None` means this Playing entry
-/// is only a pause resume; `Some` carries the fresh selection and next index.
-fn fresh_round_selection(round_active: bool, round_index: u64) -> Option<(ModifierKind, u64)> {
-    if round_active {
-        None
-    } else {
-        Some((
-            modifier_for_round(round_index),
-            round_index
-                .checked_add(1)
-                .expect("round index exhausted its u64 range"),
-        ))
-    }
+/// Pure transition: a fresh round consumes the explicit Menu selection,
+/// while a pause resume leaves the current active condition untouched.
+fn fresh_round_selection(round_active: bool, selected: ModifierKind) -> Option<ModifierKind> {
+    (!round_active).then_some(selected)
 }
 
 pub struct ModifiersPlugin;
@@ -221,7 +195,7 @@ pub struct ModifiersPlugin;
 impl Plugin for ModifiersPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ActiveModifier>()
-            .init_resource::<RoundIndex>()
+            .init_resource::<SelectedModifier>()
             // Modifier consumers in SpawnSet must observe the new selection.
             // RoundActive is still false here; reset_run flips it after that
             // set has completed.
@@ -236,12 +210,11 @@ impl Plugin for ModifiersPlugin {
 /// to resume from Paused leaves both resources untouched.
 fn select_modifier(
     round_active: Res<RoundActive>,
+    selected: Res<SelectedModifier>,
     mut active: ResMut<ActiveModifier>,
-    mut round_index: ResMut<RoundIndex>,
 ) {
-    if let Some((kind, next_index)) = fresh_round_selection(round_active.0, round_index.0) {
+    if let Some(kind) = fresh_round_selection(round_active.0, selected.0) {
         active.0 = kind;
-        round_index.0 = next_index;
     }
 }
 
@@ -290,41 +263,14 @@ mod tests {
         assert_eq!(active.damage_multiplier(), 1.0);
         assert_eq!(active.combo_bonus_multiplier(), 1);
         assert_eq!(active.chicken_score_bonus(), 0);
-        assert_eq!(RoundIndex::default().0, 0);
+        assert_eq!(SelectedModifier::default().0, ModifierKind::Standard);
     }
 
     #[test]
-    fn first_round_is_standard_and_selection_is_repeatable() {
-        assert_eq!(modifier_for_round(0), ModifierKind::Standard);
-        assert_eq!(
-            fresh_round_selection(false, 0),
-            Some((ModifierKind::Standard, 1))
-        );
-        for index in 0..100 {
-            assert_eq!(modifier_for_round(index), modifier_for_round(index));
-        }
-    }
-
-    #[test]
-    fn pause_resume_does_not_select_or_increment() {
-        for index in [0, 1, 5, 99] {
-            assert_eq!(fresh_round_selection(true, index), None);
-        }
-        assert_eq!(
-            fresh_round_selection(false, 1),
-            Some((ModifierKind::RushHour, 2))
-        );
-    }
-
-    #[test]
-    fn deterministic_cycle_reaches_every_variant() {
-        let first_cycle: Vec<_> = (0..MODIFIER_CYCLE.len() as u64)
-            .map(modifier_for_round)
-            .collect();
-        assert_eq!(first_cycle, ALL);
-
-        for (index, expected) in ALL.into_iter().enumerate() {
-            assert_eq!(modifier_for_round(index as u64 + 5), expected);
+    fn fresh_round_uses_explicit_selection_and_resume_preserves_active() {
+        for selected in ALL {
+            assert_eq!(fresh_round_selection(false, selected), Some(selected));
+            assert_eq!(fresh_round_selection(true, selected), None);
         }
     }
 

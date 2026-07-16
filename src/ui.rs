@@ -411,9 +411,7 @@ pub struct UiPlugin;
 
 impl Plugin for UiPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(OnEnter(GameState::Menu), spawn_menu)
-            .add_systems(OnExit(GameState::Menu), despawn_marker::<MenuRoot>)
-            // Modifier selection happens before SpawnSet on fresh rounds, so
+        app // Modifier selection happens before SpawnSet on fresh rounds, so
             // the HUD always captures the condition selected for this run.
             .add_systems(
                 OnEnter(GameState::Playing),
@@ -448,14 +446,11 @@ impl Plugin for UiPlugin {
                     update_timer_layout.after(TouchStateSet),
                 )
                     .run_if(in_state(GameState::Playing)),
-            )
-            // Persistence loads during Startup, after the initial Menu may
-            // already exist. Refreshing this marker makes the saved medal
-            // tally visible immediately without rebuilding the menu.
-            .add_systems(Update, update_menu_medals);
+            );
     }
 }
 
+#[allow(dead_code)]
 fn spawn_menu(mut commands: Commands, condition_bests: Res<ConditionBests>) {
     let earned_medals = total_medal_points(&condition_bests);
 
@@ -1384,6 +1379,7 @@ fn despawn_marker<M: Component>(mut commands: Commands, q: Query<Entity, With<M>
     }
 }
 
+#[allow(dead_code)]
 fn update_menu_medals(
     condition_bests: Res<ConditionBests>,
     mut query: Query<(Option<&MenuMedalRow>, &mut Text), With<MenuMedalsText>>,

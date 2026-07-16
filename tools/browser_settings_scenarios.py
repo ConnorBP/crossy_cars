@@ -648,7 +648,7 @@ def run_mobile(
     # H. Pause context: touch start/pause, touch-open/adjust, Back, and a
     # discrimination probe that proves the modal closed over Paused (not Menu).
     def touch_start_and_pause() -> None:
-        tap(0.50, 0.80)  # any non-opener tap starts Menu -> Playing (countdown)
+        tap(0.50, 0.88)  # explicit DRIVE button starts Menu -> Playing
         page.wait_for_timeout(3_700)  # 3/2/1/GO + punch, past InputFrozen
         tap(0.50, 0.10)  # top-center PAUSE zone: Playing -> Paused
         page.wait_for_timeout(300)

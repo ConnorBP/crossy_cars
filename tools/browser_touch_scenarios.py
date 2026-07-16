@@ -255,8 +255,8 @@ def main() -> int:
 
             shot("00_mobile_menu.png")
 
-            # Any touch starts Menu, activates touch controls, and unlocks audio.
-            page.touchscreen.tap(422, 195)
+            # Tap the explicit DRIVE button; generic Menu touches only select/swipe.
+            page.touchscreen.tap(422, 340)
             page.wait_for_timeout(3_800)
             settings_volume_minus_must_not_change(
                 "v2:100:0:0:",
@@ -368,7 +368,7 @@ def main() -> int:
             shot("07_touch_menu.png")
 
             # Distinguish Menu from Paused rather than treating both as the
-            # same Settings-accessible state. In Menu this touch starts a round;
+            # same Settings-accessible state. In Menu the DRIVE touch starts a round;
             # if the preceding right-third transition failed and state remained
             # Paused, the same touch merely returns to Menu. Settings must be
             # inaccessible after the fresh countdown only in the correct path.
@@ -376,7 +376,7 @@ def main() -> int:
             page.wait_for_timeout(3_800)
             settings_volume_minus_must_not_change(
                 "v2:70:0:0:",
-                "menu proof: a touch must start Playing, not leave Paused/Menu",
+                "menu proof: DRIVE touch must start Playing, not leave Paused/Menu",
             )
             page.wait_for_timeout(300)
 

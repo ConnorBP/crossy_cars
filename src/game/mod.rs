@@ -164,13 +164,6 @@ impl Plugin for GamePlugin {
             .add_systems(Update, tick_timeleft.run_if(in_state(GameState::Playing)))
             .add_systems(
                 Update,
-                menu_input
-                    .in_set(KeyboardStateSet)
-                    .run_if(in_state(GameState::Menu))
-                    .run_if(settings_closed),
-            )
-            .add_systems(
-                Update,
                 pause_to_paused
                     .in_set(KeyboardStateSet)
                     .run_if(in_state(GameState::Playing))
@@ -262,19 +255,6 @@ fn tick_timeleft(
         *reason = GameOverReason::TimeUp;
         next.set(GameState::GameOver);
     }
-}
-
-fn menu_input(
-    keys: Res<ButtonInput<KeyCode>>,
-    mut restart: ResMut<RestartRequested>,
-    mut next: ResMut<NextState<GameState>>,
-) {
-    let action = if keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::Space) {
-        StateAction::Playing
-    } else {
-        StateAction::None
-    };
-    apply_state_action(action, &mut restart, &mut next);
 }
 
 fn pause_to_paused(
