@@ -225,7 +225,7 @@
       <div id="loading-content" class="loading-content">
         <span class="spinner" aria-hidden="true"></span>
         <h1>Roady Car</h1>
-        <p>Loading the game&hellip;</p>
+        <p id="loading-status">Downloading the game&hellip;</p>
         <p class="instructions">
           Keyboard: W or Up Arrow accelerates, S or Down Arrow brakes, A/D or
           Left/Right Arrow steers, Space brakes, Shift holds the handbrake to drift,
@@ -455,12 +455,14 @@
         var loadingContent = document.getElementById("loading-content");
         var errorContent = document.getElementById("error-content");
         var retry = document.getElementById("retry");
-        if (!loading || !loadingContent || !errorContent || !retry) return;
+        var status = document.getElementById("loading-status");
+        if (!loading || !loadingContent || !errorContent || !retry || !status) return;
 
         loading.hidden = false;
         var finished = false;
         var bootConfirmed = false;
         var errorShown = false;
+        var configuredCanvas = null;
 
         function configureCanvas(canvas) {
           canvas.setAttribute("role", "application");
@@ -485,10 +487,24 @@
         function canvasReady() {
           var canvas = document.querySelector("canvas");
           if (!canvas) return false;
+          if (configuredCanvas !== canvas) {
+            configuredCanvas = canvas;
+            configureCanvas(canvas);
+          }
+          return true;
+        }
+
+        function appIsPlayable() {
+          return document.documentElement.getAttribute("data-roady-ready") === "playable";
+        }
+
+        function checkPlayable() {
+          var canvas = document.querySelector("canvas");
+          if (!canvas || !appIsPlayable()) return false;
           configureCanvas(canvas);
           window.requestAnimationFrame(function () {
             window.requestAnimationFrame(function () {
-              if (!canvas.isConnected) return;
+              if (!canvas.isConnected || !appIsPlayable()) return;
               bootConfirmed = true;
               hideLoading(canvas);
             });
@@ -513,15 +529,28 @@
           window.location.reload();
         });
 
-        var observer = new MutationObserver(canvasReady);
-        if (!canvasReady()) {
-          observer.observe(document.documentElement, { childList: true, subtree: true });
-        }
+        window.addEventListener("TrunkApplicationStarted", function () {
+          status.textContent = "Preparing the toy town...";
+        }, { once: true });
 
-        // A gesture may unlock audio, but only a rendered game canvas dismisses this shell.
+        var observer = new MutationObserver(function () {
+          canvasReady();
+          checkPlayable();
+        });
+        observer.observe(document.documentElement, {
+          attributes: true,
+          attributeFilter: ["data-roady-ready"],
+          childList: true,
+          subtree: true,
+        });
+        canvasReady();
+        checkPlayable();
+
+        // Slow mobile downloads are expected; only semantic readiness may
+        // dismiss the shell, and canvas existence never suppresses a failure.
         window.setTimeout(function () {
-          if (!canvasReady() && !bootConfirmed) showError();
-        }, 15000);
+          if (!bootConfirmed && !checkPlayable()) showError();
+        }, 60000);
       })();
     </script>
   </body>

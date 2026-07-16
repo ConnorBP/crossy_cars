@@ -131,7 +131,7 @@ struct TipState {
 struct SwipeStartSelection(Option<ModifierKind>);
 
 #[derive(Component)]
-struct ResponsiveMenuRoot;
+pub(crate) struct ResponsiveMenuRoot;
 #[derive(Component)]
 struct TitleLetter(usize);
 #[derive(Component)]

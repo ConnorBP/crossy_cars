@@ -17,6 +17,7 @@ mod objectives;
 mod palette;
 mod persist;
 mod pickups;
+mod readiness;
 mod round_intro;
 mod run_events;
 mod settings;
@@ -49,6 +50,7 @@ use modifiers::ModifiersPlugin;
 use objectives::ObjectivesPlugin;
 use persist::PersistPlugin;
 use pickups::PickupsPlugin;
+use readiness::ReadinessPlugin;
 use round_intro::RoundIntroPlugin;
 use run_events::RunEventsPlugin;
 use settings::SettingsPlugin;
@@ -191,6 +193,9 @@ fn main() {
         .add_plugins(ModifiersPlugin)
         // Responsive presentation consumes only authoritative game resources.
         .add_plugins(MenuPlugin)
+        // Publish a truthful DOM-ready signal only after the initial menu,
+        // world, camera, and imported player car are actually usable.
+        .add_plugins(ReadinessPlugin)
         // Bonus objectives own their deterministic round state and HUD, and
         // remain independent of persistence and the main feature tuple.
         .add_plugins(ObjectivesPlugin)
