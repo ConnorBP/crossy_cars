@@ -495,7 +495,10 @@
         }
 
         function appIsPlayable() {
-          return document.documentElement.getAttribute("data-roady-ready") === "playable";
+          var root = document.documentElement;
+          return root.getAttribute("data-roady-ready") === "playable"
+            || root.getAttribute("data-roady-world-review-ready") === "true"
+            || root.getAttribute("data-roady-car-review-ready") === "true";
         }
 
         function checkPlayable() {
@@ -539,7 +542,11 @@
         });
         observer.observe(document.documentElement, {
           attributes: true,
-          attributeFilter: ["data-roady-ready"],
+          attributeFilter: [
+            "data-roady-ready",
+            "data-roady-world-review-ready",
+            "data-roady-car-review-ready",
+          ],
           childList: true,
           subtree: true,
         });
