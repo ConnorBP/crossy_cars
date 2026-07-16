@@ -43,7 +43,7 @@ use crate::car::counter_rotated_projected_shadow_transform;
 use crate::car::{Car, DrivingSet, InputFrozen};
 use crate::game::SpawnSet;
 use crate::game::TouchStateSet;
-use crate::game::resources::RoundActive;
+use crate::game::resources::{RoundActive, not_drowning};
 use crate::game::state::GameState;
 use crate::modifiers::ActiveModifier;
 use crate::run_events::ActiveEvent;
@@ -499,7 +499,12 @@ impl Plugin for DifficultyPlugin {
             // Per-frame: ramp the level, plan/move/replenish traffic, then
             // discover and animate wheel pivots that may have arrived from the
             // asynchronous scene spawner this frame.
-            .add_systems(Update, tick_difficulty.run_if(in_state(GameState::Playing)))
+            .add_systems(
+                Update,
+                tick_difficulty
+                    .run_if(in_state(GameState::Playing))
+                    .run_if(not_drowning),
+            )
             .add_systems(
                 Update,
                 manage_traffic

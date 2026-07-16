@@ -25,10 +25,10 @@
 use bevy::prelude::*;
 use std::f32::consts::TAU;
 
-use crate::car::{Car, InputFrozen};
+use crate::car::{Car, DrivingSet, InputFrozen};
 use crate::game::SpawnSet;
 use crate::game::events::ChickenHit;
-use crate::game::resources::{GameConfig, Score};
+use crate::game::resources::{Drowning, GameConfig, Score};
 use crate::game::state::GameState;
 use crate::modifiers::ActiveModifier;
 use crate::run_events::{ActiveEvent, EventKind, RoundEventStarted};
@@ -343,6 +343,7 @@ impl Plugin for ChickensPlugin {
                 Update,
                 (hit_chickens, wander_chickens)
                     .chain()
+                    .after(DrivingSet)
                     .run_if(in_state(GameState::Playing)),
             )
             .add_systems(
@@ -704,9 +705,10 @@ fn hit_chickens(
     mut chicken_hits: MessageWriter<ChickenHit>,
     settings: Res<Settings>,
     input_frozen: Res<InputFrozen>,
+    drowning: Res<Drowning>,
     mut seed: Local<u32>,
 ) {
-    if input_frozen.0 {
+    if input_frozen.0 || drowning.active {
         return;
     }
     ensure_seeded(&mut seed, 0x5678_9ABC);

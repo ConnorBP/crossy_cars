@@ -4,8 +4,8 @@ use bevy::{prelude::*, text::FontSize, window::PrimaryWindow};
 
 use crate::car::{Car, InputFrozen, PlayerInput, TouchInputSet};
 use crate::game::{
-    RestartRequested, StateAction, TouchStateSet, apply_state_action, settings_closed,
-    state::GameState,
+    RestartRequested, StateAction, TouchStateSet, apply_state_action, resources::Drowning,
+    settings_closed, state::GameState,
 };
 
 const PAUSE_TOP: f32 = 0.14;
@@ -709,6 +709,7 @@ fn read_touch_input(
     touches: Res<Touches>,
     windows: Query<&Window, With<PrimaryWindow>>,
     frozen: Res<InputFrozen>,
+    drowning: Res<Drowning>,
     car: Query<&Car>,
     cameras: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
     mut owner: ResMut<DriveTouchOwner>,
@@ -731,7 +732,7 @@ fn read_touch_input(
         })
         .collect();
     owner.0 = update_drive_owner(owner.0, &active_touches);
-    if frozen.0 {
+    if frozen.0 || drowning.active {
         *input = PlayerInput::default();
         // Track role ownership during countdown/input freezes, but suppress its
         // effect. Playing state exit is the sole unconditional owner reset.
@@ -1390,6 +1391,7 @@ mod tests {
             .init_resource::<TouchSteering>()
             .insert_resource(Time::<()>::default())
             .insert_resource(InputFrozen(false))
+            .init_resource::<Drowning>()
             .insert_resource(keyboard_snapshot)
             .add_systems(Update, read_touch_input.in_set(TouchInputSet));
 

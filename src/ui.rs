@@ -300,6 +300,7 @@ fn gameover_title(reason: GameOverReason) -> &'static str {
     match reason {
         GameOverReason::Wrecked => "Wrecked!",
         GameOverReason::TimeUp => "Time's up!",
+        GameOverReason::Drowned => "DROWNED",
     }
 }
 
@@ -1487,7 +1488,7 @@ mod tests {
     use super::{
         CockpitCurrentScore, CockpitRoot, GAMEOVER_COMPACT_LAYOUT, GAMEOVER_DESKTOP_LAYOUT,
         GAMEOVER_STATUS_STRIP_HEIGHT, MENU_CONTENT_HEIGHT, ScoreText, TimerRoot, TimerUrgency,
-        condition_summary, gameover_core_bounds, gameover_layout, is_medal_upgrade,
+        condition_summary, gameover_core_bounds, gameover_layout, gameover_title, is_medal_upgrade,
         is_mobile_viewport, is_new_best, maximal_gameover_content_height,
         maximal_gameover_state_fits, medal_gallery_state, medal_points, menu_content_fits,
         pause_content_bounds, spawn_hud, terminal_condition_result, timer_motion_flags,
@@ -1613,6 +1614,12 @@ mod tests {
     }
 
     #[test]
+    fn drowned_title_is_explicit_and_never_wrecked() {
+        assert_eq!(gameover_title(GameOverReason::Drowned), "DROWNED");
+        assert_ne!(gameover_title(GameOverReason::Drowned), "Wrecked!");
+    }
+
+    #[test]
     fn new_best_requires_strict_improvement() {
         assert!(is_new_best(11, 10));
         assert!(!is_new_best(10, 10));
@@ -1714,7 +1721,7 @@ mod tests {
             maximal_gameover_content_height(layout) <= gameover_core_bounds(844.0, 390.0).height
         );
 
-        // Exercise both terminal titles with every optional row budgeted:
+        // Exercise every terminal title with every optional row budgeted:
         // NEW BEST + NEW CONDITION BEST + MEDAL UPGRADE + objective summary.
         assert!(maximal_gameover_state_fits(
             844.0,

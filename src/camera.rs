@@ -15,7 +15,7 @@ use bevy::{
 use crate::car::{Car, DrivingSet, ImportedCarReady, ImportedCarSceneRoot, PlayerCarVisual};
 use crate::game::SpawnSet;
 use crate::game::events::ObstacleHit;
-use crate::game::resources::{GameConfig, RoundActive};
+use crate::game::resources::{GameConfig, RoundActive, not_drowning};
 use crate::game::state::GameState;
 use crate::settings::Settings;
 use crate::world::world_review_bounds;
@@ -369,7 +369,10 @@ impl Plugin for CameraPlugin {
                     // by this frame's driving chain, not schedule-dependent
                     // previous-frame data.
                     .in_set(CameraObstacleFeedbackSet)
-                    .run_if(in_state(GameState::Playing)),
+                    .run_if(in_state(GameState::Playing))
+                    // Freeze follow + crash-shake during the pond-hazard
+                    // drowning sequence so the sinking owns the frame.
+                    .run_if(not_drowning),
             );
     }
 }

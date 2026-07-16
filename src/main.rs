@@ -6,6 +6,7 @@ mod combos;
 mod countdown;
 mod critters;
 mod difficulty;
+mod drowned;
 mod effects;
 mod game;
 mod health;
@@ -40,6 +41,7 @@ use combos::CombosPlugin;
 use countdown::CountdownPlugin;
 use critters::CrittersPlugin;
 use difficulty::DifficultyPlugin;
+use drowned::DrownedPlugin;
 use effects::EffectsPlugin;
 use game::GamePlugin;
 use health::HealthPlugin;
@@ -182,6 +184,8 @@ fn main() {
             ToyShadingPlugin,
             PersistPlugin,
         ))
+        // Pond drowning is local gameplay layered over immutable score rules.
+        .add_plugins(DrownedPlugin)
         // Registered separately so neither plugin tuple approaches Bevy's
         // tuple implementation limit as features are added.
         .add_plugins(TransparencyPlugin)

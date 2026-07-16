@@ -6,7 +6,7 @@ use std::f32::consts::{FRAC_PI_2, PI, TAU};
 
 use crate::difficulty::Traffic;
 use crate::game::events::ObstacleHit;
-use crate::game::resources::GameConfig;
+use crate::game::resources::{Drowning, GameConfig};
 use crate::game::state::GameState;
 use crate::palette;
 use crate::textures::TextureAssets;
@@ -215,7 +215,7 @@ const PLAYER_SHADOW_FOOTPRINT: Vec2 = Vec2::new(1.30, 2.25);
 #[cfg(any(target_arch = "wasm32", test))]
 const PLAYER_SHADOW_CASTER_HEIGHT: f32 = 0.90;
 
-const fn car_footprint_half_extents() -> (f32, f32) {
+pub(crate) const fn car_footprint_half_extents() -> (f32, f32) {
     (COLLISION_HALF_WIDTH, COLLISION_HALF_LENGTH)
 }
 
@@ -771,8 +771,10 @@ impl Plugin for CarPlugin {
                 // fresh speed.
                 (
                     move_car,
+                    crate::drowned::detect_pond_entry,
                     physics_collisions,
                     cone_collisions,
+                    crate::drowned::advance_drowning,
                     spin_wheels,
                     animate_imported_car,
                     roll_body,
@@ -2153,8 +2155,9 @@ fn read_keyboard_input(
     mut handbrake: ResMut<Handbrake>,
     state: Res<State<GameState>>,
     input_frozen: Res<InputFrozen>,
+    drowning: Res<Drowning>,
 ) {
-    if *state.get() != GameState::Playing || input_frozen.0 {
+    if *state.get() != GameState::Playing || input_frozen.0 || drowning.active {
         *input = PlayerInput::default();
         handbrake.0 = false;
         return;
@@ -2184,10 +2187,11 @@ fn move_car(
     cfg: Res<GameConfig>,
     time: Res<Time>,
     input_frozen: Res<InputFrozen>,
+    drowning: Res<Drowning>,
 ) {
     // Countdown / freeze gate: the car holds still (and the round timer stops
     // burning) while a countdown overlay is active.
-    if input_frozen.0 {
+    if input_frozen.0 || drowning.active {
         return;
     }
     let Ok((mut car, mut tf, mut latch)) = car.single_mut() else {
@@ -2472,8 +2476,12 @@ pub fn physics_collisions(
         (With<Collider>, Without<Car>, Without<Curb>, Without<Cone>),
     >,
     time: Res<Time>,
+    drowning: Res<Drowning>,
     mut obstacle_hits: MessageWriter<ObstacleHit>,
 ) {
+    if drowning.active {
+        return;
+    }
     let Ok((mut car, mut tf)) = car.single_mut() else {
         return;
     };
@@ -2571,7 +2579,11 @@ pub fn physics_collisions(
 fn cone_collisions(
     mut car: Query<(&mut Car, &Transform), (With<Car>, Without<Cone>)>,
     mut cones: Query<(&Collider, &GlobalTransform, &mut ConeMotion), (With<Cone>, Without<Car>)>,
+    drowning: Res<Drowning>,
 ) {
+    if drowning.active {
+        return;
+    }
     let Ok((mut car, car_t)) = car.single_mut() else {
         return;
     };

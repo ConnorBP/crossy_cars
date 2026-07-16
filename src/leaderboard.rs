@@ -550,11 +550,13 @@ fn format_initials_display(initials: &str) -> String {
 const SUBMISSION_CONSENT_DISCLOSURE: &str = "Submitting stores this name and auto-submits future completed rounds.\n\
 Clear Leaderboard Name in Settings to revoke consent and stop auto-submit.";
 
-/// Convert a `GameOverReason` to the backend's string literal.
-fn game_over_reason_str(reason: GameOverReason) -> &'static str {
+/// Convert only ranked-eligible terminal reasons to backend literals. Local
+/// outcomes have no serialization fallback and must never masquerade as wrecks.
+fn game_over_reason_str(reason: GameOverReason) -> Option<&'static str> {
     match reason {
-        GameOverReason::TimeUp => "time_up",
-        GameOverReason::Wrecked => "wrecked",
+        GameOverReason::TimeUp => Some("time_up"),
+        GameOverReason::Wrecked => Some("wrecked"),
+        GameOverReason::Drowned => None,
     }
 }
 
@@ -632,7 +634,7 @@ struct ScoreSnapshot {
     max_combo: u32,
     round_duration_ms: u64,
     time_left_ms: u64,
-    game_over_reason: String,
+    game_over_reason: Option<String>,
     build: String,
     platform: String,
 }
@@ -1127,7 +1129,10 @@ mod web_bridge {
                 max_combo: snapshot.max_combo,
                 round_duration_ms: snapshot.round_duration_ms,
                 time_left_ms: snapshot.time_left_ms,
-                game_over_reason: snapshot.game_over_reason.clone(),
+                game_over_reason: snapshot
+                    .game_over_reason
+                    .clone()
+                    .expect("submission requires an eligible terminal reason"),
                 build: snapshot.build.clone(),
                 platform: snapshot.platform.clone(),
             };
@@ -1155,7 +1160,9 @@ mod web_bridge {
                 max_combo: snapshot.max_combo,
                 round_duration_ms: snapshot.round_duration_ms,
                 time_left_ms: snapshot.time_left_ms,
-                game_over_reason: snapshot.game_over_reason,
+                game_over_reason: snapshot
+                    .game_over_reason
+                    .expect("submission requires an eligible terminal reason"),
                 build: snapshot.build,
                 platform: snapshot.platform,
             }) {
@@ -1684,7 +1691,7 @@ fn on_gameover_enter(
         max_combo: peak_combo.0.max(1).min(5),
         round_duration_ms: elapsed.0,
         time_left_ms: (time_left.0.max(0.0) * 1000.0) as u64,
-        game_over_reason: game_over_reason_str(*reason).to_string(),
+        game_over_reason: game_over_reason_str(*reason).map(str::to_string),
         build: BUILD_VERSION.to_string(),
         platform: platform_str().to_string(),
     };
@@ -1696,6 +1703,13 @@ fn on_gameover_enter(
     submission.submit_epoch = submission.submit_epoch.wrapping_add(1).max(1);
 
     clear_submit_result();
+    // Drowning is explicitly local/unranked. Do not build, sign, or send a
+    // terminal payload, even when remembered-name auto-submit is enabled.
+    if submission.snapshot.game_over_reason.is_none() {
+        submission.state = SubmissionState::Unavailable;
+        spawn_gameover_ui(&mut commands);
+        return;
+    }
     match submission_start_decision(submission_enabled(), &settings.leaderboard_initials) {
         SubmissionStartDecision::Unavailable => {
             submission.state = SubmissionState::Unavailable;
@@ -3181,8 +3195,15 @@ mod tests {
 
     #[test]
     fn game_over_reason_maps_to_backend_strings() {
-        assert_eq!(game_over_reason_str(GameOverReason::TimeUp), "time_up");
-        assert_eq!(game_over_reason_str(GameOverReason::Wrecked), "wrecked");
+        assert_eq!(
+            game_over_reason_str(GameOverReason::TimeUp),
+            Some("time_up")
+        );
+        assert_eq!(
+            game_over_reason_str(GameOverReason::Wrecked),
+            Some("wrecked")
+        );
+        assert_eq!(game_over_reason_str(GameOverReason::Drowned), None);
     }
 
     // ── Board fetch policy ───────────────────────────────────────────────

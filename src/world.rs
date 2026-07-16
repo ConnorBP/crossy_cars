@@ -48,7 +48,7 @@ use serde::Serialize;
 use crate::car::{Car, DrivingSet, InputFrozen};
 use crate::game::SpawnSet;
 use crate::game::events::CoinCollected;
-use crate::game::resources::{RoundActive, Score, TimeLeft};
+use crate::game::resources::{Drowning, RoundActive, Score, TimeLeft};
 use crate::game::state::GameState;
 use crate::modifiers::{ActiveModifier, ModifierKind};
 use crate::palette;
@@ -2076,6 +2076,7 @@ impl Plugin for WorldPlugin {
                 Update,
                 (spin_coins, collect_coins)
                     .chain()
+                    .after(DrivingSet)
                     .run_if(in_state(GameState::Playing)),
             )
             // Knockable cones: integrate bounded flight for airborne cones
@@ -2914,9 +2915,7 @@ pub(crate) struct PondFootprint {
     pub(crate) rotation: f32,
 }
 
-// Geometry is intentionally exposed now as foundation for the later hazard
-// system; production gameplay does not consume it until that follow-up.
-#[allow(dead_code)]
+#[allow(dead_code)] // Public geometry helpers are also exercised by focused tests.
 impl PondFootprint {
     fn ellipse_local_point(self, block_local_point: Vec2) -> Vec2 {
         let delta = block_local_point - self.center;
@@ -3044,7 +3043,11 @@ impl PondFootprint {
             .is_some_and(|point| point.length_squared() < (1.0 + car_radius).powi(2))
     }
 
-    fn normalized_car_radius(self, car_heading: f32, car_half_extents: Vec2) -> Option<f32> {
+    pub(crate) fn normalized_car_radius(
+        self,
+        car_heading: f32,
+        car_half_extents: Vec2,
+    ) -> Option<f32> {
         // Also validates all footprint fields before division below.
         self.normalized_point(self.center)?;
         if !car_heading.is_finite()
@@ -5309,11 +5312,12 @@ fn collect_coins(
     mut score: ResMut<Score>,
     mut timeleft: ResMut<TimeLeft>,
     input_frozen: Res<InputFrozen>,
+    drowning: Res<Drowning>,
     mut coin_events: MessageWriter<CoinCollected>,
 ) {
     // Fresh blocks are spawned during the countdown. Waiting until input is
     // released avoids collecting anything before the round visibly begins.
-    if input_frozen.0 {
+    if input_frozen.0 || drowning.active {
         return;
     }
     let Ok(car_t) = car.single() else {

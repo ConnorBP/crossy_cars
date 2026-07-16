@@ -5,8 +5,8 @@ pub mod state;
 use bevy::prelude::*;
 
 use crate::car::{Car, DriftLatch, InputFrozen};
-use crate::game::events::{ChickenHit, CoinCollected, ObstacleHit};
-use crate::game::resources::{GameConfig, GameOverReason, RoundActive, Score, TimeLeft};
+use crate::game::events::{ChickenHit, CoinCollected, ObstacleHit, PondEntered};
+use crate::game::resources::{Drowning, GameConfig, GameOverReason, RoundActive, Score, TimeLeft};
 use crate::game::state::GameState;
 use crate::persist::{BestAtRoundStart, BestScore, ConditionBests, ConditionBestsAtRoundStart};
 use crate::settings::SettingsOpen;
@@ -136,12 +136,14 @@ impl Plugin for GamePlugin {
             .init_resource::<Score>()
             .init_resource::<TimeLeft>()
             .init_resource::<RoundActive>()
+            .init_resource::<Drowning>()
             .init_resource::<InputFrozen>()
             .init_resource::<GameOverReason>()
             .init_resource::<RestartRequested>()
             .add_message::<ChickenHit>()
             .add_message::<CoinCollected>()
             .add_message::<ObstacleHit>()
+            .add_message::<PondEntered>()
             .configure_sets(Update, (TouchStateSet, KeyboardStateSet).chain())
             // Keep RoundActive false across SpawnSet so all fresh-only spawn
             // systems can distinguish a new round from a pause resume. Reset
@@ -154,12 +156,15 @@ impl Plugin for GamePlugin {
             .add_systems(OnEnter(GameState::Playing), activate_round.after(SpawnSet))
             // End the round (clear the active flag) when leaving for GameOver
             // or Menu; the world plugin despawns round entities on these too.
-            .add_systems(OnEnter(GameState::GameOver), end_round)
+            .add_systems(
+                OnEnter(GameState::GameOver),
+                (end_round, clear_drowning).chain(),
+            )
             // A paused restart deliberately visits Menu so all existing
             // end-round and cleanup systems run before a fresh Playing enter.
             .add_systems(
                 OnEnter(GameState::Menu),
-                (end_round, consume_restart_request).chain(),
+                (end_round, clear_drowning, consume_restart_request).chain(),
             )
             .add_systems(Update, tick_timeleft.run_if(in_state(GameState::Playing)))
             .add_systems(
@@ -190,6 +195,7 @@ fn reset_car_and_resources(
     mut score: ResMut<Score>,
     mut timeleft: ResMut<TimeLeft>,
     round_active: Res<RoundActive>,
+    mut drowning: ResMut<Drowning>,
     best: Res<BestScore>,
     condition_bests: Res<ConditionBests>,
     mut best_at_start: ResMut<BestAtRoundStart>,
@@ -202,6 +208,8 @@ fn reset_car_and_resources(
         return;
     }
 
+    *drowning = Drowning::default();
+    drowning.previous_center = Vec2::ZERO;
     best_at_start.0 = best.0;
     condition_bests_at_start.by_kind = condition_bests.by_kind;
     *score = Score::default();
@@ -228,6 +236,10 @@ fn end_round(mut round_active: ResMut<RoundActive>) {
     round_active.0 = false;
 }
 
+fn clear_drowning(mut drowning: ResMut<Drowning>) {
+    *drowning = Drowning::default();
+}
+
 fn consume_restart_request(
     mut restart: ResMut<RestartRequested>,
     mut next: ResMut<NextState<GameState>>,
@@ -243,10 +255,11 @@ fn tick_timeleft(
     time: Res<Time>,
     mut next: ResMut<NextState<GameState>>,
     input_frozen: Res<InputFrozen>,
+    drowning: Res<Drowning>,
     mut reason: ResMut<GameOverReason>,
 ) {
     // Don't burn the 60s round timer while a countdown overlay is active.
-    if input_frozen.0 {
+    if input_frozen.0 || drowning.active {
         return;
     }
     t.0 -= time.delta_secs();

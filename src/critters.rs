@@ -26,9 +26,9 @@
 use bevy::prelude::*;
 use std::f32::consts::TAU;
 
-use crate::car::Car;
+use crate::car::{Car, DrivingSet};
 use crate::game::SpawnSet;
-use crate::game::resources::{GameConfig, GameOverReason, Score};
+use crate::game::resources::{Drowning, GameConfig, GameOverReason, Score};
 use crate::game::state::GameState;
 use crate::health::Health;
 use crate::modifiers::ActiveModifier;
@@ -452,6 +452,7 @@ impl Plugin for CrittersPlugin {
                 Update,
                 (hit_critters, wander_critters)
                     .chain()
+                    .after(DrivingSet)
                     .run_if(in_state(GameState::Playing)),
             )
             .add_systems(
@@ -944,8 +945,12 @@ fn hit_critters(
     time: Res<Time>,
     settings: Res<Settings>,
     mut penalty_cooldown: ResMut<CritterPenaltyCooldown>,
+    drowning: Res<Drowning>,
     mut seed: Local<u32>,
 ) {
+    if drowning.active {
+        return;
+    }
     ensure_seeded(&mut seed, 0xACE0_2468);
     penalty_cooldown.0 = (penalty_cooldown.0 - time.delta_secs()).max(0.0);
     let Ok((mut car, car_t)) = car.single_mut() else {

@@ -42,9 +42,9 @@ use bevy::prelude::*;
 use bevy::text::FontSize;
 
 use crate::audio::AudioBaseGain;
-use crate::car::Car;
+use crate::car::{Car, DrivingSet};
 use crate::game::events::CoinCollected;
-use crate::game::resources::{GameConfig, Score, TimeLeft};
+use crate::game::resources::{Drowning, GameConfig, Score, TimeLeft};
 use crate::game::state::GameState;
 use crate::game::{SpawnSet, TouchStateSet};
 use crate::health::Health;
@@ -390,15 +390,23 @@ impl Plugin for PickupsPlugin {
             .add_systems(OnEnter(GameState::Playing), spawn_powerup_ui)
             .add_systems(OnExit(GameState::Playing), despawn_marker::<PowerUpUiRoot>)
             // Update gameplay systems (spawn / collect / effects / animation).
+            // `collect_pickup` keeps its own internal `drowning.active`
+            // early-return so a grab landing on the same frame as a dunk
+            // still resolves; spawn / boost / magnet / animation pause while
+            // drowning via the `not_drowning` run condition.
             .add_systems(
                 Update,
                 (
-                    spawn_pickup,
                     collect_pickup,
-                    apply_speed_boost,
-                    apply_coin_magnet,
-                    animate_pickups,
+                    (
+                        spawn_pickup,
+                        apply_speed_boost,
+                        apply_coin_magnet,
+                        animate_pickups,
+                    )
+                        .run_if(not_drowning),
                 )
+                    .after(DrivingSet)
                     .run_if(in_state(GameState::Playing)),
             )
             // UI refresh runs in every state so the bars recolor even while
@@ -545,7 +553,11 @@ fn collect_pickup(
     mut coin_events: MessageWriter<CoinCollected>,
     audio: Res<PickupAudio>,
     settings: Res<Settings>,
+    drowning: Res<Drowning>,
 ) {
+    if drowning.active {
+        return;
+    }
     let Ok(car_t) = car.single() else {
         return;
     };
@@ -1167,6 +1179,15 @@ fn megacoin_flash_rgb() -> (f32, f32, f32) {
 
 const fn pickup_flash_enabled(reduced_motion: bool) -> bool {
     !reduced_motion
+}
+
+/// Run condition: true while the car is **not** drowning. Power-up spawning,
+/// the speed-boost / coin-magnet effects, and orb animation are gated on this
+/// so they pause during a dunk. `collect_pickup` is intentionally NOT gated
+/// here — it keeps its own internal `drowning.active` early-return so a grab
+/// landing on the same frame as a dunk still resolves deterministically.
+fn not_drowning(drowning: Res<Drowning>) -> bool {
+    !drowning.active
 }
 
 const fn pickup_shadow_footprint(kind: PowerKind) -> Vec2 {

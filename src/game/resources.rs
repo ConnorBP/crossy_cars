@@ -42,11 +42,28 @@ impl Default for TimeLeft {
 #[derive(Resource, Default)]
 pub struct RoundActive(pub bool);
 
+/// Persistent local pond-outcome latch. It remains active across Paused so
+/// simulation and presentation resume at the exact same elapsed time.
+#[derive(Resource, Default, Clone, Copy, Debug)]
+pub struct Drowning {
+    pub active: bool,
+    pub elapsed: f32,
+    pub previous_center: Vec2,
+    pub entry_position: Vec3,
+}
+
+/// Run condition for ordinary interactions that stop at pond entry.
+pub fn not_drowning(drowning: Res<Drowning>) -> bool {
+    !drowning.active
+}
+
 /// Why the round ended — drives the GameOver screen title. Defaults to
-/// `TimeUp`; `health.rs` sets `Wrecked` when the car is destroyed.
-#[derive(Resource, Default, Clone, Copy)]
+/// `TimeUp`; `health.rs` sets `Wrecked` when the car is destroyed. `Drowned`
+/// is a local-only pond outcome and is never serialized as a ranked terminal.
+#[derive(Resource, Default, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GameOverReason {
     #[default]
     TimeUp,
     Wrecked,
+    Drowned,
 }

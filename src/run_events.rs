@@ -11,7 +11,7 @@ use bevy::text::FontSize;
 
 use crate::audio::AudioBaseGain;
 use crate::difficulty::Difficulty;
-use crate::game::resources::RoundActive;
+use crate::game::resources::{RoundActive, not_drowning};
 use crate::game::state::GameState;
 use crate::game::{SpawnSet, TouchStateSet};
 use crate::modifiers::{ActiveModifier, ModifierKind};
@@ -427,13 +427,15 @@ impl Plugin for RunEventsPlugin {
                 (tick_events, play_event_sting)
                     .chain()
                     .after(TouchStateSet)
-                    .run_if(in_state(GameState::Playing)),
+                    .run_if(in_state(GameState::Playing))
+                    .run_if(not_drowning),
             )
             .add_systems(
                 Update,
                 update_event_banner_layout
                     .after(TouchStateSet)
-                    .run_if(in_state(GameState::Playing)),
+                    .run_if(in_state(GameState::Playing))
+                    .run_if(not_drowning),
             );
     }
 }
