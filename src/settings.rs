@@ -5,7 +5,11 @@
 //! persisted player choice (including an explicit `false`) always takes
 //! precedence; native platforms use the conservative `false` default.
 
-use bevy::{prelude::*, text::FontSize, window::PrimaryWindow};
+use bevy::{
+    prelude::*,
+    text::{FontSize, TextLayout},
+    window::PrimaryWindow,
+};
 
 use crate::game::{KeyboardStateSet, RestartRequested, TouchStateSet, state::GameState};
 use crate::palette;
@@ -369,6 +373,25 @@ fn opener_layout(window_width: f32, window_height: f32) -> Option<OpenerLayout> 
             font_size: OPENER_DESKTOP_FONT_SIZE,
         }
     })
+}
+
+fn opener_node(layout: OpenerLayout) -> Node {
+    Node {
+        position_type: PositionType::Absolute,
+        top: px(layout.top),
+        right: px(layout.right),
+        width: px(layout.width),
+        height: px(layout.height),
+        border: UiRect::all(px(2.0)),
+        border_radius: BorderRadius::all(px(9.0)),
+        align_items: AlignItems::Center,
+        justify_content: JustifyContent::Center,
+        ..default()
+    }
+}
+
+fn opener_text_layout() -> TextLayout {
+    TextLayout::justify(Justify::Center)
 }
 
 fn opener_hit(position: Vec2, window_width: f32, window_height: f32) -> bool {
@@ -800,18 +823,7 @@ fn sync_settings_ui(
     if show_opener && opener.is_empty() {
         commands
             .spawn((
-                Node {
-                    position_type: PositionType::Absolute,
-                    top: px(layout.top),
-                    right: px(layout.right),
-                    width: px(layout.width),
-                    height: px(layout.height),
-                    border: UiRect::all(px(2.0)),
-                    border_radius: BorderRadius::all(px(9.0)),
-                    align_items: AlignItems::Center,
-                    justify_content: JustifyContent::Center,
-                    ..default()
-                },
+                opener_node(layout),
                 BackgroundColor(Color::srgba(0.035, 0.04, 0.055, 0.94)),
                 BorderColor::all(palette::HUD_ACCENT),
                 Text::new(SETTINGS_OPENER_LABEL),
@@ -820,6 +832,7 @@ fn sync_settings_ui(
                     ..default()
                 },
                 TextColor(palette::HUD_ACCENT.into()),
+                opener_text_layout(),
             ))
             .insert(GlobalZIndex(80))
             .insert(SettingsOpenerRoot);
@@ -1322,6 +1335,49 @@ mod tests {
             assert!(!opener_hit(Vec2::new(right, bottom + 0.001), width, height));
         }
         assert!(!opener_hit(Vec2::ZERO, 0.0, 390.0));
+    }
+
+    #[test]
+    fn opener_node_and_text_layout_center_label_at_target_viewports() {
+        for (width, height, expected) in [
+            (
+                844.0,
+                390.0,
+                OpenerLayout {
+                    top: 10.0,
+                    right: 12.0,
+                    width: 104.0,
+                    height: 34.0,
+                    font_size: 15.0,
+                },
+            ),
+            (
+                1440.0,
+                900.0,
+                OpenerLayout {
+                    top: 14.0,
+                    right: 16.0,
+                    width: 126.0,
+                    height: 42.0,
+                    font_size: 19.0,
+                },
+            ),
+        ] {
+            let layout = opener_layout(width, height).unwrap();
+            assert_eq!(layout, expected);
+
+            let node = opener_node(layout);
+            assert_eq!(node.position_type, PositionType::Absolute);
+            assert_eq!(node.top, px(expected.top));
+            assert_eq!(node.right, px(expected.right));
+            assert_eq!(node.width, px(expected.width));
+            assert_eq!(node.height, px(expected.height));
+            assert_eq!(node.align_items, AlignItems::Center);
+            assert_eq!(node.justify_content, JustifyContent::Center);
+
+            let text_layout = opener_text_layout();
+            assert_eq!(text_layout.justify, Justify::Center);
+        }
     }
 
     #[test]
