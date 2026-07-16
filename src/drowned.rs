@@ -7,7 +7,6 @@ use crate::car::{Car, DriftLatch, DrivingSet, Handbrake, PlayerInput};
 use crate::game::events::PondEntered;
 use crate::game::resources::{Drowning, GameOverReason, RoundActive};
 use crate::game::state::GameState;
-use crate::toy_shading::ToyShadingAssets;
 #[cfg(test)]
 use crate::world::PondFamily;
 use crate::world::PondFootprint;
@@ -32,7 +31,7 @@ impl FromWorld for DrownedPresentationAssets {
         let ripple_mesh = world
             .resource_mut::<Assets<Mesh>>()
             .add(Annulus::new(0.68, 0.82));
-        let splash_mesh = world.resource::<ToyShadingAssets>().contact_plane.clone();
+        let splash_mesh = world.resource_mut::<Assets<Mesh>>().add(Circle::new(0.42));
         let ripple_material =
             world
                 .resource_mut::<Assets<StandardMaterial>>()
@@ -68,6 +67,9 @@ struct DrownedPresentation;
 struct Ripple {
     elapsed: f32,
     phase: f32,
+    initial_scale: f32,
+    growth: f32,
+    sink_rate: f32,
 }
 
 fn earliest_pond_entry(
@@ -247,16 +249,20 @@ fn spawn_drowned_presentation(
     assets: Res<DrownedPresentationAssets>,
 ) {
     for event in events.read() {
+        let flat = Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2);
         for (phase, scale) in [(0.0, 1.0), (0.16, 0.72)] {
             commands.spawn((
                 Mesh3d(assets.ripple_mesh.clone()),
                 MeshMaterial3d(assets.ripple_material.clone()),
-                Transform::from_translation(event.position + Vec3::Y * 0.025)
-                    .with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2))
+                Transform::from_translation(event.position + Vec3::Y * 0.085)
+                    .with_rotation(flat)
                     .with_scale(Vec3::splat(scale)),
                 Ripple {
                     elapsed: 0.0,
                     phase,
+                    initial_scale: scale,
+                    growth: 2.1,
+                    sink_rate: 0.008,
                 },
                 DrownedPresentation,
             ));
@@ -264,11 +270,15 @@ fn spawn_drowned_presentation(
         commands.spawn((
             Mesh3d(assets.splash_mesh.clone()),
             MeshMaterial3d(assets.splash_material.clone()),
-            Transform::from_translation(event.position + Vec3::Y * 0.04)
-                .with_scale(Vec3::new(1.8, 1.0, 1.8)),
+            Transform::from_translation(event.position + Vec3::Y * 0.10)
+                .with_rotation(flat)
+                .with_scale(Vec3::splat(1.8)),
             Ripple {
                 elapsed: 0.0,
                 phase: 0.08,
+                initial_scale: 1.8,
+                growth: 0.65,
+                sink_rate: 0.012,
             },
             DrownedPresentation,
         ));
@@ -284,10 +294,10 @@ fn animate_drowned_presentation(
     for (entity, mut transform, mut ripple) in &mut ripples {
         ripple.elapsed += dt;
         let progress = ((ripple.elapsed - ripple.phase) / RIPPLE_DURATION).clamp(0.0, 1.0);
-        let scale = 0.75 + progress * 2.1;
+        let scale = ripple.initial_scale + progress * ripple.growth;
         transform.scale.x = scale;
         transform.scale.z = scale;
-        transform.translation.y -= dt * 0.015;
+        transform.translation.y -= dt * ripple.sink_rate;
         if ripple.elapsed >= RIPPLE_DURATION + ripple.phase {
             commands.entity(entity).despawn();
         }
