@@ -6,6 +6,9 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Deterministic rotation-v2 gameplay and commitment rules.
+pub mod v2;
+
 /// Typed rules protocol version. This is not the game package version.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
