@@ -796,6 +796,8 @@ fn manage_traffic(
         (Entity, &mut Traffic, &mut Transform, &mut Collider),
         (With<Traffic>, Without<Car>),
     >,
+    paint_wrappers: Query<(&ChildOf, &ImportedTrafficPaintMaterial)>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
     time: Res<Time>,
     mut seed: Local<u32>,
     mut next_traffic_id: Local<u64>,
@@ -886,6 +888,7 @@ fn manage_traffic(
         .filter(|(entity, _, _)| !to_despawn.contains(entity))
         .count();
     for entity in &to_despawn {
+        remove_traffic_paint_material(*entity, &paint_wrappers, &mut materials);
         commands.entity(*entity).despawn();
     }
 
@@ -930,9 +933,29 @@ fn manage_traffic(
 
 /// Despawn every traffic car (e.g. on GameOver / Menu). Recursive despawn in
 /// 0.19 removes the imported wrapper and shadow children (safe, risk E2).
-fn cleanup_traffic(mut commands: Commands, traffic: Query<Entity, With<Traffic>>) {
-    for e in &traffic {
-        commands.entity(e).despawn();
+fn cleanup_traffic(
+    mut commands: Commands,
+    traffic: Query<Entity, With<Traffic>>,
+    paint_wrappers: Query<(&ChildOf, &ImportedTrafficPaintMaterial)>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    for entity in &traffic {
+        remove_traffic_paint_material(entity, &paint_wrappers, &mut materials);
+        commands.entity(entity).despawn();
+    }
+}
+
+fn remove_traffic_paint_material(
+    owner: Entity,
+    paint_wrappers: &Query<(&ChildOf, &ImportedTrafficPaintMaterial)>,
+    materials: &mut Assets<StandardMaterial>,
+) {
+    for (parent, instance) in paint_wrappers {
+        if parent.parent() == owner {
+            if let Some(handle) = &instance.0 {
+                materials.remove(handle.id());
+            }
+        }
     }
 }
 
@@ -1804,7 +1827,24 @@ mod tests {
     }
 
     fn spawn_paint_wrapper(app: &mut App, paint_index: usize) -> (Entity, Entity) {
-        let owner = app.world_mut().spawn_empty().id();
+        let connector = road_plan(0, 0)
+            .connectors
+            .into_iter()
+            .flatten()
+            .next()
+            .unwrap();
+        let owner = app
+            .world_mut()
+            .spawn((Traffic {
+                id: 1,
+                speed: 0.0,
+                speed_roll: 0.0,
+                velocity: Vec2::ZERO,
+                connector,
+                distance: 0.0,
+                route_rng: 1,
+            },))
+            .id();
         let wrapper = app
             .world_mut()
             .spawn((
@@ -2210,6 +2250,29 @@ mod tests {
         assert_eq!(cloned.base_color_texture.as_ref(), Some(&base_texture));
         assert_eq!(cloned.emissive_texture.as_ref(), Some(&emissive_texture));
         assert_eq!(cloned.alpha_mode, AlphaMode::Blend);
+    }
+
+    #[test]
+    fn imported_traffic_paint_clone_is_removed_with_its_owner_lifecycle() {
+        let mut app = traffic_paint_test_app();
+        let source = app
+            .world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial::default());
+        let (owner, wrapper) = spawn_paint_wrapper(&mut app, 0);
+        spawn_paint_primitive(&mut app, wrapper, source);
+        app.update();
+        assert_eq!(app.world().resource::<Assets<StandardMaterial>>().len(), 2);
+
+        app.add_systems(Update, cleanup_traffic);
+        app.update();
+        app.update();
+        assert!(app.world().get_entity(owner).is_err());
+        assert_eq!(
+            app.world().resource::<Assets<StandardMaterial>>().len(),
+            1,
+            "recycled traffic must remove its unique paint clone"
+        );
     }
 
     #[test]

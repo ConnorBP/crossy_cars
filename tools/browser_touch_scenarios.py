@@ -372,7 +372,7 @@ def main() -> int:
             # if the preceding right-third transition failed and state remained
             # Paused, the same touch merely returns to Menu. Settings must be
             # inaccessible after the fresh countdown only in the correct path.
-            page.touchscreen.tap(760, 195)
+            page.touchscreen.tap(422, 340)
             page.wait_for_timeout(3_800)
             settings_volume_minus_must_not_change(
                 "v2:70:0:0:",
