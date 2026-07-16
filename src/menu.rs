@@ -124,6 +124,12 @@ struct TipState {
     elapsed: f32,
 }
 
+/// Selection captured before a touch can press a side card. A completed swipe
+/// resolves from this baseline, preventing the press and release from each
+/// advancing the carousel once.
+#[derive(Resource, Default)]
+struct SwipeStartSelection(Option<ModifierKind>);
+
 #[derive(Component)]
 struct ResponsiveMenuRoot;
 #[derive(Component)]
@@ -161,6 +167,7 @@ impl Plugin for MenuPlugin {
         .init_resource::<MenuMetrics>()
         .init_resource::<MenuBuiltAt>()
         .init_resource::<TipState>()
+        .init_resource::<SwipeStartSelection>()
         .add_systems(OnEnter(GameState::Menu), spawn_menu)
         .add_systems(OnExit(GameState::Menu), despawn_menu)
         .add_systems(
@@ -254,12 +261,21 @@ fn menu_keyboard(
     }
 }
 
-fn menu_swipe(touches: Res<Touches>, mut selected: ResMut<SelectedModifier>) {
+fn menu_swipe(
+    touches: Res<Touches>,
+    mut selected: ResMut<SelectedModifier>,
+    mut start_selection: ResMut<SwipeStartSelection>,
+) {
+    if touches.iter_just_pressed().next().is_some() {
+        start_selection.0 = Some(selected.0);
+    }
     for touch in touches.iter_just_released() {
         let delta = touch.position() - touch.start_position();
         if delta.x.abs() > 48.0 && delta.x.abs() > delta.y.abs() * 1.4 {
+            selected.0 = start_selection.0.unwrap_or(selected.0);
             cycle_selection(&mut selected, if delta.x < 0.0 { 1 } else { -1 });
         }
+        start_selection.0 = None;
     }
 }
 
@@ -1018,6 +1034,18 @@ mod tests {
         );
         assert_eq!(MenuLayout::classify(1280.0, 800.0), MenuLayout::Wide);
         assert_eq!(MenuLayout::classify(1440.0, 900.0), MenuLayout::Wide);
+    }
+
+    #[test]
+    fn swipe_resolution_uses_touch_start_selection_not_pressed_side_card() {
+        let mut selected = SelectedModifier(ModifierKind::RushHour);
+        selected.0 = ModifierKind::Standard;
+        cycle_selection(&mut selected, 1);
+        assert_eq!(selected.0, ModifierKind::RushHour);
+
+        selected.0 = ModifierKind::Standard;
+        cycle_selection(&mut selected, -1);
+        assert_eq!(selected.0, ModifierKind::GlassCannon);
     }
 
     #[test]
