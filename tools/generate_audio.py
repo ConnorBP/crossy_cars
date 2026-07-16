@@ -16,13 +16,15 @@ standard library (``wave``, ``math``, ``struct``, ``random``):
   from ``hit.wav`` (which is a single-ish ~1118 Hz tone): ``penalty`` is
   lower in pitch, descends, and is duller.
 
-Both files are deterministic (seeded), mono, 16-bit PCM, 44100 Hz -- the
+It also writes ``assets/audio/tire_squeal_loop.wav``: a seamless 0.7-second
+band-limited noise loop for hard turns and handbrake drifts. Its periodic
+noise spectrum is confined to 1.5--4 kHz, with no stable low tonal component.
+
+All three files are deterministic (seeded), mono, 16-bit PCM, 44100 Hz -- the
 same format as the existing six audio assets -- normalized to ~90% of full
 scale with hard anti-clipping so they are web-safe and consistent in level.
-
-It also writes ``assets/audio/tire_scrub.wav``: a short, softened tire scrub
-used for hard turns and handbrake drifts. The script never touches the existing
-six audio assets (ambient, click, coin, crash, engine, hit).
+The script never touches the existing six assets (ambient, click, coin, crash,
+engine, hit).
 
 Run::
 
@@ -132,7 +134,8 @@ def _write_wav(path: str, samples: list[float]) -> None:
     if name in EXISTING_ASSETS:
         raise RuntimeError(
             f"Refusing to overwrite existing asset '{name}'. "
-            "This generator only owns positive.wav, penalty.wav, and tire_scrub.wav."
+            "This generator only owns positive.wav, penalty.wav, and "
+            "tire_squeal_loop.wav."
         )
     os.makedirs(os.path.dirname(path), exist_ok=True)
     pcm = _to_pcm16(_normalize(samples))
@@ -244,29 +247,40 @@ def synth_penalty() -> list[float]:
 
 
 # ---------------------------------------------------------------------------
-# tire_scrub.wav -- softened broadband tire scrub for turns/drifts.
+# tire_squeal_loop.wav -- seamless, band-limited tire noise.
 # ---------------------------------------------------------------------------
-def synth_tire_scrub() -> list[float]:
-    random.seed(20260716)
-    duration = 0.48
-    n = int(duration * SAMPLE_RATE)
+def synth_tire_squeal_loop() -> list[float]:
+    """Build periodic noise using only Fourier bins from 1.5 to 4 kHz.
+
+    Integer-cycle bins make the signal and its slope periodic at the loop
+    boundary. Random phases, amplitudes, and sparse bin selection prevent a
+    stable pitch from emerging. Rotating to the quietest adjacent boundary
+    further bounds the quantized PCM seam without adding an envelope (which
+    would introduce low-frequency modulation).
+    """
+    rng = random.Random(20260716)
+    duration = 0.70
+    n = round(duration * SAMPLE_RATE)
     output = [0.0] * n
-    filtered = 0.0
-    phase = 0.0
-    for i in range(n):
-        t = i / SAMPLE_RATE
-        # Low-pass deterministic white noise so the cue reads as rubber scrub,
-        # not static. A soft tonal component adds tire character.
-        white = random.uniform(-1.0, 1.0)
-        filtered += 0.16 * (white - filtered)
-        frequency = 520.0 - 130.0 * (i / n)
-        phase += 2.0 * math.pi * frequency / SAMPLE_RATE
-        attack = min(1.0, t / 0.035)
-        release = min(1.0, (duration - t) / 0.11)
-        envelope = math.sin(math.pi * 0.5 * attack) * math.sin(math.pi * 0.5 * release)
-        wobble = 0.82 + 0.18 * math.sin(2.0 * math.pi * 11.0 * t)
-        output[i] = (0.78 * filtered + 0.14 * math.sin(phase)) * envelope * wobble
-    return output
+
+    first_bin = math.ceil(1500.0 * n / SAMPLE_RATE)
+    last_bin = math.floor(4000.0 * n / SAMPLE_RATE)
+    bins = sorted(rng.sample(range(first_bin, last_bin + 1), 320))
+    for frequency_bin in bins:
+        phase = rng.uniform(0.0, 2.0 * math.pi)
+        # Modest amplitude variation keeps the spectrum noise-like while no
+        # individual high-frequency bin dominates as a whistle.
+        amplitude = rng.uniform(0.65, 1.0) / math.sqrt(len(bins))
+        step = 2.0 * math.pi * frequency_bin / n
+        for i in range(n):
+            output[i] += amplitude * math.sin(step * i + phase)
+
+    # Every circular edge is part of the periodic waveform. Put the smallest
+    # one at the file boundary so PCM quantization leaves a tightly bounded
+    # last-to-first seam.
+    cut = min(range(n), key=lambda i: abs(output[(i + 1) % n] - output[i]))
+    start = (cut + 1) % n
+    return output[start:] + output[:start]
 
 
 # ---------------------------------------------------------------------------
@@ -278,7 +292,7 @@ def main() -> None:
     targets = [
         ("positive.wav", synth_positive),
         ("penalty.wav", synth_penalty),
-        ("tire_scrub.wav", synth_tire_scrub),
+        ("tire_squeal_loop.wav", synth_tire_squeal_loop),
     ]
 
     print(f"Audio dir: {AUDIO_DIR}")

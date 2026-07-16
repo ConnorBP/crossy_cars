@@ -24,7 +24,7 @@ struct AudioHandles {
     ambient: Handle<AudioSource>,
     positive: Handle<AudioSource>,
     penalty: Handle<AudioSource>,
-    tire_scrub: Handle<AudioSource>,
+    tire_squeal_loop: Handle<AudioSource>,
 }
 
 /// Marker + smoothed state for the single looping engine audio entity, so we
@@ -48,21 +48,27 @@ const ENABLE_AMBIENT_BED: bool = false;
 #[derive(Component)]
 struct AmbientSound;
 
-#[derive(Component)]
-struct TireScrubSound;
+/// Marker and envelope state for the sole tire-squeal loop entity. The source
+/// is spawned at silence and retained across HardTurn <-> Drift transitions.
+#[derive(Component, Debug)]
+struct TireSquealSound {
+    smooth_gain: f32,
+    /// Bounds the lifetime of an inactive entity whose asynchronously-created
+    /// `AudioSink` has not arrived yet.
+    inactive_without_sink: f32,
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-enum TireScrubKind {
+enum TireSquealKind {
     #[default]
     None,
     HardTurn,
     Drift,
 }
 
-#[derive(Resource, Default, Debug, PartialEq)]
-struct TireScrubState {
-    active: TireScrubKind,
-    cooldown: f32,
+#[derive(Resource, Default, Debug, PartialEq, Eq)]
+struct TireSquealState {
+    active: TireSquealKind,
 }
 
 /// Unscaled local gain retained so live master changes do not compound.
@@ -77,7 +83,7 @@ pub struct AudioPlugin;
 impl Plugin for AudioPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<AudioHandles>()
-            .init_resource::<TireScrubState>()
+            .init_resource::<TireSquealState>()
             .add_systems(
                 Update,
                 (
@@ -91,7 +97,7 @@ impl Plugin for AudioPlugin {
                         .chain()
                         .before(update_engine),
                     update_engine.run_if(in_state(GameState::Playing)),
-                    update_tire_scrub
+                    update_tire_squeal
                         .after(DrivingSet)
                         .run_if(in_state(GameState::Playing)),
                 ),
@@ -102,7 +108,7 @@ impl Plugin for AudioPlugin {
             )
             .add_systems(
                 OnExit(GameState::Playing),
-                (cleanup_engine, cleanup_ambient, cleanup_tire_scrub),
+                (cleanup_engine, cleanup_ambient, cleanup_tire_squeal),
             )
             .add_systems(OnEnter(GameState::Menu), play_click);
     }
@@ -189,7 +195,7 @@ impl FromWorld for AudioHandles {
             ambient: asset_server.load("audio/ambient.wav"),
             positive: asset_server.load("audio/positive.wav"),
             penalty: asset_server.load("audio/penalty.wav"),
-            tire_scrub: asset_server.load("audio/tire_scrub.wav"),
+            tire_squeal_loop: asset_server.load("audio/tire_squeal_loop.wav"),
         }
     }
 }
@@ -207,11 +213,12 @@ const CHICKEN_HIT_VOLUME: f32 = 0.6;
 const CHICKEN_HIT_PITCH: f32 = 1.1;
 const POSITIVE_CUE_VOLUME: f32 = 0.55;
 const PENALTY_CUE_VOLUME: f32 = 0.5;
-const HARD_TURN_VOLUME: f32 = 0.24;
-const HARD_TURN_PITCH: f32 = 1.10;
-const DRIFT_VOLUME: f32 = 0.32;
-const DRIFT_PITCH: f32 = 0.92;
-const TIRE_SCRUB_COOLDOWN: f32 = 0.55;
+const HARD_TURN_VOLUME: f32 = 0.16;
+const DRIFT_VOLUME: f32 = 0.24;
+const TIRE_ATTACK_TAU: f32 = 0.08;
+const TIRE_RELEASE_TAU: f32 = 0.16;
+const TIRE_DESPAWN_GAIN: f32 = 0.005;
+const TIRE_ASYNC_INACTIVE_TIMEOUT: f32 = 0.5;
 
 /// Clamp an authored cue gain to the safe linear range [0, 1] and replace
 /// non-finite values with silence. Bounds every one-shot cue so the master
@@ -366,96 +373,173 @@ fn cleanup_ambient(mut commands: Commands, ambient: Query<Entity, With<AmbientSo
     }
 }
 
-fn cleanup_tire_scrub(
+fn cleanup_tire_squeal(
     mut commands: Commands,
-    cues: Query<Entity, With<TireScrubSound>>,
-    mut state: ResMut<TireScrubState>,
+    cues: Query<Entity, With<TireSquealSound>>,
+    mut state: ResMut<TireSquealState>,
 ) {
     for entity in &cues {
         commands.entity(entity).despawn();
     }
-    *state = TireScrubState::default();
+    *state = TireSquealState::default();
 }
 
-fn tire_scrub_kind(
-    previous: TireScrubKind,
+/// Select the audible tire state. Drift always gets first refusal. Threshold
+/// equality is intentional: enters use `>=`; exits occur only on `<`.
+fn tire_squeal_kind(
+    previous: TireSquealKind,
     speed: f32,
     steer: f32,
     slip: f32,
     drift_latched: bool,
     max_speed: f32,
     turn_rate: f32,
-) -> TireScrubKind {
+) -> TireSquealKind {
     if ![speed, steer, slip, max_speed, turn_rate]
         .into_iter()
         .all(f32::is_finite)
         || max_speed <= 0.0
         || turn_rate < 0.0
     {
-        return TireScrubKind::None;
+        return TireSquealKind::None;
     }
-    let speed_abs = speed.abs();
-    let yaw_rate = steer.abs().clamp(0.0, 1.0) * turn_rate * speed_abs / max_speed;
+
+    let steer = steer.abs();
+    let slip = slip.abs();
+    let yaw_rate = steer * turn_rate * speed / max_speed;
+
     let drift = match previous {
-        TireScrubKind::Drift => drift_latched && speed > 1.0 && slip.abs() > 0.025,
-        _ => drift_latched && speed > 1.25 && slip.abs() >= 0.06,
+        TireSquealKind::Drift => drift_latched && speed >= 2.0 && slip >= 0.05,
+        _ => drift_latched && speed >= 3.0 && slip >= 0.12,
     };
     if drift {
-        return TireScrubKind::Drift;
+        return TireSquealKind::Drift;
     }
+
     let hard_turn = match previous {
-        TireScrubKind::HardTurn => speed_abs > 3.5 && yaw_rate > 0.9,
-        _ => speed_abs > 4.0 && yaw_rate > 1.2,
+        TireSquealKind::HardTurn => speed >= 7.5 && steer >= 0.75 && yaw_rate >= 1.35,
+        _ => speed >= 8.5 && steer >= 0.90 && yaw_rate >= 1.75,
     };
     if hard_turn {
-        TireScrubKind::HardTurn
+        TireSquealKind::HardTurn
     } else {
-        TireScrubKind::None
+        TireSquealKind::None
     }
 }
 
-fn update_tire_scrub(
+fn tire_target_gain(kind: TireSquealKind) -> f32 {
+    match kind {
+        TireSquealKind::None => 0.0,
+        TireSquealKind::HardTurn => HARD_TURN_VOLUME,
+        TireSquealKind::Drift => DRIFT_VOLUME,
+    }
+}
+
+fn smooth_tire_gain(current: f32, target: f32, dt: f32) -> f32 {
+    if !current.is_finite() || !target.is_finite() || !dt.is_finite() {
+        return 0.0;
+    }
+    let tau = if target > current {
+        TIRE_ATTACK_TAU
+    } else {
+        TIRE_RELEASE_TAU
+    };
+    let alpha = 1.0 - (-dt.max(0.0) / tau).exp();
+    current + (target - current) * alpha
+}
+
+fn tire_output_gain(gain: f32, settings: &Settings) -> f32 {
+    if settings.muted {
+        0.0
+    } else {
+        bounded_cue_gain(gain) * settings.master_gain()
+    }
+}
+
+/// Maintain at most one looping squeal entity. State changes only retarget its
+/// smoothed gain; they never layer/restart one-shots. If Bevy has not attached
+/// the sink by the time an inactive request times out, the silent entity is
+/// reclaimed rather than leaking indefinitely.
+fn update_tire_squeal(
     mut commands: Commands,
     handles: Res<AudioHandles>,
     car: Query<(&Car, &DriftLatch)>,
     input: Res<PlayerInput>,
     config: Res<GameConfig>,
+    settings: Res<Settings>,
     time: Res<Time>,
-    mut state: ResMut<TireScrubState>,
+    mut state: ResMut<TireSquealState>,
+    mut cues: Query<(
+        Entity,
+        &mut TireSquealSound,
+        &mut AudioBaseGain,
+        Option<&mut AudioSink>,
+    )>,
 ) {
-    state.cooldown = (state.cooldown - time.delta_secs().min(0.1)).max(0.0);
-    let Ok((car, latch)) = car.single() else {
-        state.active = TireScrubKind::None;
-        return;
-    };
-    let next = tire_scrub_kind(
-        state.active,
-        car.speed,
-        input.steer,
-        car.drift,
-        latch.is_latched(),
-        config.max_speed,
-        config.turn_rate,
-    );
-    state.active = next;
-    if next == TireScrubKind::None || state.cooldown > 0.0 {
-        return;
+    state.active = car
+        .single()
+        .map(|(car, latch)| {
+            tire_squeal_kind(
+                state.active,
+                car.speed,
+                input.steer,
+                car.drift,
+                latch.is_latched(),
+                config.max_speed,
+                config.turn_rate,
+            )
+        })
+        .unwrap_or(TireSquealKind::None);
+
+    let target = tire_target_gain(state.active);
+    let dt = time.delta_secs().min(0.1);
+    let mut found = false;
+    for (entity, mut cue, mut base_gain, sink) in &mut cues {
+        // Defensive single-entity invariant: unusual schedule/lifecycle paths
+        // cannot leave layered loops behind.
+        if found {
+            commands.entity(entity).despawn();
+            continue;
+        }
+        found = true;
+
+        if let Some(mut sink) = sink {
+            cue.inactive_without_sink = 0.0;
+            // Start the envelope only when the asynchronously-created sink can
+            // actually render it; a slow asset load must not skip the attack.
+            cue.smooth_gain = smooth_tire_gain(cue.smooth_gain, target, dt);
+            base_gain.0 = cue.smooth_gain;
+            sink.set_volume(Volume::Linear(tire_output_gain(cue.smooth_gain, &settings)));
+            apply_sink_mute(&mut *sink, settings.muted);
+            if target == 0.0 && cue.smooth_gain < TIRE_DESPAWN_GAIN {
+                commands.entity(entity).despawn();
+            }
+        } else if target == 0.0 {
+            base_gain.0 = cue.smooth_gain;
+            cue.inactive_without_sink += dt;
+            if cue.inactive_without_sink >= TIRE_ASYNC_INACTIVE_TIMEOUT {
+                commands.entity(entity).despawn();
+            }
+        } else {
+            // Hold silence until the sink arrives so its first audible frame
+            // begins the same attack envelope as a synchronously-ready loop.
+            cue.smooth_gain = 0.0;
+            base_gain.0 = 0.0;
+            cue.inactive_without_sink = 0.0;
+        }
     }
-    let (gain, pitch) = match next {
-        TireScrubKind::HardTurn => (HARD_TURN_VOLUME, HARD_TURN_PITCH),
-        TireScrubKind::Drift => (DRIFT_VOLUME, DRIFT_PITCH),
-        TireScrubKind::None => unreachable!(),
-    };
-    let gain = bounded_cue_gain(gain);
-    commands.spawn((
-        AudioPlayer::new(handles.tire_scrub.clone()),
-        PlaybackSettings::DESPAWN
-            .with_volume(Volume::Linear(gain))
-            .with_speed(pitch),
-        AudioBaseGain(gain),
-        TireScrubSound,
-    ));
-    state.cooldown = TIRE_SCRUB_COOLDOWN;
+
+    if !found && target > 0.0 {
+        commands.spawn((
+            AudioPlayer::new(handles.tire_squeal_loop.clone()),
+            PlaybackSettings::LOOP.with_volume(Volume::SILENT),
+            AudioBaseGain(0.0),
+            TireSquealSound {
+                smooth_gain: 0.0,
+                inactive_without_sink: 0.0,
+            },
+        ));
+    }
 }
 
 // --- Engine curve constants ----------------------------------------------
@@ -568,65 +652,220 @@ mod tests {
         assert_eq!(world.query::<&AmbientSound>().iter(world).count(), 0);
     }
 
+    fn policy(
+        previous: TireSquealKind,
+        speed: f32,
+        steer: f32,
+        slip: f32,
+        latch: bool,
+    ) -> TireSquealKind {
+        // max_speed=10 and turn_rate=2 make yaw = steer * speed / 5.
+        tire_squeal_kind(previous, speed, steer, slip, latch, 10.0, 2.0)
+    }
+
     #[test]
-    fn tire_scrub_policy_prioritizes_drift_and_uses_hysteresis() {
+    fn tire_policy_exact_entries_and_normal_driving_is_silent() {
         assert_eq!(
-            tire_scrub_kind(TireScrubKind::None, 8.0, 1.0, 0.0, false, 12.0, 2.5),
-            TireScrubKind::HardTurn
+            policy(TireSquealKind::None, 8.5, 0.90, 0.0, false),
+            TireSquealKind::None,
+            "speed/steer equality alone is below the yaw threshold"
         );
         assert_eq!(
-            tire_scrub_kind(TireScrubKind::None, 8.0, 1.0, 0.08, true, 12.0, 2.5),
-            TireScrubKind::Drift
+            tire_squeal_kind(TireSquealKind::None, 8.5, 0.90, 0.0, false, 7.65, 1.75,),
+            TireSquealKind::HardTurn,
+            "all hard-turn entry thresholds include equality and require no latch"
         );
         assert_eq!(
-            tire_scrub_kind(TireScrubKind::Drift, 5.0, 0.0, 0.03, true, 12.0, 2.5),
-            TireScrubKind::Drift,
-            "latched centered steering should retain an audible slide"
+            tire_squeal_kind(TireSquealKind::None, 8.49, 1.0, 0.0, false, 4.0, 1.0),
+            TireSquealKind::None
         );
         assert_eq!(
-            tire_scrub_kind(TireScrubKind::Drift, 8.0, 1.0, 0.08, false, 12.0, 2.5),
-            TireScrubKind::HardTurn
+            tire_squeal_kind(TireSquealKind::None, 9.0, 0.89, 0.0, false, 4.0, 1.0),
+            TireSquealKind::None
         );
         assert_eq!(
-            tire_scrub_kind(TireScrubKind::HardTurn, 3.9, 1.0, 0.0, false, 5.0, 2.5),
-            TireScrubKind::HardTurn
+            policy(TireSquealKind::None, 12.0, 0.4, 0.0, false),
+            TireSquealKind::None
+        );
+        assert_eq!(
+            policy(TireSquealKind::None, 2.99, 1.0, 0.12, true),
+            TireSquealKind::None
+        );
+        assert_eq!(
+            policy(TireSquealKind::None, 3.0, 0.0, 0.12, true),
+            TireSquealKind::Drift
         );
     }
 
     #[test]
-    fn tire_scrub_policy_rejects_boundaries_reverse_drift_and_nonfinite() {
+    fn tire_policy_hysteresis_exits_and_drift_priority_are_exact() {
         assert_eq!(
-            tire_scrub_kind(TireScrubKind::None, 4.0, 1.0, 0.0, false, 6.0, 2.0),
-            TireScrubKind::None
+            tire_squeal_kind(TireSquealKind::HardTurn, 7.5, 0.75, 0.0, false, 5.625, 1.35,),
+            TireSquealKind::HardTurn
         );
         assert_eq!(
-            tire_scrub_kind(TireScrubKind::None, -8.0, 1.0, 0.08, true, 12.0, 2.5),
-            TireScrubKind::HardTurn,
-            "reverse may squeal during a hard turn but cannot drift"
+            policy(TireSquealKind::HardTurn, 7.49, 1.0, 0.0, false),
+            TireSquealKind::None
+        );
+        assert_eq!(
+            policy(TireSquealKind::HardTurn, 10.0, 0.74, 0.0, false),
+            TireSquealKind::None
+        );
+        assert_eq!(
+            tire_squeal_kind(TireSquealKind::HardTurn, 8.0, 0.9, 0.0, false, 6.0, 1.0),
+            TireSquealKind::None,
+            "yaw below 1.35 exits even while speed and steer remain held"
+        );
+        assert_eq!(
+            policy(TireSquealKind::Drift, 2.0, 0.0, 0.05, true),
+            TireSquealKind::Drift
+        );
+        assert_eq!(
+            policy(TireSquealKind::Drift, 1.99, 1.0, 0.2, true),
+            TireSquealKind::None
+        );
+        assert_eq!(
+            policy(TireSquealKind::Drift, 4.0, 1.0, 0.049, true),
+            TireSquealKind::None
+        );
+        assert_eq!(
+            policy(TireSquealKind::Drift, 12.0, 1.0, 0.2, false),
+            TireSquealKind::HardTurn
+        );
+        assert_eq!(
+            policy(TireSquealKind::HardTurn, 12.0, 1.0, 0.12, true),
+            TireSquealKind::Drift
+        );
+    }
+
+    #[test]
+    fn tire_policy_rejects_reverse_and_nonfinite_inputs() {
+        assert_eq!(
+            policy(TireSquealKind::None, -12.0, 1.0, 0.2, true),
+            TireSquealKind::None
         );
         for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
             assert_eq!(
-                tire_scrub_kind(TireScrubKind::Drift, value, 1.0, 0.1, true, 12.0, 2.5),
-                TireScrubKind::None
+                policy(TireSquealKind::Drift, value, 1.0, 0.2, true),
+                TireSquealKind::None
+            );
+            assert_eq!(
+                policy(TireSquealKind::HardTurn, 12.0, value, 0.2, true),
+                TireSquealKind::None
+            );
+            assert_eq!(
+                policy(TireSquealKind::Drift, 12.0, 1.0, value, true),
+                TireSquealKind::None
             );
         }
     }
 
     #[test]
-    fn tire_scrub_cleanup_resets_state_and_removes_cues() {
+    fn tire_gain_has_smooth_attack_release_and_settings_scaling() {
+        let attacked = smooth_tire_gain(0.0, DRIFT_VOLUME, TIRE_ATTACK_TAU);
+        let released = smooth_tire_gain(DRIFT_VOLUME, 0.0, TIRE_RELEASE_TAU);
+        assert!((attacked - DRIFT_VOLUME * (1.0 - (-1.0_f32).exp())).abs() < 1e-6);
+        assert!((released - DRIFT_VOLUME * (-1.0_f32).exp()).abs() < 1e-6);
+        assert!(smooth_tire_gain(0.004, 0.0, 0.01) < TIRE_DESPAWN_GAIN);
+
+        let half = Settings {
+            master_volume: 50,
+            ..default()
+        };
+        assert_eq!(tire_output_gain(DRIFT_VOLUME, &half), 0.12);
+        let muted = Settings {
+            muted: true,
+            ..default()
+        };
+        assert_eq!(tire_output_gain(DRIFT_VOLUME, &muted), 0.0);
+    }
+
+    fn tire_lifecycle_app() -> App {
+        use bevy::time::TimeUpdateStrategy;
+        use std::time::Duration;
+
         let mut app = App::new();
-        app.init_resource::<TireScrubState>()
-            .add_systems(Update, cleanup_tire_scrub);
-        app.world_mut().resource_mut::<TireScrubState>().active = TireScrubKind::Drift;
-        app.world_mut().resource_mut::<TireScrubState>().cooldown = 0.4;
-        app.world_mut().spawn(TireScrubSound);
+        app.add_plugins((
+            bevy::app::TaskPoolPlugin::default(),
+            bevy::asset::AssetPlugin::default(),
+            bevy::time::TimePlugin,
+        ))
+        .init_asset::<AudioSource>()
+        .init_resource::<AudioHandles>()
+        .init_resource::<TireSquealState>()
+        .init_resource::<PlayerInput>()
+        .init_resource::<GameConfig>()
+        .init_resource::<Settings>()
+        .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+            100,
+        )))
+        .add_systems(Update, update_tire_squeal);
+        app
+    }
+
+    #[test]
+    fn tire_lifecycle_keeps_one_loop_and_bounds_async_inactive_entity() {
+        let mut app = tire_lifecycle_app();
+        app.world_mut().spawn((
+            Car {
+                speed: 12.0,
+                heading: 0.0,
+                drift: 0.0,
+            },
+            DriftLatch::default(),
+        ));
+        app.world_mut().resource_mut::<PlayerInput>().steer = 1.0;
+        app.update();
+        app.update();
+        app.update();
+        let world = app.world_mut();
+        assert_eq!(world.query::<&TireSquealSound>().iter(world).count(), 1);
+
+        world.query::<&mut Car>().single_mut(world).unwrap().speed = 0.0;
+        for _ in 0..6 {
+            app.update();
+        }
+        let world = app.world_mut();
+        assert_eq!(world.query::<&TireSquealSound>().iter(world).count(), 0);
+    }
+
+    #[test]
+    fn tire_cleanup_is_immediate_and_resets_state() {
+        let mut app = App::new();
+        app.init_resource::<TireSquealState>()
+            .add_systems(Update, cleanup_tire_squeal);
+        app.world_mut().resource_mut::<TireSquealState>().active = TireSquealKind::Drift;
+        app.world_mut().spawn(TireSquealSound {
+            smooth_gain: 0.2,
+            inactive_without_sink: 0.0,
+        });
         app.update();
         assert_eq!(
-            *app.world().resource::<TireScrubState>(),
-            TireScrubState::default()
+            *app.world().resource::<TireSquealState>(),
+            TireSquealState::default()
         );
         let world = app.world_mut();
-        assert_eq!(world.query::<&TireScrubSound>().iter(world).count(), 0);
+        assert_eq!(world.query::<&TireSquealSound>().iter(world).count(), 0);
+    }
+
+    #[test]
+    fn tire_squeal_wav_is_deterministic_pcm16_mono_with_bounded_seam() {
+        let wav = include_bytes!("../assets/audio/tire_squeal_loop.wav");
+        assert_eq!(&wav[0..4], b"RIFF");
+        assert_eq!(&wav[8..12], b"WAVE");
+        assert_eq!(u16::from_le_bytes([wav[22], wav[23]]), 1);
+        assert_eq!(u32::from_le_bytes(wav[24..28].try_into().unwrap()), 44_100);
+        assert_eq!(u16::from_le_bytes([wav[34], wav[35]]), 16);
+        let data_len = u32::from_le_bytes(wav[40..44].try_into().unwrap()) as usize;
+        assert_eq!(data_len / 2, 30_870);
+        let first = i16::from_le_bytes([wav[44], wav[45]]) as i32;
+        let last = i16::from_le_bytes([wav[wav.len() - 2], wav[wav.len() - 1]]) as i32;
+        assert!((first - last).abs() <= 2, "loop seam is not bounded");
+
+        let fingerprint = wav.iter().fold(0xcbf29ce484222325_u64, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+        });
+        assert_eq!(fingerprint, 0xe7cdcf761afe1ec1);
     }
 
     #[test]
