@@ -3091,36 +3091,50 @@ impl PondFootprint {
             return None;
         }
 
-        // Use f64 for stable discriminants at rotated tangency while keeping
-        // the public geometry in Bevy's native f32 coordinate type.
+        // Normalize by the segment's largest component before projecting onto
+        // it. This avoids the subtractive cancellation of a discriminant and
+        // keeps every intermediate bounded for very long sweeps. Projection
+        // gives the closest point to the circle center; a strict radius check
+        // then distinguishes a genuine (even shallow) secant from tangency.
+        // f64 preserves the normalized f32 inputs exactly during this work.
         let px = f64::from(start.x);
         let py = f64::from(start.y);
-        let dx = f64::from(end.x - start.x);
-        let dy = f64::from(end.y - start.y);
-        let radius_sq = f64::from(radius) * f64::from(radius);
-        let c = px * px + py * py - radius_sq;
-        if c < 0.0 {
+        let dx = f64::from(end.x) - px;
+        let dy = f64::from(end.y) - py;
+        let radius = f64::from(radius);
+        let radius_sq = radius * radius;
+        if px * px + py * py < radius_sq {
             return Some(0.0);
         }
-        let a = dx * dx + dy * dy;
-        if a == 0.0 {
+
+        let direction_scale = dx.abs().max(dy.abs());
+        if direction_scale == 0.0 || !direction_scale.is_finite() {
             return None;
         }
-        let b = 2.0 * (px * dx + py * dy);
-        let discriminant = b * b - 4.0 * a * c;
-        // Inputs originate as f32, so classify f32-scale discriminant noise
-        // as tangency rather than using an unrealistically tiny f64 epsilon.
-        let roundoff = f64::from(f32::EPSILON) * 64.0 * (b * b + (4.0 * a * c).abs() + 1.0);
-        if discriminant <= roundoff {
+        let dx = dx / direction_scale;
+        let dy = dy / direction_scale;
+        let direction_sq = dx * dx + dy * dy;
+        let closest_t = (-(px * dx + py * dy) / direction_sq).clamp(0.0, direction_scale);
+        let closest_x = px + closest_t * dx;
+        let closest_y = py + closest_t * dy;
+        let closest_sq = closest_x * closest_x + closest_y * closest_y;
+        // World/local rotation round-trips originate as f32 and can place an
+        // exact tangent a few ULPs inside. Keep that fixed radius-scaled band
+        // outside; unlike a discriminant tolerance it never grows with sweep
+        // length, so very long and 0.0001-deep shallow secants remain entries.
+        let tangent_band = f64::from(f32::EPSILON) * 16.0 * radius_sq.max(1.0);
+        let penetration_sq = radius_sq - closest_sq;
+        if penetration_sq <= tangent_band {
             return None;
         }
-        let root = discriminant.sqrt();
-        let enter = (-b - root) / (2.0 * a);
-        let exit = (-b + root) / (2.0 * a);
-        let interval_start = enter.max(0.0);
-        let interval_end = exit.min(1.0);
-        (interval_start < interval_end && interval_end > 0.0 && interval_start < 1.0)
-            .then_some(interval_start as f32)
+
+        let half_chord_t = (penetration_sq / direction_sq).sqrt();
+        let enter_t = closest_t - half_chord_t;
+        let exit_t = closest_t + half_chord_t;
+        let interval_start = enter_t.max(0.0);
+        let interval_end = exit_t.min(direction_scale);
+        (interval_start < interval_end && interval_end > 0.0 && interval_start < direction_scale)
+            .then_some((interval_start / direction_scale) as f32)
     }
 
     /// Conservative block-local AABB including the visible shoreline. The
@@ -6429,6 +6443,73 @@ mod tests {
             .swept_world_entry(world_origin, world_origin + left, world_origin + right)
             .unwrap();
         assert!((world_entry - entry).abs() < 1e-5);
+    }
+
+    #[test]
+    fn pond_sweep_stably_distinguishes_long_and_shallow_secants() {
+        let pond = PondFootprint {
+            family: PondFamily::GardenOval,
+            center: Vec2::ZERO,
+            radii: Vec2::ONE,
+            rotation: 0.0,
+        };
+
+        assert_eq!(
+            pond.swept_local_entry(Vec2::new(-300.0, 0.0), Vec2::new(300.0, 0.0)),
+            Some(299.0 / 600.0),
+            "an extremely long center crossing must retain its chord"
+        );
+        let shallow = pond
+            .swept_local_entry(Vec2::new(-4.0, 0.9999), Vec2::new(4.0, 0.9999))
+            .expect("a shallow strict secant must enter");
+        assert!(shallow > 0.49 && shallow < 0.5);
+        assert_eq!(
+            pond.swept_local_entry(Vec2::new(-4.0, 1.0), Vec2::new(4.0, 1.0)),
+            None,
+            "an exact tangent stays outside"
+        );
+        assert_eq!(
+            pond.swept_local_entry(Vec2::new(-4.0, 1.0001), Vec2::new(4.0, 1.0001)),
+            None,
+            "a parallel outside sweep stays outside"
+        );
+    }
+
+    #[test]
+    fn rotated_ellipse_and_car_scale_preserve_shallow_secants() {
+        let pond = test_pond_footprint();
+        let shallow_start = ellipse_world_point(pond, Vec2::new(-4.0, 0.9999));
+        let shallow_end = ellipse_world_point(pond, Vec2::new(4.0, 0.9999));
+        assert!(
+            pond.swept_local_entry(shallow_start, shallow_end).is_some(),
+            "normalization of a rotated ellipse must preserve a shallow secant"
+        );
+        let tangent_start = ellipse_world_point(pond, Vec2::new(-4.0, 1.0));
+        let tangent_end = ellipse_world_point(pond, Vec2::new(4.0, 1.0));
+        assert_eq!(pond.swept_local_entry(tangent_start, tangent_end), None);
+
+        let heading = 0.41;
+        let half_extents = Vec2::new(0.56, 1.0);
+        let car_scale = 1.0 + pond.normalized_car_radius(heading, half_extents).unwrap();
+        let car_shallow_start = ellipse_world_point(pond, Vec2::new(-4.0, car_scale - 0.0001));
+        let car_shallow_end = ellipse_world_point(pond, Vec2::new(4.0, car_scale - 0.0001));
+        assert!(
+            pond.swept_local_car_entry(car_shallow_start, car_shallow_end, heading, half_extents,)
+                .is_some(),
+            "the expanded car circle must retain a shallow secant"
+        );
+        let car_tangent_start = ellipse_world_point(pond, Vec2::new(-4.0, car_scale));
+        let car_tangent_end = ellipse_world_point(pond, Vec2::new(4.0, car_scale));
+        assert_eq!(
+            pond.swept_local_car_entry(car_tangent_start, car_tangent_end, heading, half_extents,),
+            None
+        );
+        let car_outside_start = ellipse_world_point(pond, Vec2::new(-4.0, car_scale + 0.0001));
+        let car_outside_end = ellipse_world_point(pond, Vec2::new(4.0, car_scale + 0.0001));
+        assert_eq!(
+            pond.swept_local_car_entry(car_outside_start, car_outside_end, heading, half_extents,),
+            None
+        );
     }
 
     #[test]
