@@ -52,7 +52,7 @@ use crate::game::resources::{RoundActive, Score, TimeLeft};
 use crate::game::state::GameState;
 use crate::modifiers::{ActiveModifier, ModifierKind};
 use crate::palette;
-use crate::shaders::WaterMaterial;
+use crate::shaders::{WaterFamilyPreset, WaterMaterial};
 use crate::textures::{GROUND_VARIANTS, TextureAssets};
 use crate::toy_shading::ImportedWorldVisual;
 #[cfg(any(target_arch = "wasm32", test))]
@@ -2009,20 +2009,7 @@ impl FromWorld for WorldAssets {
             );
         let mut materials = materials;
         materials.pond_water = world.resource_scope(|_, mut a: Mut<Assets<WaterMaterial>>| {
-            [
-                a.add(WaterMaterial {
-                    base: LinearRgba::new(0.08, 0.36, 0.49, 1.0),
-                    time: Vec4::ZERO,
-                }),
-                a.add(WaterMaterial {
-                    base: LinearRgba::new(0.10, 0.30, 0.38, 1.0),
-                    time: Vec4::ZERO,
-                }),
-                a.add(WaterMaterial {
-                    base: LinearRgba::new(0.07, 0.40, 0.54, 1.0),
-                    time: Vec4::ZERO,
-                }),
-            ]
+            WaterFamilyPreset::ALL.map(|preset| a.add(preset.material()))
         });
         Self {
             meshes,
@@ -4410,10 +4397,10 @@ fn spawn_pond(
     contact_plane: &Handle<Mesh>,
     contact_material: &Handle<StandardMaterial>,
 ) {
-    let water_index = match family {
-        DistrictFamily::WaterGardenOval => 0,
-        DistrictFamily::WaterReedMarsh => 1,
-        DistrictFamily::WaterFarmReservoir => 2,
+    let water_preset = match family {
+        DistrictFamily::WaterGardenOval => WaterFamilyPreset::GardenOval,
+        DistrictFamily::WaterReedMarsh => WaterFamilyPreset::ReedMarsh,
+        DistrictFamily::WaterFarmReservoir => WaterFamilyPreset::FarmReservoir,
         _ => return,
     };
     let rotation = Quat::from_rotation_y(footprint.rotation);
@@ -4434,7 +4421,7 @@ fn spawn_pond(
     ));
     parent.spawn((
         Mesh3d(assets.meshes.pond_water.clone()),
-        MeshMaterial3d(assets.materials.pond_water[water_index].clone()),
+        MeshMaterial3d(assets.materials.pond_water[water_preset.index()].clone()),
         Transform::from_xyz(footprint.center.x, 0.045, footprint.center.y)
             .with_rotation(rotation * flat)
             .with_scale(Vec3::new(footprint.radii.x, footprint.radii.y, 1.0)),

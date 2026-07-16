@@ -207,15 +207,24 @@ impl Plugin for WaterMaterialPlugin {
     }
 }
 
-#[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
+/// Four vec4 uniforms keep every WebGL2 binding naturally 16-byte-sized.
+///
+/// `motion.x` is the only value mutated at runtime. The remaining components
+/// are authored preset data, which means reduced motion can freeze the exact
+/// phase-zero composition without flattening its attractive static detail.
+#[repr(C)]
+#[derive(Asset, TypePath, AsBindGroup, Debug, Clone, PartialEq)]
 pub struct WaterMaterial {
     #[uniform(0)]
-    pub(crate) base: LinearRgba,
-    // WebGL2 requires uniform buffer bindings to be 16-byte aligned, so the
-    // animated phase is carried in a vec4 (we only use .x). A bare f32 (4B)
-    // fails pipeline creation on ANGLE/WebGL2.
+    pub(crate) deep: Vec4,
     #[uniform(1)]
-    pub(crate) time: Vec4,
+    pub(crate) shallow: Vec4,
+    /// Phase, spatial frequency, counter-wave rate, color-wave amount.
+    #[uniform(2)]
+    pub(crate) motion: Vec4,
+    /// Pseudo-depth curve, edge width, poster steps, edge highlight amount.
+    #[uniform(3)]
+    pub(crate) detail: Vec4,
 }
 
 impl Material for WaterMaterial {
@@ -224,8 +233,55 @@ impl Material for WaterMaterial {
     }
 }
 
-/// Advance the ripple phase every frame. `Assets::iter_mut` yields
-/// `(AssetId, &mut Asset)` pairs, so we discard the id and bump `time`.
+/// Restrained presentation presets corresponding to the three pond families.
+/// Geometry/gameplay identity remains in `world`; this type owns shader data.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WaterFamilyPreset {
+    GardenOval,
+    ReedMarsh,
+    FarmReservoir,
+}
+
+impl WaterFamilyPreset {
+    pub(crate) const ALL: [Self; 3] = [Self::GardenOval, Self::ReedMarsh, Self::FarmReservoir];
+
+    pub(crate) const fn index(self) -> usize {
+        match self {
+            Self::GardenOval => 0,
+            Self::ReedMarsh => 1,
+            Self::FarmReservoir => 2,
+        }
+    }
+
+    pub(crate) const fn material(self) -> WaterMaterial {
+        match self {
+            // Clear blue-green ornamental water.
+            Self::GardenOval => WaterMaterial {
+                deep: Vec4::new(0.035, 0.190, 0.255, 1.0),
+                shallow: Vec4::new(0.105, 0.380, 0.440, 1.0),
+                motion: Vec4::new(0.0, 3.00, 0.64, 0.070),
+                detail: Vec4::new(0.82, 0.075, 4.0, 0.070),
+            },
+            // Slightly muted, organic marsh water.
+            Self::ReedMarsh => WaterMaterial {
+                deep: Vec4::new(0.035, 0.115, 0.105, 1.0),
+                shallow: Vec4::new(0.120, 0.285, 0.220, 1.0),
+                motion: Vec4::new(0.0, 2.35, 0.46, 0.055),
+                detail: Vec4::new(1.12, 0.065, 3.0, 0.045),
+            },
+            // Cooler, tidier farm-reservoir water.
+            Self::FarmReservoir => WaterMaterial {
+                deep: Vec4::new(0.025, 0.205, 0.310, 1.0),
+                shallow: Vec4::new(0.075, 0.405, 0.500, 1.0),
+                motion: Vec4::new(0.0, 3.55, 0.78, 0.060),
+                detail: Vec4::new(0.70, 0.055, 5.0, 0.055),
+            },
+        }
+    }
+}
+
+/// Advance only the ripple phase every frame. `Assets::iter_mut` yields
+/// `(AssetId, &mut Asset)` pairs, so we discard the id.
 fn update_water(
     time: Res<Time>,
     settings: Option<Res<Settings>>,
@@ -236,10 +292,14 @@ fn update_water(
     let reduced_motion = settings
         .as_ref()
         .is_none_or(|settings| settings.reduced_motion);
-    let t = water_ripple_time(time.elapsed_secs(), reduced_motion);
-    for (_, mat) in water_materials.iter_mut() {
-        mat.time = Vec4::splat(t);
+    let phase = water_ripple_time(time.elapsed_secs(), reduced_motion);
+    for (_, material) in water_materials.iter_mut() {
+        set_water_phase(material, phase);
     }
+}
+
+fn set_water_phase(material: &mut WaterMaterial, phase: f32) {
+    material.motion.x = phase;
 }
 
 /// Reduced motion freezes the shader phase at its neutral startup value.
@@ -419,9 +479,67 @@ mod tests {
     }
 
     #[test]
-    fn reduced_motion_freezes_water_ripple_time() {
+    fn water_material_is_four_contiguous_vec4_fields() {
+        assert_eq!(std::mem::size_of::<WaterMaterial>(), 64);
+        assert_eq!(std::mem::align_of::<WaterMaterial>(), 16);
+        assert_eq!(std::mem::offset_of!(WaterMaterial, deep), 0);
+        assert_eq!(std::mem::offset_of!(WaterMaterial, shallow), 16);
+        assert_eq!(std::mem::offset_of!(WaterMaterial, motion), 32);
+        assert_eq!(std::mem::offset_of!(WaterMaterial, detail), 48);
+    }
+
+    #[test]
+    fn water_family_presets_are_finite_and_restrained() {
+        for preset in WaterFamilyPreset::ALL {
+            let material = preset.material();
+            for color in [material.deep, material.shallow] {
+                assert!(color.is_finite(), "{preset:?} had a non-finite color");
+                for channel in color.to_array() {
+                    assert!(
+                        (0.0..=1.0).contains(&channel),
+                        "{preset:?} color channel was {channel}"
+                    );
+                }
+                assert_eq!(color.w, 1.0);
+            }
+
+            assert!(material.motion.is_finite());
+            assert_eq!(material.motion.x, 0.0);
+            assert!((1.0..=6.0).contains(&material.motion.y));
+            assert!((0.1..=2.0).contains(&material.motion.z));
+            assert!((0.0..=0.15).contains(&material.motion.w));
+
+            assert!(material.detail.is_finite());
+            assert!((0.25..=2.0).contains(&material.detail.x));
+            assert!((0.01..=0.15).contains(&material.detail.y));
+            assert!((2.0..=8.0).contains(&material.detail.z));
+            assert_eq!(material.detail.z.fract(), 0.0);
+            assert!((0.0..=0.15).contains(&material.detail.w));
+        }
+    }
+
+    #[test]
+    fn water_family_presets_are_distinct_and_stably_indexed() {
+        for (index, left) in WaterFamilyPreset::ALL.into_iter().enumerate() {
+            assert_eq!(left.index(), index);
+            for right in WaterFamilyPreset::ALL.into_iter().skip(index + 1) {
+                assert_ne!(left.material(), right.material());
+            }
+        }
+    }
+
+    #[test]
+    fn reduced_motion_freezes_exact_phase_zero_only() {
         assert_eq!(water_ripple_time(42.0, true), 0.0);
         assert_eq!(water_ripple_time(42.0, false), 42.0);
+
+        let mut material = WaterFamilyPreset::GardenOval.material();
+        let authored_motion = material.motion;
+        set_water_phase(&mut material, water_ripple_time(42.0, true));
+        assert_eq!(material.motion.x, 0.0);
+        assert_eq!(material.motion.y, authored_motion.y);
+        assert_eq!(material.motion.z, authored_motion.z);
+        assert_eq!(material.motion.w, authored_motion.w);
     }
 
     #[test]
