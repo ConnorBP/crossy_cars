@@ -1850,6 +1850,17 @@ struct WorldMeshAssets {
     hedge_box: Handle<Mesh>,
 }
 
+/// Generate the tangent basis once, before a procedural surface enters the
+/// shared mesh cache. Normal-mapped `StandardMaterial`s require tangents; a
+/// silent fallback would flatten their relief, so malformed source geometry is
+/// a startup error with the affected cache entry named explicitly.
+fn normal_mapped_surface_mesh(mut mesh: Mesh, cache_name: &'static str) -> Mesh {
+    mesh.generate_tangents().unwrap_or_else(|error| {
+        panic!("failed to generate MikkTSpace tangents for cached {cache_name} mesh: {error}")
+    });
+    mesh
+}
+
 struct WorldMaterialAssets {
     line: Handle<StandardMaterial>,
     curb_contact_overlay: Handle<StandardMaterial>,
@@ -1870,7 +1881,13 @@ impl FromWorld for WorldAssets {
         // Separate resource scopes ensure the mutable asset-storage borrows
         // never overlap.
         let meshes = world.resource_scope(|_, mut a: Mut<Assets<Mesh>>| WorldMeshAssets {
-            ground: a.add(Plane3d::default().mesh().size(40.0, 40.0)),
+            // These surfaces are paired with the normal-mapped materials in
+            // TextureAssets. Generate MikkTSpace data here exactly once; all
+            // streamed blocks and biome variants clone the cached handles.
+            ground: a.add(normal_mapped_surface_mesh(
+                Plane3d::default().mesh().size(40.0, 40.0).into(),
+                "ground/biome ground",
+            )),
             // All family-varying dimensions scale this cached unit primitive.
             // Streaming and respawning therefore never append building,
             // window, path, parking, or podium meshes to Assets<Mesh>.
@@ -1892,11 +1909,30 @@ impl FromWorld for WorldAssets {
             pond_shore: a.add(Circle::new(1.0)),
             pond_reed: a.add(Cuboid::new(0.10, 0.75, 0.10)),
             pond_rock: a.add(Sphere::new(0.45).mesh().uv(8, 6)),
-            road_pad: a.add(Plane3d::default().mesh().size(8.0, 8.0)),
-            road_z: a.add(Plane3d::default().mesh().size(8.0, 16.0)),
-            road_x: a.add(Plane3d::default().mesh().size(16.0, 8.0)),
-            curb_z: std::array::from_fn(|_| a.add(Cuboid::new(1.5, 0.18, 16.0))),
-            curb_x: std::array::from_fn(|_| a.add(Cuboid::new(16.0, 0.18, 1.5))),
+            road_pad: a.add(normal_mapped_surface_mesh(
+                Plane3d::default().mesh().size(8.0, 8.0).into(),
+                "road pad",
+            )),
+            road_z: a.add(normal_mapped_surface_mesh(
+                Plane3d::default().mesh().size(8.0, 16.0).into(),
+                "road Z arm",
+            )),
+            road_x: a.add(normal_mapped_surface_mesh(
+                Plane3d::default().mesh().size(16.0, 8.0).into(),
+                "road X arm",
+            )),
+            curb_z: std::array::from_fn(|_| {
+                a.add(normal_mapped_surface_mesh(
+                    Mesh::from(Cuboid::new(1.5, 0.18, 16.0)),
+                    "sidewalk/curb Z",
+                ))
+            }),
+            curb_x: std::array::from_fn(|_| {
+                a.add(normal_mapped_surface_mesh(
+                    Mesh::from(Cuboid::new(16.0, 0.18, 1.5)),
+                    "sidewalk/curb X",
+                ))
+            }),
             dash_z: a.add(Cuboid::new(0.18, 0.02, 2.0)),
             dash_x: a.add(Cuboid::new(2.0, 0.02, 0.18)),
             edge_line_z: std::array::from_fn(|_| a.add(Cuboid::new(0.12, 0.02, 16.0))),
@@ -7749,6 +7785,142 @@ mod tests {
             assert!(overlap_x <= 0.0 || overlap_z <= 0.0);
             assert_eq!(half * 2.0, ROAD_BLOCK_SIZE);
         }
+    }
+
+    #[test]
+    fn every_cached_normal_mapped_surface_has_mikktspace_tangents() {
+        let mut app = App::new();
+        app.init_resource::<Assets<Mesh>>()
+            .init_resource::<Assets<Image>>()
+            .init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<Assets<WaterMaterial>>()
+            .init_resource::<TextureAssets>();
+        let mesh_count_before = app.world().resource::<Assets<Mesh>>().len();
+        app.init_resource::<WorldAssets>();
+        let mesh_count_after = app.world().resource::<Assets<Mesh>>().len();
+
+        let pairings = {
+            let world = app.world();
+            let meshes = &world.resource::<WorldAssets>().meshes;
+            let textures = world.resource::<TextureAssets>();
+            let mut pairings = vec![
+                (
+                    "grass ground",
+                    meshes.ground.clone(),
+                    textures.grass.clone(),
+                ),
+                ("road pad", meshes.road_pad.clone(), textures.road.clone()),
+                ("road X arm", meshes.road_x.clone(), textures.road.clone()),
+                ("road Z arm", meshes.road_z.clone(), textures.road.clone()),
+            ];
+            for (variant, material) in textures.park_ground.iter().enumerate() {
+                pairings.push((
+                    if variant == 0 {
+                        "park ground 0"
+                    } else {
+                        "park ground 1"
+                    },
+                    meshes.ground.clone(),
+                    material.clone(),
+                ));
+            }
+            for (variant, material) in textures.orchard_ground.iter().enumerate() {
+                pairings.push((
+                    if variant == 0 {
+                        "orchard ground 0"
+                    } else {
+                        "orchard ground 1"
+                    },
+                    meshes.ground.clone(),
+                    material.clone(),
+                ));
+            }
+            for (variant, material) in textures.field_ground.iter().enumerate() {
+                pairings.push((
+                    if variant == 0 {
+                        "field ground 0"
+                    } else {
+                        "field ground 1"
+                    },
+                    meshes.ground.clone(),
+                    material.clone(),
+                ));
+            }
+            for mesh in &meshes.curb_x {
+                pairings.push(("sidewalk/curb X", mesh.clone(), textures.sidewalk.clone()));
+            }
+            for mesh in &meshes.curb_z {
+                pairings.push(("sidewalk/curb Z", mesh.clone(), textures.sidewalk.clone()));
+            }
+            pairings
+        };
+
+        // WorldAssets owns 36 reusable procedural meshes plus one cached curb
+        // contact overlay for each of the 16 tile kinds. Tangent generation
+        // mutates the ten relevant mesh assets and must not append copies.
+        assert_eq!(
+            mesh_count_after - mesh_count_before,
+            36 + TILE_CATALOG.len()
+        );
+        assert_eq!(pairings.len(), 16);
+        assert_eq!(
+            pairings
+                .iter()
+                .map(|(_, mesh, _)| mesh.id())
+                .collect::<BTreeSet<_>>()
+                .len(),
+            10
+        );
+        assert_eq!(
+            pairings
+                .iter()
+                .map(|(_, _, material)| material.id())
+                .collect::<BTreeSet<_>>()
+                .len(),
+            9
+        );
+
+        let meshes = app.world().resource::<Assets<Mesh>>();
+        let materials = app.world().resource::<Assets<StandardMaterial>>();
+        for (name, mesh_handle, material_handle) in pairings {
+            let material = materials
+                .get(&material_handle)
+                .unwrap_or_else(|| panic!("missing cached {name} material"));
+            assert!(
+                material.normal_map_texture.is_some(),
+                "enumerated {name} material must remain normal mapped"
+            );
+            let mesh = meshes
+                .get(&mesh_handle)
+                .unwrap_or_else(|| panic!("missing cached {name} mesh"));
+            let tangents = mesh
+                .attribute(Mesh::ATTRIBUTE_TANGENT)
+                .unwrap_or_else(|| panic!("cached normal-mapped {name} mesh lacks tangents"));
+            let bevy::mesh::VertexAttributeValues::Float32x4(tangents) = tangents else {
+                panic!("cached normal-mapped {name} tangents must be Float32x4")
+            };
+            assert_eq!(tangents.len(), mesh.count_vertices(), "{name}");
+            assert!(
+                tangents
+                    .iter()
+                    .flatten()
+                    .all(|component| component.is_finite())
+            );
+        }
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "failed to generate MikkTSpace tangents for cached broken surface mesh"
+    )]
+    fn normal_mapped_surface_tangent_failure_is_explicit() {
+        normal_mapped_surface_mesh(
+            Mesh::new(
+                PrimitiveTopology::TriangleList,
+                RenderAssetUsages::default(),
+            ),
+            "broken surface",
+        );
     }
 
     #[test]
