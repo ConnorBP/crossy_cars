@@ -59,4 +59,14 @@ existing six assets.
 
 ## Models and textures
 
-The car, traffic, characters, animals, buildings, props, particles, and other meshes are assembled procedurally from Bevy primitives or generated geometry. Surface textures and normal maps are generated in code. No third-party model or surface-texture assets are used; the credited Pisa environment maps above are the only externally sourced image assets.
+Roady combines procedural geometry and textures with validated authored GLB models. The optional miniature surface-detail library under `assets/textures/pbr_detail/` contains 256px transformed derivatives of user-supplied, free-to-use PBR maps. `assets/textures/pbr_detail/manifest.json` records every source archive/entry, source and output SHA-256, channel packing, attenuation, truncation-recovery policy, and generated output size. The original 2K/4K sources are not shipped.
+
+The selected sources are:
+
+- `scuffed-plastic-1-bl.zip`
+- `concrete_wall_01_4k.zip`
+- `wood_01_4k.zip`
+- `whispy-grass-meadow-bl.zip`
+- `Smudges01_4K.png`
+
+The user confirmed these source materials are free to use. Roady preserves its procedural colors and toy-town finishes; the derivatives supply only restrained normal, roughness, and ambient-occlusion modulation.
