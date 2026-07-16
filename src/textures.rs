@@ -166,9 +166,9 @@ impl FromWorld for TextureAssets {
                 let mut materials = world.resource_mut::<Assets<StandardMaterial>>();
 
                 // --- Procedural normal maps ---
-                // Road/asphalt gets a gravelly normal map (stronger) so the surface
-                // catches light per-pixel instead of looking like flat paint.
-                let road_normal = images.add(asphalt_normal_map());
+                // Keep asphalt relief in its procedural color texture. A tiled
+                // normal at gameplay distance creates moire once tangents are
+                // enabled, while the requested PBR pass targets toy materials.
                 // Grass gets gentle blade bumps for natural light scatter.
                 let grass_normal = details.as_ref().map_or_else(
                     || images.add(grass_normal_map()),
@@ -206,7 +206,6 @@ impl FromWorld for TextureAssets {
                     StandardMaterial {
                         base_color: Color::WHITE,
                         base_color_texture: Some(images.add(road_texture())),
-                        normal_map_texture: Some(road_normal),
                         uv_transform: Affine2::from_scale(Vec2::splat(8.0)),
                         ..default()
                     },
@@ -905,23 +904,6 @@ fn grass_normal_map() -> Image {
             clump + blade
         },
         0.7,
-    )
-}
-
-/// Asphalt/road normal map: a mix of low-frequency bumps + sharper gravel
-/// specks so the road catches light with a gravelly grain. T15: richer with
-/// a third high-frequency octave for finer gravel.
-fn asphalt_normal_map() -> Image {
-    make_normal_map(
-        |x, y| {
-            let base = signed_noise(x, y) as f32 / 128.0;
-            // Sharper speckles at a different frequency for gravel grain.
-            let speck = signed_noise(x * 3, y * 3) as f32 / 128.0;
-            // Finer high-frequency gravel dust.
-            let dust = signed_noise2(x * 5, y * 5) as f32 / 128.0;
-            base * 0.5 + speck * 0.35 + dust * 0.15
-        },
-        0.8,
     )
 }
 

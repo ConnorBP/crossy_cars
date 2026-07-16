@@ -7803,16 +7803,11 @@ mod tests {
             let world = app.world();
             let meshes = &world.resource::<WorldAssets>().meshes;
             let textures = world.resource::<TextureAssets>();
-            let mut pairings = vec![
-                (
-                    "grass ground",
-                    meshes.ground.clone(),
-                    textures.grass.clone(),
-                ),
-                ("road pad", meshes.road_pad.clone(), textures.road.clone()),
-                ("road X arm", meshes.road_x.clone(), textures.road.clone()),
-                ("road Z arm", meshes.road_z.clone(), textures.road.clone()),
-            ];
+            let mut pairings = vec![(
+                "grass ground",
+                meshes.ground.clone(),
+                textures.grass.clone(),
+            )];
             for (variant, material) in textures.park_ground.iter().enumerate() {
                 pairings.push((
                     if variant == 0 {
@@ -7862,14 +7857,14 @@ mod tests {
             mesh_count_after - mesh_count_before,
             36 + TILE_CATALOG.len()
         );
-        assert_eq!(pairings.len(), 16);
+        assert_eq!(pairings.len(), 13);
         assert_eq!(
             pairings
                 .iter()
                 .map(|(_, mesh, _)| mesh.id())
                 .collect::<BTreeSet<_>>()
                 .len(),
-            10
+            7
         );
         assert_eq!(
             pairings
@@ -7877,7 +7872,7 @@ mod tests {
                 .map(|(_, _, material)| material.id())
                 .collect::<BTreeSet<_>>()
                 .len(),
-            9
+            8
         );
 
         let meshes = app.world().resource::<Assets<Mesh>>();
