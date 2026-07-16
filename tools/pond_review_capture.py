@@ -83,6 +83,10 @@ def capture(args: argparse.Namespace) -> None:
             )
             canvas = page.locator("canvas").first
             canvas.wait_for(state="visible", timeout=args.timeout_ms)
+            page.wait_for_function(
+                "!document.getElementById('loading') || document.getElementById('loading').hidden",
+                timeout=args.timeout_ms,
+            )
             page.wait_for_timeout(args.settle_ms)
             metadata = json.loads(page.evaluate("window.__ROADY_POND_REVIEW__"))
             expected_materials = ["GardenOval", "ReedMarsh", "FarmReservoir"]
