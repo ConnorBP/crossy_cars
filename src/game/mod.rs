@@ -123,9 +123,14 @@ pub struct SpawnSet;
 #[derive(SystemSet, Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct TouchStateSet;
 
-/// Keyboard state transitions run last so they win simultaneous conflicts.
+/// Keyboard state transitions resolve after touch and before the round clock.
 #[derive(SystemSet, Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct KeyboardStateSet;
+
+/// Round-clock work runs after state input and before driving. Exported so
+/// gameplay plugins can share the one authoritative frame-order contract.
+#[derive(SystemSet, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct RoundClockSet;
 
 pub struct GamePlugin;
 
@@ -144,7 +149,10 @@ impl Plugin for GamePlugin {
             .add_message::<CoinCollected>()
             .add_message::<ObstacleHit>()
             .add_message::<PondEntered>()
-            .configure_sets(Update, (TouchStateSet, KeyboardStateSet).chain())
+            .configure_sets(
+                Update,
+                (TouchStateSet, KeyboardStateSet, RoundClockSet).chain(),
+            )
             // Keep RoundActive false across SpawnSet so all fresh-only spawn
             // systems can distinguish a new round from a pause resume. Reset
             // state first, spawn second, then activate the completed round.
@@ -166,7 +174,12 @@ impl Plugin for GamePlugin {
                 OnEnter(GameState::Menu),
                 (end_round, clear_drowning, consume_restart_request).chain(),
             )
-            .add_systems(Update, tick_timeleft.run_if(in_state(GameState::Playing)))
+            .add_systems(
+                Update,
+                tick_timeleft
+                    .in_set(RoundClockSet)
+                    .run_if(in_state(GameState::Playing)),
+            )
             .add_systems(
                 Update,
                 pause_to_paused
@@ -209,7 +222,13 @@ fn reset_car_and_resources(
     }
 
     *drowning = Drowning::default();
-    drowning.previous_center = Vec2::ZERO;
+    // The reset pose is authoritative before the very first movement frame,
+    // allowing that frame to use the same high-speed sweep as every other.
+    drowning.previous_resolved_center = Vec2::ZERO;
+    drowning.previous_resolved_heading = 0.0;
+    drowning.motion_end_center = Vec2::ZERO;
+    drowning.motion_end_heading = 0.0;
+    drowning.initialized = true;
     best_at_start.0 = best.0;
     condition_bests_at_start.by_kind = condition_bests.by_kind;
     *score = Score::default();

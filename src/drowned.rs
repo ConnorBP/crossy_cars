@@ -73,19 +73,51 @@ struct Ripple {
 fn earliest_pond_entry(
     start: Vec2,
     end: Vec2,
-    heading: f32,
+    start_heading: f32,
+    end_heading: f32,
+    final_center: Vec2,
+    final_heading: f32,
     ponds: impl IntoIterator<Item = (PondFootprint, Vec2)>,
-) -> Option<(f32, Vec2)> {
-    ponds
-        .into_iter()
-        .filter_map(|(pond, origin)| {
-            pond.swept_world_car_entry(origin, start, end, heading, CAR_HALF_EXTENTS)
-                .map(|t| (t, start.lerp(end, t)))
-        })
-        .min_by(|a, b| a.0.total_cmp(&b.0))
+) -> Option<Vec2> {
+    let mut swept: Option<(f32, Vec2)> = None;
+    let mut final_overlap = false;
+    for (pond, origin) in ponds {
+        if let Some(t) = pond.swept_world_car_entry_over_heading(
+            origin,
+            start,
+            end,
+            start_heading,
+            end_heading,
+            CAR_HALF_EXTENTS,
+        ) {
+            let candidate = (t, start.lerp(end, t));
+            if swept.is_none_or(|current| t.total_cmp(&current.0).is_lt()) {
+                swept = Some(candidate);
+            }
+        }
+        // Pushout is never part of the sweep. It participates only as the
+        // authoritative final-pose overlap test.
+        final_overlap |=
+            pond.contains_world_car(origin, final_center, final_heading, CAR_HALF_EXTENTS);
+    }
+    swept
+        .map(|(_, position)| position)
+        .or_else(|| final_overlap.then_some(final_center))
 }
 
-/// Runs directly after movement in `DrivingSet`. Pond footprints remain
+/// Snapshot the endpoint produced by movement before solid collision pushout.
+pub(crate) fn capture_motion_end(mut drowning: ResMut<Drowning>, car: Query<(&Car, &Transform)>) {
+    if drowning.active {
+        return;
+    }
+    let Ok((car, transform)) = car.single() else {
+        return;
+    };
+    drowning.motion_end_center = Vec2::new(transform.translation.x, transform.translation.z);
+    drowning.motion_end_heading = car.heading;
+}
+
+/// Runs after all movement resolution in `DrivingSet`. Pond footprints remain
 /// block-local, so the owning streamed block's transform is applied explicitly.
 pub(crate) fn detect_pond_entry(
     mut drowning: ResMut<Drowning>,
@@ -96,39 +128,74 @@ pub(crate) fn detect_pond_entry(
     ponds: Query<(&PondFootprint, &ChildOf)>,
     block_transforms: Query<&Transform, Without<Car>>,
     mut entered: MessageWriter<PondEntered>,
+    mut next: ResMut<NextState<GameState>>,
 ) {
     let Ok((mut car, transform, mut drift_latch)) = car.single_mut() else {
         return;
     };
-    let current = Vec2::new(transform.translation.x, transform.translation.z);
+    let final_center = Vec2::new(transform.translation.x, transform.translation.z);
+    let final_heading = car.heading;
     if !round_active.0 {
-        drowning.previous_center = current;
+        drowning.previous_resolved_center = final_center;
+        drowning.previous_resolved_heading = final_heading;
+        drowning.initialized = true;
         return;
     }
     if drowning.active {
+        drowning.previous_resolved_center = final_center;
+        drowning.previous_resolved_heading = final_heading;
+        drowning.initialized = true;
         return;
     }
 
-    // The fresh-round reset seeds the previous center to the reset car center;
-    // pause resumes preserve it. This makes the very first movement sweep as
-    // authoritative as every later frame, including a high-speed first step.
-    let start = drowning.previous_center;
-    drowning.previous_center = current;
-    let Some((_, position)) = earliest_pond_entry(
+    // A fresh round seeds from the pose present before its first movement. In
+    // normal scheduling capture_motion_end has already recorded the endpoint;
+    // initialization therefore reconstructs the start from motion itself only
+    // when no prior resolved pose exists (the reset pose is the origin).
+    let start = if drowning.initialized {
+        drowning.previous_resolved_center
+    } else {
+        Vec2::ZERO
+    };
+    let start_heading = if drowning.initialized {
+        drowning.previous_resolved_heading
+    } else {
+        0.0
+    };
+    let motion_end = drowning.motion_end_center;
+    let motion_heading = drowning.motion_end_heading;
+    let position = earliest_pond_entry(
         start,
-        current,
-        car.heading,
+        motion_end,
+        start_heading,
+        motion_heading,
+        final_center,
+        final_heading,
         ponds.iter().filter_map(|(pond, child_of)| {
             let block = block_transforms.get(child_of.parent()).ok()?;
             Some((*pond, Vec2::new(block.translation.x, block.translation.z)))
         }),
-    ) else {
+    );
+
+    // Always synchronize to the fully resolved pose, including no-hit frames,
+    // pause-adjacent frames, and a frame that starts drowning.
+    drowning.previous_resolved_center = final_center;
+    drowning.previous_resolved_heading = final_heading;
+    drowning.initialized = true;
+    let Some(_crossing_position) = position else {
         return;
     };
 
     drowning.active = true;
     drowning.elapsed = 0.0;
-    drowning.entry_position = Vec3::new(position.x, 0.05, position.y);
+    drowning.camera_capture_pending = true;
+    // Touch/keyboard and the clock deliberately run before driving. Pond entry
+    // cancels their same-frame Paused/GameOver request so the full local sink
+    // sequence owns the eventual terminal transition.
+    next.reset();
+    // Presentation/camera entry is the final resolved pose, not the analytic
+    // shoreline crossing. This position then remains frozen during sinking.
+    drowning.entry_position = transform.translation;
     *input = PlayerInput::default();
     handbrake.0 = false;
     car.drift = 0.0;
@@ -160,13 +227,15 @@ pub(crate) fn advance_drowning(
     }
     let progress = (drowning.elapsed / DROWN_DURATION).clamp(0.0, 1.0);
     let eased = progress * progress * (3.0 - 2.0 * progress);
-    transform.translation.y = -DROWN_LOWER_DISTANCE * eased;
+    transform.translation.y = drowning.entry_position.y - DROWN_LOWER_DISTANCE * eased;
     transform.rotation = Quat::from_rotation_y(car.heading)
         * Quat::from_rotation_x(DROWN_TILT * eased)
         * Quat::from_rotation_z(-DROWN_TILT * 0.55 * eased);
 
     if drowning.elapsed >= DROWN_DURATION {
         car.speed = 0.0;
+        // This system is deliberately last in DrivingSet. Overwrite both the
+        // reason and any pause/time-up/wreck pending transition from this frame.
         *reason = GameOverReason::Drowned;
         next.set(GameState::GameOver);
     }
@@ -282,11 +351,13 @@ mod tests {
             Vec2::new(-100.0, 0.0),
             Vec2::new(100.0, 0.0),
             0.0,
+            0.0,
+            Vec2::new(100.0, 0.0),
+            0.0,
             [(pond(), Vec2::new(20.0, 0.0)), (pond(), Vec2::ZERO)],
         )
         .expect("a fast crossing must enter");
-        assert!(entry.0 < 0.5);
-        assert!(entry.1.x < 0.0);
+        assert!(entry.x < 0.0);
     }
 
     #[test]
@@ -295,6 +366,48 @@ mod tests {
         assert!(!drowning.active);
         drowning.active = true;
         assert!(drowning.active);
+    }
+
+    #[test]
+    fn collision_pushout_is_not_mistaken_for_driving_through_water() {
+        let result = earliest_pond_entry(
+            Vec2::new(-6.0, 0.0),
+            Vec2::new(-6.0, 0.0),
+            0.0,
+            0.0,
+            Vec2::new(6.0, 0.0),
+            0.0,
+            [(pond(), Vec2::ZERO)],
+        );
+        assert_eq!(result, None, "pushout itself must never be swept");
+    }
+
+    #[test]
+    fn actual_motion_crossing_survives_pushout_back_to_dry_land() {
+        let result = earliest_pond_entry(
+            Vec2::new(-6.0, 0.0),
+            Vec2::new(6.0, 0.0),
+            0.0,
+            0.0,
+            Vec2::new(-6.0, 0.0),
+            0.0,
+            [(pond(), Vec2::ZERO)],
+        );
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn final_resolved_overlap_drowns_without_a_motion_crossing() {
+        let result = earliest_pond_entry(
+            Vec2::new(-6.0, 0.0),
+            Vec2::new(-6.0, 0.0),
+            0.0,
+            0.0,
+            Vec2::ZERO,
+            0.0,
+            [(pond(), Vec2::ZERO)],
+        );
+        assert_eq!(result, Some(Vec2::ZERO));
     }
 
     #[test]

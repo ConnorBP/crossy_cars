@@ -2978,9 +2978,30 @@ impl PondFootprint {
     }
 
     /// Conservative swept entry for an oriented rectangular car footprint.
-    /// Every car corner is measured in normalized ellipse space; the maximum
-    /// corner radius expands the unit ellipse via the triangle inequality.
-    /// Thus this can warn early, but cannot miss a true footprint overlap.
+    /// The expansion is the analytic maximum corner radius over the shortest
+    /// heading interval, so steering during the frame cannot create a gap.
+    pub(crate) fn swept_world_car_entry_over_heading(
+        self,
+        block_world_origin: Vec2,
+        start: Vec2,
+        end: Vec2,
+        start_heading: f32,
+        end_heading: f32,
+        car_half_extents: Vec2,
+    ) -> Option<f32> {
+        if !block_world_origin.is_finite() {
+            return None;
+        }
+        self.swept_local_car_entry_over_heading(
+            start - block_world_origin,
+            end - block_world_origin,
+            start_heading,
+            end_heading,
+            car_half_extents,
+        )
+    }
+
+    /// Compatibility helper for a fixed-heading sweep.
     pub(crate) fn swept_world_car_entry(
         self,
         block_world_origin: Vec2,
@@ -2989,18 +3010,34 @@ impl PondFootprint {
         car_heading: f32,
         car_half_extents: Vec2,
     ) -> Option<f32> {
-        if !block_world_origin.is_finite() {
-            return None;
-        }
-        self.swept_local_car_entry(
-            start - block_world_origin,
-            end - block_world_origin,
+        self.swept_world_car_entry_over_heading(
+            block_world_origin,
+            start,
+            end,
+            car_heading,
             car_heading,
             car_half_extents,
         )
     }
 
-    /// Block-local conservative car-footprint segment entry.
+    pub(crate) fn swept_local_car_entry_over_heading(
+        self,
+        start: Vec2,
+        end: Vec2,
+        start_heading: f32,
+        end_heading: f32,
+        car_half_extents: Vec2,
+    ) -> Option<f32> {
+        let radius = 1.0
+            + self.normalized_car_radius_over_heading(
+                start_heading,
+                end_heading,
+                car_half_extents,
+            )?;
+        self.swept_local_entry_with_scale(start, end, radius)
+    }
+
+    /// Block-local fixed-heading car-footprint segment entry.
     pub(crate) fn swept_local_car_entry(
         self,
         start: Vec2,
@@ -3008,8 +3045,13 @@ impl PondFootprint {
         car_heading: f32,
         car_half_extents: Vec2,
     ) -> Option<f32> {
-        let radius = 1.0 + self.normalized_car_radius(car_heading, car_half_extents)?;
-        self.swept_local_entry_with_scale(start, end, radius)
+        self.swept_local_car_entry_over_heading(
+            start,
+            end,
+            car_heading,
+            car_heading,
+            car_half_extents,
+        )
     }
 
     /// Conservative current overlap counterpart to
@@ -3048,30 +3090,77 @@ impl PondFootprint {
         car_heading: f32,
         car_half_extents: Vec2,
     ) -> Option<f32> {
-        // Also validates all footprint fields before division below.
+        self.normalized_car_radius_over_heading(car_heading, car_heading, car_half_extents)
+    }
+
+    /// Exact maximum normalized corner radius over the shortest signed heading
+    /// interval. For each corner the squared radius is
+    /// `a + b*cos(2h) + c*sin(2h)`; endpoints and every in-interval quadratic
+    /// sinusoid extremum are evaluated analytically.
+    pub(crate) fn normalized_car_radius_over_heading(
+        self,
+        start_heading: f32,
+        end_heading: f32,
+        car_half_extents: Vec2,
+    ) -> Option<f32> {
         self.normalized_point(self.center)?;
-        if !car_heading.is_finite()
+        if !start_heading.is_finite()
+            || !end_heading.is_finite()
             || !car_half_extents.is_finite()
             || car_half_extents.cmplt(Vec2::ZERO).any()
         {
             return None;
         }
-        let side = Vec2::new(car_heading.cos(), -car_heading.sin());
-        let forward = Vec2::new(-car_heading.sin(), -car_heading.cos());
-        let (sin, cos) = self.rotation.sin_cos();
-        let mut radius = 0.0_f32;
-        for side_sign in [-1.0, 1.0] {
-            for forward_sign in [-1.0, 1.0] {
-                let corner = side * (side_sign * car_half_extents.x)
-                    + forward * (forward_sign * car_half_extents.y);
-                let ellipse_local = Vec2::new(
-                    cos * corner.x + sin * corner.y,
-                    -sin * corner.x + cos * corner.y,
-                );
-                radius = radius.max((ellipse_local / self.radii).length());
+
+        let start = f64::from(start_heading.rem_euclid(std::f32::consts::TAU));
+        let delta = f64::from(
+            (end_heading - start_heading + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU)
+                - std::f32::consts::PI,
+        );
+        let end = start + delta;
+        let low = start.min(end);
+        let high = start.max(end);
+        let mut maximum_sq = 0.0_f64;
+
+        for side_sign in [-1.0_f64, 1.0] {
+            for forward_sign in [-1.0_f64, 1.0] {
+                let q = |heading: f64| -> f64 {
+                    let (sin_h, cos_h) = heading.sin_cos();
+                    let side_x = cos_h;
+                    let side_z = -sin_h;
+                    let forward_x = -sin_h;
+                    let forward_z = -cos_h;
+                    let corner_x = side_x * side_sign * f64::from(car_half_extents.x)
+                        + forward_x * forward_sign * f64::from(car_half_extents.y);
+                    let corner_z = side_z * side_sign * f64::from(car_half_extents.x)
+                        + forward_z * forward_sign * f64::from(car_half_extents.y);
+                    let (sin_r, cos_r) = f64::from(self.rotation).sin_cos();
+                    let x = (cos_r * corner_x + sin_r * corner_z) / f64::from(self.radii.x);
+                    let z = (-sin_r * corner_x + cos_r * corner_z) / f64::from(self.radii.y);
+                    x * x + z * z
+                };
+
+                let q0 = q(0.0);
+                let q90 = q(std::f64::consts::FRAC_PI_2);
+                let q45 = q(std::f64::consts::FRAC_PI_4);
+                let a = (q0 + q90) * 0.5;
+                let b = (q0 - q90) * 0.5;
+                let c = q45 - a;
+                maximum_sq = maximum_sq.max(q(start)).max(q(end));
+
+                // atan2(c,b)/2 is a maximum; adding PI enumerates all maxima
+                // of the squared-radius sinusoid. A bounded normalized heading
+                // interval means this fixed range covers every candidate.
+                let first_maximum = c.atan2(b) * 0.5;
+                for k in -3..=3 {
+                    let candidate = first_maximum + f64::from(k) * std::f64::consts::PI;
+                    if candidate >= low && candidate <= high {
+                        maximum_sq = maximum_sq.max(q(candidate));
+                    }
+                }
             }
         }
-        Some(radius)
+        maximum_sq.is_finite().then_some(maximum_sq.sqrt() as f32)
     }
 
     fn swept_local_entry_with_scale(self, start: Vec2, end: Vec2, radius: f32) -> Option<f32> {
@@ -6534,6 +6623,46 @@ mod tests {
             pond.swept_world_car_entry(origin, tangent_start, tangent_end, 0.41, half),
             None
         );
+    }
+
+    #[test]
+    fn analytic_heading_interval_radius_bounds_dense_samples() {
+        let half = Vec2::new(0.56, 1.0);
+        let cases = [
+            (0.0, 0.0),
+            (0.2, 0.200_001),
+            (3.13, -3.13),
+            (-2.8, 2.9),
+            (-1.1, 1.1),
+            (0.0, std::f32::consts::PI - 1e-5),
+        ];
+        let ponds = [
+            test_pond_footprint(),
+            PondFootprint {
+                family: PondFamily::FarmReservoir,
+                center: Vec2::new(2.0, -1.0),
+                radii: Vec2::new(8.0, 0.75),
+                rotation: 1.17,
+            },
+        ];
+        for pond in ponds {
+            for (start, end) in cases {
+                let analytic = pond
+                    .normalized_car_radius_over_heading(start, end, half)
+                    .unwrap();
+                let delta = (end - start + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU)
+                    - std::f32::consts::PI;
+                let mut sampled = 0.0_f32;
+                for i in 0..=20_000 {
+                    sampled = sampled.max(
+                        pond.normalized_car_radius(start + delta * i as f32 / 20_000.0, half)
+                            .unwrap(),
+                    );
+                }
+                assert!(analytic + 2e-5 >= sampled, "{pond:?} {start}..{end}");
+                assert!((analytic - sampled).abs() < 2e-4);
+            }
+        }
     }
 
     #[test]

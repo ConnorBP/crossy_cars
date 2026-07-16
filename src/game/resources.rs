@@ -48,7 +48,16 @@ pub struct RoundActive(pub bool);
 pub struct Drowning {
     pub active: bool,
     pub elapsed: f32,
-    pub previous_center: Vec2,
+    /// Player pose after the previous frame's complete collision resolution.
+    pub previous_resolved_center: Vec2,
+    pub previous_resolved_heading: f32,
+    /// Player pose immediately after motion, before this frame's pushout.
+    pub motion_end_center: Vec2,
+    pub motion_end_heading: f32,
+    /// Whether the previous resolved pose has been seeded for a real sweep.
+    pub initialized: bool,
+    /// Lets the camera consume the final resolved entry pose exactly once.
+    pub camera_capture_pending: bool,
     pub entry_position: Vec3,
 }
 

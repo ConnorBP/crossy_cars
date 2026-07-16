@@ -15,7 +15,7 @@ use bevy::{
 use crate::car::{Car, DrivingSet, ImportedCarReady, ImportedCarSceneRoot, PlayerCarVisual};
 use crate::game::SpawnSet;
 use crate::game::events::ObstacleHit;
-use crate::game::resources::{GameConfig, RoundActive, not_drowning};
+use crate::game::resources::{Drowning, GameConfig, RoundActive};
 use crate::game::state::GameState;
 use crate::settings::Settings;
 use crate::world::world_review_bounds;
@@ -111,6 +111,10 @@ struct CameraObstacleFeedbackSet;
 /// schedule test exercise the same relation.
 fn configure_obstacle_feedback_order(app: &mut App) {
     app.configure_sets(Update, CameraObstacleFeedbackSet.after(DrivingSet));
+}
+
+fn camera_follow_allowed(drowning: Res<Drowning>) -> bool {
+    !drowning.active || drowning.camera_capture_pending
 }
 
 pub struct CameraPlugin;
@@ -370,9 +374,7 @@ impl Plugin for CameraPlugin {
                     // previous-frame data.
                     .in_set(CameraObstacleFeedbackSet)
                     .run_if(in_state(GameState::Playing))
-                    // Freeze follow + crash-shake during the pond-hazard
-                    // drowning sequence so the sinking owns the frame.
-                    .run_if(not_drowning),
+                    .run_if(camera_follow_allowed),
             );
     }
 }
@@ -457,13 +459,20 @@ fn follow_camera(
     time: Res<Time>,
     settings: Res<Settings>,
     mut shake: ResMut<Shake>,
+    mut drowning: ResMut<Drowning>,
 ) {
+    // Follow normally, or exactly once after entry so the camera captures the
+    // final resolved pose. A failed query keeps pending set for a later frame.
+    if drowning.active && !drowning.camera_capture_pending {
+        return;
+    }
     let Ok((car_t, car)) = car.single() else {
         return;
     };
     let Ok((mut cam_t, mut proj, mut framing)) = camera.single_mut() else {
         return;
     };
+    let capture_pending = drowning.camera_capture_pending;
 
     let dt = time.delta_secs();
     let t = exp_smoothing_alpha(SMOOTH, dt);
@@ -530,7 +539,11 @@ fn follow_camera(
     let desired = camera_target_translation(
         Vec3::new(
             framing.smoothed_car_xz.x,
-            car_t.translation.y,
+            if capture_pending {
+                drowning.entry_position.y
+            } else {
+                car_t.translation.y
+            },
             framing.smoothed_car_xz.y,
         ),
         cfg.cam_offset,
@@ -577,6 +590,9 @@ fn follow_camera(
         o.scaling_mode = ScalingMode::FixedVertical {
             viewport_height: viewport.y,
         };
+    }
+    if capture_pending {
+        drowning.camera_capture_pending = false;
     }
 }
 

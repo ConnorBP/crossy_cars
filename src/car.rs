@@ -5,6 +5,7 @@ use bevy::prelude::*;
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
 
 use crate::difficulty::Traffic;
+use crate::game::RoundClockSet;
 use crate::game::events::ObstacleHit;
 use crate::game::resources::{Drowning, GameConfig};
 use crate::game::state::GameState;
@@ -748,7 +749,7 @@ impl Plugin for CarPlugin {
             .init_resource::<ToyShadingAssets>()
             .configure_sets(
                 Update,
-                (KeyboardInputSet, TouchInputSet, DrivingSet).chain(),
+                (KeyboardInputSet, TouchInputSet, RoundClockSet, DrivingSet).chain(),
             )
             .add_systems(Startup, spawn_car)
             // Keep this reader active in every state so menu/pause/freeze
@@ -766,19 +767,21 @@ impl Plugin for CarPlugin {
             )
             .add_systems(
                 Update,
-                // move_car first, then resolve curb hops + obstacle collisions,
-                // then knock cones flying, then the juice systems read the
-                // fresh speed.
+                // Capture the pre-pushout motion endpoint, resolve all solid
+                // contacts, then detect water from the actual motion sweep plus
+                // final overlap. Drowning advances last so its terminal reason
+                // wins every same-frame clock/impact outcome.
                 (
                     move_car,
-                    crate::drowned::detect_pond_entry,
+                    crate::drowned::capture_motion_end,
                     physics_collisions,
                     cone_collisions,
-                    crate::drowned::advance_drowning,
+                    crate::drowned::detect_pond_entry,
                     spin_wheels,
                     animate_imported_car,
                     roll_body,
                     brake_lights,
+                    crate::drowned::advance_drowning,
                 )
                     .chain()
                     .in_set(DrivingSet)

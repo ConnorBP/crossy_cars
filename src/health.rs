@@ -18,7 +18,7 @@ use bevy::text::FontSize;
 use crate::audio::AudioBaseGain;
 use crate::car::{Car, DrivingSet};
 use crate::game::events::ObstacleHit;
-use crate::game::resources::RoundActive;
+use crate::game::resources::{Drowning, RoundActive};
 use crate::game::state::GameState;
 use crate::game::{SpawnSet, TouchStateSet};
 use crate::modifiers::ActiveModifier;
@@ -245,7 +245,14 @@ fn apply_damage(
     audio: Res<DamageAudioHandles>,
     modifier: Res<ActiveModifier>,
     settings: Res<Settings>,
+    drowning: Res<Drowning>,
 ) {
+    // Detection already ran in DrivingSet. Discard this frame's obstacle
+    // messages once pond entry wins, preventing damage or Wrecked terminal.
+    if drowning.active {
+        hits.clear();
+        return;
+    }
     // Read the complete frame before touching the cooldown. Although the car
     // collision system emits at most one hit, this keeps health deterministic
     // if another producer contributes events: the strongest valid event owns
