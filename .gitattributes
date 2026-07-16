@@ -1,2 +1,5 @@
-# Generated score-rule artifacts are byte-for-byte golden files.
+# Generated score-rule artifacts and generators are byte-for-byte LF files.
 rules/*.json text eol=lf
+crates/roady-score-rules/examples/generate_v2.rs text eol=lf
+crates/roady-score-rules/src/v2/artifacts.rs text eol=lf
+crates/roady-score-rules/tests/golden_v2.rs text eol=lf

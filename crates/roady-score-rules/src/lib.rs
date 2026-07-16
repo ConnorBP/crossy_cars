@@ -1,3 +1,5 @@
+#![recursion_limit = "512"]
+
 //! Engine-independent, versioned scoring rules for Roady.
 //!
 //! This crate deliberately has no Bevy dependency. The typed API is the source

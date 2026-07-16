@@ -1,0 +1,4364 @@
+{
+  "arithmetic_boundaries": {
+    "cluck_awards": [
+      {
+        "direct": 1,
+        "input": {
+          "chicken_burst": false,
+          "frenzy": false
+        }
+      },
+      {
+        "direct": 2,
+        "input": {
+          "chicken_burst": true,
+          "frenzy": false
+        }
+      },
+      {
+        "direct": 3,
+        "input": {
+          "chicken_burst": true,
+          "frenzy": true
+        }
+      },
+      {
+        "combo_bonus": 16,
+        "input": {
+          "combo_frenzy": true,
+          "glass_cannon": true,
+          "multiplier": 5
+        }
+      }
+    ],
+    "cluck_bucket_saturation": {
+      "coin_mega_at_max": 4294967295,
+      "objective_at_max": 4294967295,
+      "penalty_one": 0,
+      "penalty_zero": 0,
+      "wave_at_max": 4294967295
+    },
+    "cluck_terminal": [
+      {
+        "input": {
+          "chickens": 20,
+          "coins": 22
+        },
+        "output": {
+          "ok": 42
+        }
+      },
+      {
+        "input": {
+          "chickens": 4294967295,
+          "coins": 0
+        },
+        "output": {
+          "ok": 4294967295
+        }
+      },
+      {
+        "input": {
+          "chickens": 4294967295,
+          "coins": 1
+        },
+        "output": {
+          "error": "arithmetic_overflow"
+        }
+      }
+    ],
+    "coin_clock": [
+      {
+        "input_ms": "0",
+        "output_ms": "1500"
+      },
+      {
+        "input_ms": "88499",
+        "output_ms": "89999"
+      },
+      {
+        "input_ms": "88500",
+        "output_ms": "90000"
+      },
+      {
+        "input_ms": "89999",
+        "output_ms": "90000"
+      },
+      {
+        "input_ms": "90000",
+        "output_ms": "90000"
+      },
+      {
+        "input_ms": "90001",
+        "output_ms": "90000"
+      },
+      {
+        "input_ms": "18446744073709551615",
+        "output_ms": "90000"
+      }
+    ],
+    "combo_multiplier": [
+      {
+        "input": 0,
+        "output": 1
+      },
+      {
+        "input": 1,
+        "output": 1
+      },
+      {
+        "input": 4,
+        "output": 1
+      },
+      {
+        "input": 5,
+        "output": 2
+      },
+      {
+        "input": 6,
+        "output": 2
+      },
+      {
+        "input": 9,
+        "output": 2
+      },
+      {
+        "input": 10,
+        "output": 3
+      },
+      {
+        "input": 11,
+        "output": 3
+      },
+      {
+        "input": 14,
+        "output": 3
+      },
+      {
+        "input": 15,
+        "output": 4
+      },
+      {
+        "input": 16,
+        "output": 4
+      },
+      {
+        "input": 19,
+        "output": 4
+      },
+      {
+        "input": 20,
+        "output": 5
+      },
+      {
+        "input": 21,
+        "output": 5
+      },
+      {
+        "input": 4294967295,
+        "output": 5
+      }
+    ],
+    "completed_waves": [
+      {
+        "input_ms": "0",
+        "output": 0
+      },
+      {
+        "input_ms": "35999",
+        "output": 0
+      },
+      {
+        "input_ms": "36000",
+        "output": 1
+      },
+      {
+        "input_ms": "63999",
+        "output": 1
+      },
+      {
+        "input_ms": "64000",
+        "output": 2
+      },
+      {
+        "input_ms": "18446744073709551615",
+        "output": 4294967295
+      }
+    ],
+    "courtesy_edges": [
+      {
+        "distance": 2.0,
+        "eligible": false,
+        "speed": 3.999
+      },
+      {
+        "distance": 1.0,
+        "eligible": false,
+        "speed": 4.0
+      },
+      {
+        "distance": 1.0001,
+        "eligible": true,
+        "speed": 4.0
+      },
+      {
+        "distance": 2.12,
+        "eligible": true,
+        "speed": 4.0
+      },
+      {
+        "distance": 2.1201,
+        "eligible": false,
+        "speed": 4.0
+      }
+    ],
+    "credited_positive": [
+      {
+        "input": {
+          "base": 0,
+          "guilt": false,
+          "premium_bps": 10000
+        },
+        "output": {
+          "ok": 0
+        }
+      },
+      {
+        "input": {
+          "base": 1,
+          "guilt": false,
+          "premium_bps": 10000
+        },
+        "output": {
+          "ok": 1
+        }
+      },
+      {
+        "input": {
+          "base": 5,
+          "guilt": false,
+          "premium_bps": 9000
+        },
+        "output": {
+          "ok": 4
+        }
+      },
+      {
+        "input": {
+          "base": 5,
+          "guilt": true,
+          "premium_bps": 9000
+        },
+        "output": {
+          "ok": 2
+        }
+      },
+      {
+        "input": {
+          "base": 4294967295,
+          "guilt": false,
+          "premium_bps": 4294967295
+        },
+        "output": {
+          "error": "arithmetic_overflow"
+        }
+      },
+      {
+        "input": {
+          "base": 4294967295,
+          "guilt": true,
+          "premium_bps": 4294967295
+        },
+        "output": {
+          "error": "arithmetic_overflow"
+        }
+      }
+    ],
+    "frenzy_orb_lifetime": [
+      {
+        "alive": false,
+        "now_ms": 99,
+        "spawn_ms": 100
+      },
+      {
+        "alive": true,
+        "now_ms": 100,
+        "spawn_ms": 100
+      },
+      {
+        "alive": true,
+        "now_ms": 12099,
+        "spawn_ms": 100
+      },
+      {
+        "alive": false,
+        "now_ms": 12100,
+        "spawn_ms": 100
+      }
+    ],
+    "health_pickup": [
+      {
+        "input": 0,
+        "output": 35
+      },
+      {
+        "input": 64,
+        "output": 99
+      },
+      {
+        "input": 65,
+        "output": 100
+      },
+      {
+        "input": 99,
+        "output": 100
+      },
+      {
+        "input": 100,
+        "output": 100
+      },
+      {
+        "input": 4294967295,
+        "output": 100
+      }
+    ],
+    "objectives": [
+      {
+        "input": {
+          "conduct": 0,
+          "round_index": 0
+        },
+        "output": {
+          "objective": "hit_chickens",
+          "ordinal": 1,
+          "target": 10
+        }
+      },
+      {
+        "input": {
+          "conduct": 0,
+          "round_index": 1
+        },
+        "output": {
+          "objective": "collect_coins",
+          "ordinal": 2,
+          "target": 6
+        }
+      },
+      {
+        "input": {
+          "conduct": 0,
+          "round_index": 2
+        },
+        "output": {
+          "objective": "reach_combo",
+          "ordinal": 3,
+          "target": 3
+        }
+      },
+      {
+        "input": {
+          "conduct": 0,
+          "round_index": 3
+        },
+        "output": {
+          "objective": "hit_chickens",
+          "ordinal": 1,
+          "target": 10
+        }
+      },
+      {
+        "input": {
+          "conduct": 0,
+          "round_index": 4
+        },
+        "output": {
+          "objective": "collect_coins",
+          "ordinal": 2,
+          "target": 6
+        }
+      },
+      {
+        "input": {
+          "conduct": 0,
+          "round_index": 5
+        },
+        "output": {
+          "objective": "reach_combo",
+          "ordinal": 3,
+          "target": 3
+        }
+      },
+      {
+        "input": {
+          "conduct": 1,
+          "round_index": 0
+        },
+        "output": {
+          "objective": "deliver_packages",
+          "ordinal": 4,
+          "target": 3
+        }
+      },
+      {
+        "input": {
+          "conduct": 1,
+          "round_index": 1
+        },
+        "output": {
+          "objective": "courtesy_awards",
+          "ordinal": 5,
+          "target": 3
+        }
+      },
+      {
+        "input": {
+          "conduct": 1,
+          "round_index": 2
+        },
+        "output": {
+          "objective": "collect_coins",
+          "ordinal": 2,
+          "target": 6
+        }
+      },
+      {
+        "input": {
+          "conduct": 1,
+          "round_index": 3
+        },
+        "output": {
+          "objective": "deliver_packages",
+          "ordinal": 4,
+          "target": 3
+        }
+      },
+      {
+        "input": {
+          "conduct": 1,
+          "round_index": 4
+        },
+        "output": {
+          "objective": "courtesy_awards",
+          "ordinal": 5,
+          "target": 3
+        }
+      },
+      {
+        "input": {
+          "conduct": 1,
+          "round_index": 5
+        },
+        "output": {
+          "objective": "collect_coins",
+          "ordinal": 2,
+          "target": 6
+        }
+      }
+    ],
+    "package_clock": [
+      {
+        "input_ms": "0",
+        "output_ms": "3000"
+      },
+      {
+        "input_ms": "86999",
+        "output_ms": "89999"
+      },
+      {
+        "input_ms": "87000",
+        "output_ms": "90000"
+      },
+      {
+        "input_ms": "89999",
+        "output_ms": "90000"
+      },
+      {
+        "input_ms": "90000",
+        "output_ms": "90000"
+      },
+      {
+        "input_ms": "18446744073709551615",
+        "output_ms": "90000"
+      }
+    ],
+    "population_caps": [
+      {
+        "input": {
+          "level": 0,
+          "rush": false,
+          "surge": false
+        },
+        "traffic_target": 1
+      },
+      {
+        "input": {
+          "level": 4294967295,
+          "rush": true,
+          "surge": true
+        },
+        "traffic_target": 8
+      },
+      {
+        "chicken_target": 40,
+        "input": {
+          "chicken_burst": true,
+          "frenzy": true
+        }
+      },
+      {
+        "critter_target": 15,
+        "input": {
+          "critter_burst": true,
+          "stampede": true
+        }
+      }
+    ],
+    "right_of_way_terminal": [
+      {
+        "accumulator": "-1",
+        "output": {
+          "ok": 0
+        }
+      },
+      {
+        "accumulator": "0",
+        "output": {
+          "ok": 0
+        }
+      },
+      {
+        "accumulator": "4294967295",
+        "output": {
+          "ok": 4294967295
+        }
+      },
+      {
+        "accumulator": "4294967296",
+        "output": {
+          "error": "arithmetic_overflow"
+        }
+      }
+    ],
+    "time_pickup_clock": [
+      {
+        "input_ms": "0",
+        "output_ms": "5000"
+      },
+      {
+        "input_ms": "93999",
+        "output_ms": "98999"
+      },
+      {
+        "input_ms": "94000",
+        "output_ms": "99000"
+      },
+      {
+        "input_ms": "98999",
+        "output_ms": "99000"
+      },
+      {
+        "input_ms": "99000",
+        "output_ms": "99000"
+      },
+      {
+        "input_ms": "18446744073709551615",
+        "output_ms": "99000"
+      }
+    ]
+  },
+  "canonical": {
+    "events": [
+      {
+        "input": {
+          "active_ms": "72623859790382856",
+          "kind": 1,
+          "payload": {
+            "base": 4294967295,
+            "bucket_after": 4294967295,
+            "bucket_before": 4294967295,
+            "combo_after": 255,
+            "combo_before": 255,
+            "event_bonus": 4294967295,
+            "frenzy_bonus": 4294967295
+          },
+          "previous_hash_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+          "seq": 0
+        },
+        "name": "chicken_hit",
+        "output": {
+          "event_hash_hex": "02aefdc1ef704474d6b54012824e61bfff18a2c224ecb8325cecce9394ba5f34",
+          "event_record_hex": "0e726f6164792e76322e6576656e7400000000010203040506070801ffffffffffffffffffffffffffffffffffffffffffff",
+          "event_record_length": 50,
+          "fits_max_event_record_bytes": true,
+          "stored_event_hex": "0e726f6164792e76322e6576656e7400000000010203040506070801ffffffffffffffffffffffffffffffffffffffffffff02aefdc1ef704474d6b54012824e61bfff18a2c224ecb8325cecce9394ba5f34",
+          "stored_event_length": 82
+        }
+      },
+      {
+        "input": {
+          "active_ms": "72623859790382856",
+          "kind": 2,
+          "payload": {
+            "base": 4294967295,
+            "bucket_after": 4294967295,
+            "bucket_before": 4294967295,
+            "combo_after": 255,
+            "combo_before": 255,
+            "mega": true,
+            "remaining_after_ms": "18446744073709551615",
+            "remaining_before_ms": "18446744073709551615"
+          },
+          "previous_hash_hex": "0101010101010101010101010101010101010101010101010101010101010101",
+          "seq": 1
+        },
+        "name": "coin_collected",
+        "output": {
+          "event_hash_hex": "15954dc1c5acf31aaf29b64e45d31cceeb4288f69f65d91be9d731524113b026",
+          "event_record_hex": "0e726f6164792e76322e6576656e740000000101020304050607080201ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+          "event_record_length": 59,
+          "fits_max_event_record_bytes": true,
+          "stored_event_hex": "0e726f6164792e76322e6576656e740000000101020304050607080201ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff15954dc1c5acf31aaf29b64e45d31cceeb4288f69f65d91be9d731524113b026",
+          "stored_event_length": 91
+        }
+      },
+      {
+        "input": {
+          "active_ms": "72623859790382856",
+          "kind": 3,
+          "payload": {
+            "remaining_after_ms": "18446744073709551615",
+            "remaining_before_ms": "18446744073709551615"
+          },
+          "previous_hash_hex": "0202020202020202020202020202020202020202020202020202020202020202",
+          "seq": 2
+        },
+        "name": "time_pickup",
+        "output": {
+          "event_hash_hex": "c20c033d9379f8a9b14387dfb2ea127e8a8304e6ad129127a049fd85e51f4004",
+          "event_record_hex": "0e726f6164792e76322e6576656e7400000002010203040506070803ffffffffffffffffffffffffffffffff",
+          "event_record_length": 44,
+          "fits_max_event_record_bytes": true,
+          "stored_event_hex": "0e726f6164792e76322e6576656e7400000002010203040506070803ffffffffffffffffffffffffffffffffc20c033d9379f8a9b14387dfb2ea127e8a8304e6ad129127a049fd85e51f4004",
+          "stored_event_length": 76
+        }
+      },
+      {
+        "input": {
+          "active_ms": "72623859790382856",
+          "kind": 4,
+          "payload": {
+            "base_reward": 4294967295,
+            "bucket_after": 4294967295,
+            "bucket_before": 4294967295,
+            "objective": "reach_combo",
+            "objective_ordinal": 3,
+            "target": 4294967295
+          },
+          "previous_hash_hex": "0303030303030303030303030303030303030303030303030303030303030303",
+          "seq": 3
+        },
+        "name": "objective_completed_cluck",
+        "output": {
+          "event_hash_hex": "b3da2c2730f66fec4a515817f09f6d3cbfbcb93aeb5707c523bda14c11cbcc06",
+          "event_record_hex": "0e726f6164792e76322e6576656e740000000301020304050607080403ffffffffffffffffffffffffffffffff",
+          "event_record_length": 45,
+          "fits_max_event_record_bytes": true,
+          "stored_event_hex": "0e726f6164792e76322e6576656e740000000301020304050607080403ffffffffffffffffffffffffffffffffb3da2c2730f66fec4a515817f09f6d3cbfbcb93aeb5707c523bda14c11cbcc06",
+          "stored_event_length": 77
+        }
+      },
+      {
+        "input": {
+          "active_ms": "72623859790382856",
+          "kind": 5,
+          "payload": {
+            "bucket_after": 4294967295,
+            "bucket_before": 4294967295,
+            "cooldown_after_ms": "18446744073709551615",
+            "penalty": 4294967295
+          },
+          "previous_hash_hex": "0404040404040404040404040404040404040404040404040404040404040404",
+          "seq": 4
+        },
+        "name": "critter_penalty",
+        "output": {
+          "event_hash_hex": "27b9b555d7a51b350be677ef484670e32ec6b0a4ebeffbd3ba6f028f05a01500",
+          "event_record_hex": "0e726f6164792e76322e6576656e7400000004010203040506070805ffffffffffffffffffffffffffffffffffffffff",
+          "event_record_length": 48,
+          "fits_max_event_record_bytes": true,
+          "stored_event_hex": "0e726f6164792e76322e6576656e7400000004010203040506070805ffffffffffffffffffffffffffffffffffffffff27b9b555d7a51b350be677ef484670e32ec6b0a4ebeffbd3ba6f028f05a01500",
+          "stored_event_length": 80
+        }
+      },
+      {
+        "input": {
+          "active_ms": "72623859790382856",
+          "kind": 6,
+          "payload": {
+            "active": true,
+            "effect_or_event": 255,
+            "end_ms": "18446744073709551615",
+            "segment_kind": 255,
+            "start_ms": "18446744073709551615"
+          },
+          "previous_hash_hex": "0505050505050505050505050505050505050505050505050505050505050505",
+          "seq": 5
+        },
+        "name": "segment_changed",
+        "output": {
+          "event_hash_hex": "de48db4f839917834425115b9217fbf1522a17d48742509baeb87cd34b4e53ec",
+          "event_record_hex": "0e726f6164792e76322e6576656e7400000005010203040506070806ffff01ffffffffffffffffffffffffffffffff",
+          "event_record_length": 47,
+          "fits_max_event_record_bytes": true,
+          "stored_event_hex": "0e726f6164792e76322e6576656e7400000005010203040506070806ffff01ffffffffffffffffffffffffffffffffde48db4f839917834425115b9217fbf1522a17d48742509baeb87cd34b4e53ec",
+          "stored_event_length": 79
+        }
+      },
+      {
+        "input": {
+          "active_ms": "72623859790382856",
+          "kind": 7,
+          "payload": {
+            "build": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "chickens": 35,
+            "coins": 7,
+            "conduct": "cluck_hunt",
+            "conduct_ordinal": 0,
+            "duration_ms": 123456,
+            "max_combo": 5,
+            "objective_completed": true,
+            "platform": 2,
+            "reason": 2,
+            "remaining_ms": 9876,
+            "total": 42
+          },
+          "previous_hash_hex": "0606060606060606060606060606060606060606060606060606060606060606",
+          "seq": 6
+        },
+        "name": "terminal_cluck",
+        "output": {
+          "event_hash_hex": "fdc991ab5fb3bdd96dbdc136b27b4f0fec3657493ec97df3c6ad3c6845278a7f",
+          "event_record_hex": "0e726f6164792e76322e6576656e740000000601020304050607080700020000002a00000023000000070105000000000001e2400000000000002694407878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787802",
+          "event_record_length": 126,
+          "fits_max_event_record_bytes": true,
+          "stored_event_hex": "0e726f6164792e76322e6576656e740000000601020304050607080700020000002a00000023000000070105000000000001e2400000000000002694407878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787802fdc991ab5fb3bdd96dbdc136b27b4f0fec3657493ec97df3c6ad3c6845278a7f",
+          "stored_event_length": 158
+        }
+      },
+      {
+        "input": {
+          "active_ms": "72623859790382856",
+          "kind": 8,
+          "payload": {
+            "carried_after": 255,
+            "carried_before": 255
+          },
+          "previous_hash_hex": "0707070707070707070707070707070707070707070707070707070707070707",
+          "seq": 7
+        },
+        "name": "package_pickup",
+        "output": {
+          "event_hash_hex": "c4a7862ce55f9c4e604f00fb1aa9c7f387e2e5524c8224bcbe94434ed0056f46",
+          "event_record_hex": "0e726f6164792e76322e6576656e7400000007010203040506070808ffff",
+          "event_record_length": 30,
+          "fits_max_event_record_bytes": true,
+          "stored_event_hex": "0e726f6164792e76322e6576656e7400000007010203040506070808ffffc4a7862ce55f9c4e604f00fb1aa9c7f387e2e5524c8224bcbe94434ed0056f46",
+          "stored_event_length": 62
+        }
+      },
+      {
+        "input": {
+          "active_ms": "72623859790382856",
+          "kind": 9,
+          "payload": {
+            "accumulator_after": "9223372036854775807",
+            "accumulator_before": "-9223372036854775808",
+            "base": 4294967295,
+            "chain_index": 4294967295,
+            "credited": 4294967295,
+            "delivered_ordinal_within_dropoff": 255,
+            "guilt": true,
+            "premium_bps": 4294967295,
+            "remaining_after_ms": "18446744073709551615",
+            "remaining_before_ms": "18446744073709551615"
+          },
+          "previous_hash_hex": "0808080808080808080808080808080808080808080808080808080808080808",
+          "seq": 8
+        },
+        "name": "package_delivery",
+        "output": {
+          "event_hash_hex": "6e8f2d9c75383e858d491e1a1d9c2dc7a62eaa7cb2f496b0698b2730d4f23f30",
+          "event_record_hex": "0e726f6164792e76322e6576656e7400000008010203040506070809ffffffffffffffffffffffffff01ffffffff80000000000000007fffffffffffffffffffffffffffffffffffffffffffffff",
+          "event_record_length": 78,
+          "fits_max_event_record_bytes": true,
+          "stored_event_hex": "0e726f6164792e76322e6576656e7400000008010203040506070809ffffffffffffffffffffffffff01ffffffff80000000000000007fffffffffffffffffffffffffffffffffffffffffffffff6e8f2d9c75383e858d491e1a1d9c2dc7a62eaa7cb2f496b0698b2730d4f23f30",
+          "stored_event_length": 110
+        }
+      },
+      {
+        "input": {
+          "active_ms": "72623859790382856",
+          "kind": 10,
+          "payload": {
+            "accumulator_after": "9223372036854775807",
+            "accumulator_before": "-9223372036854775808",
+            "chicken_stable_id": 4294967295,
+            "cooldown_after_ms": 4294967295,
+            "credited": 4294967295,
+            "guilt": true,
+            "premium_bps": 4294967295
+          },
+          "previous_hash_hex": "0909090909090909090909090909090909090909090909090909090909090909",
+          "seq": 9
+        },
+        "name": "courtesy_award",
+        "output": {
+          "event_hash_hex": "66d5d3b5ee51aa8c9f9cfbfd82a28ccfec142e3beb461eb7e26b1db7b1444f4c",
+          "event_record_hex": "0e726f6164792e76322e6576656e740000000901020304050607080affffffffffffffff01ffffffff80000000000000007fffffffffffffffffffffff",
+          "event_record_length": 61,
+          "fits_max_event_record_bytes": true,
+          "stored_event_hex": "0e726f6164792e76322e6576656e740000000901020304050607080affffffffffffffff01ffffffff80000000000000007fffffffffffffffffffffff66d5d3b5ee51aa8c9f9cfbfd82a28ccfec142e3beb461eb7e26b1db7b1444f4c",
+          "stored_event_length": 93
+        }
+      },
+      {
+        "input": {
+          "active_ms": "72623859790382856",
+          "kind": 11,
+          "payload": {
+            "accumulator_after": "9223372036854775807",
+            "accumulator_before": "-9223372036854775808",
+            "animal_kind": 255,
+            "delta": -2147483648,
+            "guilt_after_ms": "18446744073709551615",
+            "premium_after_bps": 4294967295,
+            "premium_before_bps": 4294967295
+          },
+          "previous_hash_hex": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a",
+          "seq": 10
+        },
+        "name": "animal_hit",
+        "output": {
+          "event_hash_hex": "f8a811662ede9377154bfa7676078bf8c42b979f8f3d281ae134e905becaa4ff",
+          "event_record_hex": "0e726f6164792e76322e6576656e740000000a01020304050607080bff80000000ffffffffffffffffffffffffffffffff80000000000000007fffffffffffffff",
+          "event_record_length": 65,
+          "fits_max_event_record_bytes": true,
+          "stored_event_hex": "0e726f6164792e76322e6576656e740000000a01020304050607080bff80000000ffffffffffffffffffffffffffffffff80000000000000007ffffffffffffffff8a811662ede9377154bfa7676078bf8c42b979f8f3d281ae134e905becaa4ff",
+          "stored_event_length": 97
+        }
+      },
+      {
+        "input": {
+          "active_ms": "72623859790382856",
+          "kind": 12,
+          "payload": {
+            "accumulator_after": "9223372036854775807",
+            "accumulator_before": "-9223372036854775808",
+            "base": 4294967295,
+            "credited": 4294967295,
+            "guilt": true,
+            "premium_bps": 4294967295
+          },
+          "previous_hash_hex": "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
+          "seq": 11
+        },
+        "name": "wave_award",
+        "output": {
+          "event_hash_hex": "38b518ac31ed322e9536538f570ef06bb2d031cff13db5c2bc5c9c5c3fb3c316",
+          "event_record_hex": "0e726f6164792e76322e6576656e740000000b01020304050607080cffffffffffffffff01ffffffff80000000000000007fffffffffffffff",
+          "event_record_length": 57,
+          "fits_max_event_record_bytes": true,
+          "stored_event_hex": "0e726f6164792e76322e6576656e740000000b01020304050607080cffffffffffffffff01ffffffff80000000000000007fffffffffffffff38b518ac31ed322e9536538f570ef06bb2d031cff13db5c2bc5c9c5c3fb3c316",
+          "stored_event_length": 89
+        }
+      },
+      {
+        "input": {
+          "active_ms": "72623859790382856",
+          "kind": 13,
+          "payload": {
+            "accumulator_after": "9223372036854775807",
+            "accumulator_before": "-9223372036854775808",
+            "base": 4294967295,
+            "credited": 4294967295,
+            "guilt": true,
+            "premium_bps": 4294967295,
+            "remaining_after_ms": "18446744073709551615",
+            "remaining_before_ms": "18446744073709551615"
+          },
+          "previous_hash_hex": "0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c",
+          "seq": 12
+        },
+        "name": "coin_award",
+        "output": {
+          "event_hash_hex": "0fd624fdcabccaca49e20c0f754c8682e718be9ddc2fac454263768a1c4b1113",
+          "event_record_hex": "0e726f6164792e76322e6576656e740000000c01020304050607080dffffffffffffffff01ffffffff80000000000000007fffffffffffffffffffffffffffffffffffffffffffffff",
+          "event_record_length": 73,
+          "fits_max_event_record_bytes": true,
+          "stored_event_hex": "0e726f6164792e76322e6576656e740000000c01020304050607080dffffffffffffffff01ffffffff80000000000000007fffffffffffffffffffffffffffffffffffffffffffffff0fd624fdcabccaca49e20c0f754c8682e718be9ddc2fac454263768a1c4b1113",
+          "stored_event_length": 105
+        }
+      },
+      {
+        "input": {
+          "active_ms": "72623859790382856",
+          "kind": 14,
+          "payload": {
+            "end_ms": "18446744073709551615",
+            "phase": 4,
+            "start_ms": "18446744073709551615"
+          },
+          "previous_hash_hex": "0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d",
+          "seq": 13
+        },
+        "name": "frenzy_changed",
+        "output": {
+          "event_hash_hex": "8e3bc7fb6776aef85e4f47e552045d41f17813c123a68ec56a2f28b11e9e8e89",
+          "event_record_hex": "0e726f6164792e76322e6576656e740000000d01020304050607080e04ffffffffffffffffffffffffffffffff",
+          "event_record_length": 45,
+          "fits_max_event_record_bytes": true,
+          "stored_event_hex": "0e726f6164792e76322e6576656e740000000d01020304050607080e04ffffffffffffffffffffffffffffffff8e3bc7fb6776aef85e4f47e552045d41f17813c123a68ec56a2f28b11e9e8e89",
+          "stored_event_length": 77
+        }
+      },
+      {
+        "input": {
+          "active_ms": "72623859790382856",
+          "kind": 4,
+          "payload": {
+            "accumulator_after": "9223372036854775807",
+            "accumulator_before": "-9223372036854775808",
+            "base": 4294967295,
+            "credited": 4294967295,
+            "guilt": true,
+            "objective": "courtesy_awards",
+            "objective_ordinal": 5,
+            "premium_bps": 4294967295,
+            "target": 4294967295
+          },
+          "previous_hash_hex": "0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e",
+          "seq": 14
+        },
+        "name": "objective_completed_right_of_way",
+        "output": {
+          "event_hash_hex": "3d5e40ba5d76c098dc9b18d77f627b5c68034604d0c8a89f401b7627ce3b8735",
+          "event_record_hex": "0e726f6164792e76322e6576656e740000000e01020304050607080405ffffffffffffffffffffffff01ffffffff80000000000000007fffffffffffffff",
+          "event_record_length": 62,
+          "fits_max_event_record_bytes": true,
+          "stored_event_hex": "0e726f6164792e76322e6576656e740000000e01020304050607080405ffffffffffffffffffffffff01ffffffff80000000000000007fffffffffffffff3d5e40ba5d76c098dc9b18d77f627b5c68034604d0c8a89f401b7627ce3b8735",
+          "stored_event_length": 94
+        }
+      },
+      {
+        "input": {
+          "active_ms": "72623859790382856",
+          "kind": 7,
+          "payload": {
+            "accumulator": "17",
+            "animal_hits": 1,
+            "build": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "conduct": "right_of_way",
+            "conduct_ordinal": 1,
+            "courtesy_count": 2,
+            "duration_ms": 60000,
+            "max_delivery_chain": 3,
+            "objective_completed": true,
+            "packages_delivered": 3,
+            "platform": 1,
+            "premium_bps": 9000,
+            "reason": 1,
+            "remaining_ms": 5000,
+            "total": 17
+          },
+          "previous_hash_hex": "0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+          "seq": 15
+        },
+        "name": "terminal_right_of_way",
+        "output": {
+          "event_hash_hex": "ba2c8830b48fc78ca758d54cda91128140ccf9f9a50e47b59e777df89c207b26",
+          "event_record_hex": "0e726f6164792e76322e6576656e740000000f0102030405060708070101000000110000000000000011000023280000000300000002000000010000000301000000000000ea600000000000001388407878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787801",
+          "event_record_length": 145,
+          "fits_max_event_record_bytes": true,
+          "stored_event_hex": "0e726f6164792e76322e6576656e740000000f0102030405060708070101000000110000000000000011000023280000000300000002000000010000000301000000000000ea600000000000001388407878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787878787801ba2c8830b48fc78ca758d54cda91128140ccf9f9a50e47b59e777df89c207b26",
+          "stored_event_length": 177
+        }
+      }
+    ],
+    "ledger": {
+      "input": {
+        "events": [
+          {
+            "active_ms": 59000,
+            "payload": {
+              "accumulator_after": "17",
+              "accumulator_before": "15",
+              "base": 5,
+              "chain_index": 0,
+              "credited": 2,
+              "delivered_ordinal_within_dropoff": 0,
+              "guilt": true,
+              "premium_bps": 9000,
+              "remaining_after_ms": "5000",
+              "remaining_before_ms": "2000"
+            },
+            "seq": 0
+          },
+          {
+            "active_ms": 60000,
+            "payload": {
+              "accumulator": "17",
+              "animal_hits": 1,
+              "build": "dev",
+              "conduct": "right_of_way",
+              "conduct_ordinal": 1,
+              "courtesy_count": 2,
+              "duration_ms": 60000,
+              "max_delivery_chain": 3,
+              "objective_completed": true,
+              "packages_delivered": 3,
+              "platform": 1,
+              "premium_bps": 9000,
+              "reason": 1,
+              "remaining_ms": 5000,
+              "total": 17
+            },
+            "seq": 1
+          }
+        ],
+        "session_id": "S01",
+        "started_header_hex": "10726f6164792e76322e73657373696f6e02020108726f746174696f6e18726f746174696f6e2e76312e72696768745f6f665f77617903533031034330311f79a204b991758a8798f650465fc89634f967a3976312a2eaaff5912bbd8b48bb785fb44d72ad7ea1b957df9bcc95dffdd814a475e736a0e74beceee2d3049e00000000000003e800000000000000000100000000000007d0"
+      },
+      "output": {
+        "conduct_aggregates_hex": "0101000000110000000000000011000023280000000300000002000000010000000301000000000000ea6000000000000013880364657601",
+        "event_count": 2,
+        "evidence_bytes_hex": "11726f6164792e76322e65766964656e63650353303100000002000000e20e726f6164792e76322e6576656e7400000000000000000000e67809000000000000000005000023280100000002000000000000000f000000000000001100000000000007d000000000000013888e4fd2e17ea55a7a9ee870bea91dd721f30af0b2893d81e9510e1f5a47e484c40e726f6164792e76322e6576656e7400000001000000000000ea60070101000000110000000000000011000023280000000300000002000000010000000301000000000000ea60000000000000138803646576019a7d333cd50ab0820f9b5cddc0b248679876528eaec3880f9e94ad14d90dfdd8",
+        "evidence_bytes_length": 256,
+        "evidence_hash_hex": "3eb41392e1b8177a67726a7918639dea5bedc2ea37373f4b65b041e3c4d36208",
+        "final_root_hex": "7b1c54dab44fbfb02292ae91ede300262c566e3d0f4368a9ca5f6ede774bba22",
+        "h0_hex": "a19f8c2c2fc9f273889b5e515e3ef6325cbbf903fd07f73b3352a653709469c9",
+        "hN_hex": "9a7d333cd50ab0820f9b5cddc0b248679876528eaec3880f9e94ad14d90dfdd8",
+        "stored_ledger_hex": "0e726f6164792e76322e6576656e7400000000000000000000e67809000000000000000005000023280100000002000000000000000f000000000000001100000000000007d000000000000013888e4fd2e17ea55a7a9ee870bea91dd721f30af0b2893d81e9510e1f5a47e484c40e726f6164792e76322e6576656e7400000001000000000000ea60070101000000110000000000000011000023280000000300000002000000010000000301000000000000ea60000000000000138803646576019a7d333cd50ab0820f9b5cddc0b248679876528eaec3880f9e94ad14d90dfdd8",
+        "stored_ledger_length": 226
+      }
+    },
+    "schedule": {
+      "input": {
+        "category": "rotation.v1.right_of_way",
+        "seed_hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+      },
+      "output": {
+        "bytes_hex": "11726f6164792e76322e7363686564756c6502020108726f746174696f6e18726f746174696f6e2e76312e72696768745f6f665f7761790102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f200010030000000000001f400000000000002af800000000000071480000000000008ca0040000000000008ca00000000000009858000000000000dea8000000000000fa0003000000000000fa0000000000000105b80000000000014c0800000000000167600100000000000167600000000000017318000000000001b968000000000001d4c004000000000001d4c0000000000001e07800000000000226c800000000000242200300000000000242200000000000024dd80000000000029428000000000002af8001000000000002af80000000000002bb3800000000000301880000000000031ce0030000000000031ce000000000000328980000000000036ee80000000000038a40010000000000038a4000000000000395f8000000000003dc48000000000003f7a003000000000003f7a0000000000004035800000000000449a8000000000004650001000000000004650000000000000470b8000000000004b708000000000004d26004000000000004d260000000000004de1800000000000524680000000000053fc0010000000000053fc00000000000054b7800000000000591c8000000000005ad2004000000000005ad20000000000005b8d8000000000005ff280000000000061a80010000000000061a8000000000000626380000000000066c8800000000000687e00400000000000687e00000000000069398000000000006d9e8000000000006f540",
+        "sha256_hex": "bb785fb44d72ad7ea1b957df9bcc95dffdd814a475e736a0e74beceee2d3049e"
+      }
+    },
+    "score_hmac_cluck_hunt": {
+      "input": {
+        "category": "rotation.v1.cluck_hunt",
+        "final_root_hex": "7b1c54dab44fbfb02292ae91ede300262c566e3d0f4368a9ca5f6ede774bba22",
+        "key_utf8": "roady-v2-test-client-key",
+        "schedule_hash_hex": "f287d212e7f0170ade4324886d33ea31f1ce45468e759e2bd4798bc9c6979ec1",
+        "seed_commitment_hex": "1f79a204b991758a8798f650465fc89634f967a3976312a2eaaff5912bbd8b48",
+        "session_id": "S01",
+        "terminal": {
+          "build": "dev",
+          "chickens": 35,
+          "coins": 7,
+          "conduct": "cluck_hunt",
+          "conduct_ordinal": 0,
+          "duration_ms": 123456,
+          "max_combo": 5,
+          "objective_completed": true,
+          "platform": 2,
+          "reason": 2,
+          "remaining_ms": 9876,
+          "total": 42
+        }
+      },
+      "output": {
+        "hmac_sha256_base64url": "4HC6YURnVO3JYRhFMVTnyZKRnc10TuyrAD9MvyKc390",
+        "score_input_hex": "0e726f6164792e76322e73636f726502020108726f746174696f6e16726f746174696f6e2e76312e636c75636b5f68756e74035330317b1c54dab44fbfb02292ae91ede300262c566e3d0f4368a9ca5f6ede774bba22f287d212e7f0170ade4324886d33ea31f1ce45468e759e2bd4798bc9c6979ec11f79a204b991758a8798f650465fc89634f967a3976312a2eaaff5912bbd8b4800020000002a00000023000000070105000000000001e24000000000000026940364657602",
+        "score_input_length": 187
+      }
+    },
+    "score_hmac_right_of_way_contract_golden": {
+      "input": {
+        "category": "rotation.v1.right_of_way",
+        "final_root_hex": "1111111111111111111111111111111111111111111111111111111111111111",
+        "key_utf8": "roady-v2-test-client-key",
+        "schedule_hash_hex": "bb785fb44d72ad7ea1b957df9bcc95dffdd814a475e736a0e74beceee2d3049e",
+        "seed_commitment_hex": "1f79a204b991758a8798f650465fc89634f967a3976312a2eaaff5912bbd8b48",
+        "session_id": "S01",
+        "terminal": {
+          "accumulator": "17",
+          "animal_hits": 1,
+          "build": "dev",
+          "conduct": "right_of_way",
+          "conduct_ordinal": 1,
+          "courtesy_count": 2,
+          "duration_ms": 60000,
+          "max_delivery_chain": 3,
+          "objective_completed": true,
+          "packages_delivered": 3,
+          "platform": 1,
+          "premium_bps": 9000,
+          "reason": 1,
+          "remaining_ms": 5000,
+          "total": 17
+        }
+      },
+      "output": {
+        "hmac_sha256_base64url": "_FkmJU_oSw6ycX5CsaTlcu0V4dYKPTy4zhjgIjA8Gkw",
+        "score_input_hex": "0e726f6164792e76322e73636f726502020108726f746174696f6e18726f746174696f6e2e76312e72696768745f6f665f776179035330311111111111111111111111111111111111111111111111111111111111111111bb785fb44d72ad7ea1b957df9bcc95dffdd814a475e736a0e74beceee2d3049e1f79a204b991758a8798f650465fc89634f967a3976312a2eaaff5912bbd8b480101000000110000000000000011000023280000000300000002000000010000000301000000000000ea6000000000000013880364657601",
+        "score_input_length": 208
+      }
+    },
+    "session": {
+      "input": {
+        "category": "rotation.v1.right_of_way",
+        "challenge": "C01",
+        "issued_at_ms": 1000,
+        "proof_key_utf8": "roady-v2-test-proof-key",
+        "schedule_hash_hex": "bb785fb44d72ad7ea1b957df9bcc95dffdd814a475e736a0e74beceee2d3049e",
+        "seed_commitment_hex": "1f79a204b991758a8798f650465fc89634f967a3976312a2eaaff5912bbd8b48",
+        "session_id": "S01",
+        "start_by_expiry_ms": 301000,
+        "started_at_ms": 2000
+      },
+      "output": {
+        "h0_hex": "a19f8c2c2fc9f273889b5e515e3ef6325cbbf903fd07f73b3352a653709469c9",
+        "started_header_hex": "10726f6164792e76322e73657373696f6e02020108726f746174696f6e18726f746174696f6e2e76312e72696768745f6f665f77617903533031034330311f79a204b991758a8798f650465fc89634f967a3976312a2eaaff5912bbd8b48bb785fb44d72ad7ea1b957df9bcc95dffdd814a475e736a0e74beceee2d3049e00000000000003e800000000000000000100000000000007d0",
+        "started_header_length": 151,
+        "started_proof_base64url": "ZM7W0oOodWfYMxGqONqG9lX8sbO1L9ugApXoehqIceM",
+        "started_proof_input_hex": "0e726f6164792e76322e70726f6f6610726f6164792e76322e73657373696f6e02020108726f746174696f6e18726f746174696f6e2e76312e72696768745f6f665f77617903533031034330311f79a204b991758a8798f650465fc89634f967a3976312a2eaaff5912bbd8b48bb785fb44d72ad7ea1b957df9bcc95dffdd814a475e736a0e74beceee2d3049e00000000000003e800000000000000000100000000000007d0",
+        "unstarted_header_hex": "10726f6164792e76322e73657373696f6e02020108726f746174696f6e18726f746174696f6e2e76312e72696768745f6f665f77617903533031034330311f79a204b991758a8798f650465fc89634f967a3976312a2eaaff5912bbd8b48bb785fb44d72ad7ea1b957df9bcc95dffdd814a475e736a0e74beceee2d3049e00000000000003e800000000000497c8000000000000000000",
+        "unstarted_header_length": 151,
+        "unstarted_proof_base64url": "Rfmc1ChkJylMommEMRZnKrVrWMH_m5pY_ZTWxIbvctE",
+        "unstarted_proof_input_hex": "0e726f6164792e76322e70726f6f6610726f6164792e76322e73657373696f6e02020108726f746174696f6e18726f746174696f6e2e76312e72696768745f6f665f77617903533031034330311f79a204b991758a8798f650465fc89634f967a3976312a2eaaff5912bbd8b48bb785fb44d72ad7ea1b957df9bcc95dffdd814a475e736a0e74beceee2d3049e00000000000003e800000000000497c8000000000000000000"
+      }
+    }
+  },
+  "encoding": {
+    "base64url": "unpadded",
+    "hex": "lowercase",
+    "integers": "big_endian",
+    "line_endings": "LF",
+    "u64_fixture_inputs": "canonical_decimal_strings"
+  },
+  "fixture_version": 1,
+  "frenzy_seed01": {
+    "input": {
+      "seed_hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+      "through_ms": 60000
+    },
+    "output": [
+      {
+        "at_ms": 11446,
+        "pity": false,
+        "roll_residue": 7564,
+        "spawn": false
+      },
+      {
+        "at_ms": 20456,
+        "pity": false,
+        "roll_residue": 5850,
+        "spawn": false
+      },
+      {
+        "at_ms": 28802,
+        "pity": false,
+        "roll_residue": 4625,
+        "spawn": false
+      },
+      {
+        "at_ms": 40458,
+        "pity": false,
+        "roll_residue": 6756,
+        "spawn": false
+      },
+      {
+        "at_ms": 48549,
+        "pity": false,
+        "roll_residue": 1830,
+        "spawn": false
+      },
+      {
+        "at_ms": 58060,
+        "pity": true,
+        "roll_residue": 7341,
+        "spawn": true
+      }
+    ]
+  },
+  "relocation_seed01": {
+    "input": {
+      "seed_hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+    },
+    "output": {
+      "lateral_ahead": [
+        [
+          5.610000133514404,
+          20.87125015258789
+        ],
+        [
+          -17.753999710083008,
+          17.844999313354492
+        ],
+        [
+          -0.9020000100135803,
+          22.536251068115234
+        ],
+        [
+          -14.387999534606934,
+          18.25
+        ],
+        [
+          2.9040000438690186,
+          18.261249542236328
+        ],
+        [
+          6.203999996185303,
+          16.956249237060547
+        ],
+        [
+          -21.25200080871582,
+          23.447500228881836
+        ],
+        [
+          -17.445999145507812,
+          23.875
+        ]
+      ]
+    }
+  },
+  "rules_id": "roady-rules.v2",
+  "schedule_vectors": [
+    {
+      "input": {
+        "seed_hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+      },
+      "number": 1,
+      "output": {
+        "schedule_commitment_cluck_hunt_hex": "f287d212e7f0170ade4324886d33ea31f1ce45468e759e2bd4798bc9c6979ec1",
+        "schedule_commitment_right_of_way_hex": "bb785fb44d72ad7ea1b957df9bcc95dffdd814a475e736a0e74beceee2d3049e",
+        "scheduled_events": [
+          {
+            "name": "combo_frenzy",
+            "ordinal": 2
+          },
+          {
+            "name": "critter_burst",
+            "ordinal": 3
+          }
+        ],
+        "seed_commitment_hex": "1f79a204b991758a8798f650465fc89634f967a3976312a2eaaff5912bbd8b48",
+        "windows": [
+          {
+            "active_end_ms": 29000,
+            "active_start_ms": 11000,
+            "cooldown_end_ms": 36000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 8000
+          },
+          {
+            "active_end_ms": 57000,
+            "active_start_ms": 39000,
+            "cooldown_end_ms": 64000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 36000
+          },
+          {
+            "active_end_ms": 85000,
+            "active_start_ms": 67000,
+            "cooldown_end_ms": 92000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 64000
+          },
+          {
+            "active_end_ms": 113000,
+            "active_start_ms": 95000,
+            "cooldown_end_ms": 120000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 92000
+          },
+          {
+            "active_end_ms": 141000,
+            "active_start_ms": 123000,
+            "cooldown_end_ms": 148000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 120000
+          },
+          {
+            "active_end_ms": 169000,
+            "active_start_ms": 151000,
+            "cooldown_end_ms": 176000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 148000
+          },
+          {
+            "active_end_ms": 197000,
+            "active_start_ms": 179000,
+            "cooldown_end_ms": 204000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 176000
+          },
+          {
+            "active_end_ms": 225000,
+            "active_start_ms": 207000,
+            "cooldown_end_ms": 232000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 204000
+          },
+          {
+            "active_end_ms": 253000,
+            "active_start_ms": 235000,
+            "cooldown_end_ms": 260000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 232000
+          },
+          {
+            "active_end_ms": 281000,
+            "active_start_ms": 263000,
+            "cooldown_end_ms": 288000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 260000
+          },
+          {
+            "active_end_ms": 309000,
+            "active_start_ms": 291000,
+            "cooldown_end_ms": 316000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 288000
+          },
+          {
+            "active_end_ms": 337000,
+            "active_start_ms": 319000,
+            "cooldown_end_ms": 344000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 316000
+          },
+          {
+            "active_end_ms": 365000,
+            "active_start_ms": 347000,
+            "cooldown_end_ms": 372000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 344000
+          },
+          {
+            "active_end_ms": 393000,
+            "active_start_ms": 375000,
+            "cooldown_end_ms": 400000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 372000
+          },
+          {
+            "active_end_ms": 421000,
+            "active_start_ms": 403000,
+            "cooldown_end_ms": 428000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 400000
+          },
+          {
+            "active_end_ms": 449000,
+            "active_start_ms": 431000,
+            "cooldown_end_ms": 456000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 428000
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "seed_hex": "02030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f2021"
+      },
+      "number": 2,
+      "output": {
+        "schedule_commitment_cluck_hunt_hex": "334e4c0f526c8141668fe47efc4f6f33084b1200acd437c5371bb92a6ff255c7",
+        "schedule_commitment_right_of_way_hex": "4fa369f6bd2b5a2ddea60726a72a700559ae194cc8c5b19d61a15fe98a3defac",
+        "scheduled_events": [
+          {
+            "name": "chicken_burst",
+            "ordinal": 1
+          },
+          {
+            "name": "chicken_burst",
+            "ordinal": 1
+          }
+        ],
+        "seed_commitment_hex": "5e3366d30193ffc84bc561598cce68ff566448eff975c30f7950a14d9fc4093c",
+        "windows": [
+          {
+            "active_end_ms": 29000,
+            "active_start_ms": 11000,
+            "cooldown_end_ms": 36000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 8000
+          },
+          {
+            "active_end_ms": 57000,
+            "active_start_ms": 39000,
+            "cooldown_end_ms": 64000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 36000
+          },
+          {
+            "active_end_ms": 85000,
+            "active_start_ms": 67000,
+            "cooldown_end_ms": 92000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 64000
+          },
+          {
+            "active_end_ms": 113000,
+            "active_start_ms": 95000,
+            "cooldown_end_ms": 120000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 92000
+          },
+          {
+            "active_end_ms": 141000,
+            "active_start_ms": 123000,
+            "cooldown_end_ms": 148000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 120000
+          },
+          {
+            "active_end_ms": 169000,
+            "active_start_ms": 151000,
+            "cooldown_end_ms": 176000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 148000
+          },
+          {
+            "active_end_ms": 197000,
+            "active_start_ms": 179000,
+            "cooldown_end_ms": 204000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 176000
+          },
+          {
+            "active_end_ms": 225000,
+            "active_start_ms": 207000,
+            "cooldown_end_ms": 232000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 204000
+          },
+          {
+            "active_end_ms": 253000,
+            "active_start_ms": 235000,
+            "cooldown_end_ms": 260000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 232000
+          },
+          {
+            "active_end_ms": 281000,
+            "active_start_ms": 263000,
+            "cooldown_end_ms": 288000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 260000
+          },
+          {
+            "active_end_ms": 309000,
+            "active_start_ms": 291000,
+            "cooldown_end_ms": 316000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 288000
+          },
+          {
+            "active_end_ms": 337000,
+            "active_start_ms": 319000,
+            "cooldown_end_ms": 344000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 316000
+          },
+          {
+            "active_end_ms": 365000,
+            "active_start_ms": 347000,
+            "cooldown_end_ms": 372000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 344000
+          },
+          {
+            "active_end_ms": 393000,
+            "active_start_ms": 375000,
+            "cooldown_end_ms": 400000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 372000
+          },
+          {
+            "active_end_ms": 421000,
+            "active_start_ms": 403000,
+            "cooldown_end_ms": 428000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 400000
+          },
+          {
+            "active_end_ms": 449000,
+            "active_start_ms": 431000,
+            "cooldown_end_ms": 456000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 428000
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "seed_hex": "030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122"
+      },
+      "number": 3,
+      "output": {
+        "schedule_commitment_cluck_hunt_hex": "949883a46b9af2b53f1baa4af4b43a3ba0fed43deb941fc046cb507576d781a7",
+        "schedule_commitment_right_of_way_hex": "3e611354756e820ee350fcdbac36412af08093c29cb6df261bef7daf3415d96a",
+        "scheduled_events": [
+          {
+            "name": "chicken_burst",
+            "ordinal": 1
+          },
+          {
+            "name": "traffic_surge",
+            "ordinal": 0
+          }
+        ],
+        "seed_commitment_hex": "9ee7af0b7c2ad1e12a27a376a4a176113385bbcb71ffa1a7c4c0cbe138c5babf",
+        "windows": [
+          {
+            "active_end_ms": 29000,
+            "active_start_ms": 11000,
+            "cooldown_end_ms": 36000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 8000
+          },
+          {
+            "active_end_ms": 57000,
+            "active_start_ms": 39000,
+            "cooldown_end_ms": 64000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 36000
+          },
+          {
+            "active_end_ms": 85000,
+            "active_start_ms": 67000,
+            "cooldown_end_ms": 92000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 64000
+          },
+          {
+            "active_end_ms": 113000,
+            "active_start_ms": 95000,
+            "cooldown_end_ms": 120000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 92000
+          },
+          {
+            "active_end_ms": 141000,
+            "active_start_ms": 123000,
+            "cooldown_end_ms": 148000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 120000
+          },
+          {
+            "active_end_ms": 169000,
+            "active_start_ms": 151000,
+            "cooldown_end_ms": 176000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 148000
+          },
+          {
+            "active_end_ms": 197000,
+            "active_start_ms": 179000,
+            "cooldown_end_ms": 204000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 176000
+          },
+          {
+            "active_end_ms": 225000,
+            "active_start_ms": 207000,
+            "cooldown_end_ms": 232000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 204000
+          },
+          {
+            "active_end_ms": 253000,
+            "active_start_ms": 235000,
+            "cooldown_end_ms": 260000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 232000
+          },
+          {
+            "active_end_ms": 281000,
+            "active_start_ms": 263000,
+            "cooldown_end_ms": 288000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 260000
+          },
+          {
+            "active_end_ms": 309000,
+            "active_start_ms": 291000,
+            "cooldown_end_ms": 316000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 288000
+          },
+          {
+            "active_end_ms": 337000,
+            "active_start_ms": 319000,
+            "cooldown_end_ms": 344000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 316000
+          },
+          {
+            "active_end_ms": 365000,
+            "active_start_ms": 347000,
+            "cooldown_end_ms": 372000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 344000
+          },
+          {
+            "active_end_ms": 393000,
+            "active_start_ms": 375000,
+            "cooldown_end_ms": 400000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 372000
+          },
+          {
+            "active_end_ms": 421000,
+            "active_start_ms": 403000,
+            "cooldown_end_ms": 428000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 400000
+          },
+          {
+            "active_end_ms": 449000,
+            "active_start_ms": 431000,
+            "cooldown_end_ms": 456000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 428000
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "seed_hex": "0405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20212223"
+      },
+      "number": 4,
+      "output": {
+        "schedule_commitment_cluck_hunt_hex": "e91a3d1d49dc5ec2bf4fa2149e3415c74f525455b838aa805f3d9ceecd97c2c3",
+        "schedule_commitment_right_of_way_hex": "511707e40e877d8f2a4377ff0c3c7b1dae2e93d8c62313927e62f8006a273eee",
+        "scheduled_events": [
+          {
+            "name": "combo_frenzy",
+            "ordinal": 2
+          },
+          {
+            "name": "combo_frenzy",
+            "ordinal": 2
+          }
+        ],
+        "seed_commitment_hex": "f6e037508be4596534bc0a6687f88616cdab314834379309341e6432b6263298",
+        "windows": [
+          {
+            "active_end_ms": 29000,
+            "active_start_ms": 11000,
+            "cooldown_end_ms": 36000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 8000
+          },
+          {
+            "active_end_ms": 57000,
+            "active_start_ms": 39000,
+            "cooldown_end_ms": 64000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 36000
+          },
+          {
+            "active_end_ms": 85000,
+            "active_start_ms": 67000,
+            "cooldown_end_ms": 92000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 64000
+          },
+          {
+            "active_end_ms": 113000,
+            "active_start_ms": 95000,
+            "cooldown_end_ms": 120000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 92000
+          },
+          {
+            "active_end_ms": 141000,
+            "active_start_ms": 123000,
+            "cooldown_end_ms": 148000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 120000
+          },
+          {
+            "active_end_ms": 169000,
+            "active_start_ms": 151000,
+            "cooldown_end_ms": 176000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 148000
+          },
+          {
+            "active_end_ms": 197000,
+            "active_start_ms": 179000,
+            "cooldown_end_ms": 204000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 176000
+          },
+          {
+            "active_end_ms": 225000,
+            "active_start_ms": 207000,
+            "cooldown_end_ms": 232000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 204000
+          },
+          {
+            "active_end_ms": 253000,
+            "active_start_ms": 235000,
+            "cooldown_end_ms": 260000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 232000
+          },
+          {
+            "active_end_ms": 281000,
+            "active_start_ms": 263000,
+            "cooldown_end_ms": 288000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 260000
+          },
+          {
+            "active_end_ms": 309000,
+            "active_start_ms": 291000,
+            "cooldown_end_ms": 316000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 288000
+          },
+          {
+            "active_end_ms": 337000,
+            "active_start_ms": 319000,
+            "cooldown_end_ms": 344000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 316000
+          },
+          {
+            "active_end_ms": 365000,
+            "active_start_ms": 347000,
+            "cooldown_end_ms": 372000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 344000
+          },
+          {
+            "active_end_ms": 393000,
+            "active_start_ms": 375000,
+            "cooldown_end_ms": 400000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 372000
+          },
+          {
+            "active_end_ms": 421000,
+            "active_start_ms": 403000,
+            "cooldown_end_ms": 428000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 400000
+          },
+          {
+            "active_end_ms": 449000,
+            "active_start_ms": 431000,
+            "cooldown_end_ms": 456000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 428000
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "seed_hex": "05060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f2021222324"
+      },
+      "number": 5,
+      "output": {
+        "schedule_commitment_cluck_hunt_hex": "65daafacc6cb058130efc7a7cb15ea6d2d6484199bd2e02a034626292d12af92",
+        "schedule_commitment_right_of_way_hex": "d5f192ef7a096d115a25c6fc39b00cf333dc637669b2953d17d99d874ae57b32",
+        "scheduled_events": [
+          {
+            "name": "chicken_burst",
+            "ordinal": 1
+          },
+          {
+            "name": "chicken_burst",
+            "ordinal": 1
+          }
+        ],
+        "seed_commitment_hex": "787bfeebf610c9e713c8e0b7138b4a0820cbc51748b89d7cd620f2eb8053360e",
+        "windows": [
+          {
+            "active_end_ms": 29000,
+            "active_start_ms": 11000,
+            "cooldown_end_ms": 36000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 8000
+          },
+          {
+            "active_end_ms": 57000,
+            "active_start_ms": 39000,
+            "cooldown_end_ms": 64000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 36000
+          },
+          {
+            "active_end_ms": 85000,
+            "active_start_ms": 67000,
+            "cooldown_end_ms": 92000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 64000
+          },
+          {
+            "active_end_ms": 113000,
+            "active_start_ms": 95000,
+            "cooldown_end_ms": 120000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 92000
+          },
+          {
+            "active_end_ms": 141000,
+            "active_start_ms": 123000,
+            "cooldown_end_ms": 148000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 120000
+          },
+          {
+            "active_end_ms": 169000,
+            "active_start_ms": 151000,
+            "cooldown_end_ms": 176000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 148000
+          },
+          {
+            "active_end_ms": 197000,
+            "active_start_ms": 179000,
+            "cooldown_end_ms": 204000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 176000
+          },
+          {
+            "active_end_ms": 225000,
+            "active_start_ms": 207000,
+            "cooldown_end_ms": 232000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 204000
+          },
+          {
+            "active_end_ms": 253000,
+            "active_start_ms": 235000,
+            "cooldown_end_ms": 260000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 232000
+          },
+          {
+            "active_end_ms": 281000,
+            "active_start_ms": 263000,
+            "cooldown_end_ms": 288000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 260000
+          },
+          {
+            "active_end_ms": 309000,
+            "active_start_ms": 291000,
+            "cooldown_end_ms": 316000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 288000
+          },
+          {
+            "active_end_ms": 337000,
+            "active_start_ms": 319000,
+            "cooldown_end_ms": 344000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 316000
+          },
+          {
+            "active_end_ms": 365000,
+            "active_start_ms": 347000,
+            "cooldown_end_ms": 372000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 344000
+          },
+          {
+            "active_end_ms": 393000,
+            "active_start_ms": 375000,
+            "cooldown_end_ms": 400000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 372000
+          },
+          {
+            "active_end_ms": 421000,
+            "active_start_ms": 403000,
+            "cooldown_end_ms": 428000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 400000
+          },
+          {
+            "active_end_ms": 449000,
+            "active_start_ms": 431000,
+            "cooldown_end_ms": 456000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 428000
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "seed_hex": "060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425"
+      },
+      "number": 6,
+      "output": {
+        "schedule_commitment_cluck_hunt_hex": "bf950fa753b6451fa566b73eb32f36e7a256c572eea96c6a1aa8a1a32d4b4200",
+        "schedule_commitment_right_of_way_hex": "4368c564e05348e06b53b8a044576fee3d7f4470b446fc45daa6dc4e3bf96a5c",
+        "scheduled_events": [
+          {
+            "name": "chicken_burst",
+            "ordinal": 1
+          },
+          {
+            "name": "combo_frenzy",
+            "ordinal": 2
+          }
+        ],
+        "seed_commitment_hex": "a1a593496dce3d7c003a799e71defb6c60c3172d1a85781cf71187b715777fa4",
+        "windows": [
+          {
+            "active_end_ms": 29000,
+            "active_start_ms": 11000,
+            "cooldown_end_ms": 36000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 8000
+          },
+          {
+            "active_end_ms": 57000,
+            "active_start_ms": 39000,
+            "cooldown_end_ms": 64000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 36000
+          },
+          {
+            "active_end_ms": 85000,
+            "active_start_ms": 67000,
+            "cooldown_end_ms": 92000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 64000
+          },
+          {
+            "active_end_ms": 113000,
+            "active_start_ms": 95000,
+            "cooldown_end_ms": 120000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 92000
+          },
+          {
+            "active_end_ms": 141000,
+            "active_start_ms": 123000,
+            "cooldown_end_ms": 148000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 120000
+          },
+          {
+            "active_end_ms": 169000,
+            "active_start_ms": 151000,
+            "cooldown_end_ms": 176000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 148000
+          },
+          {
+            "active_end_ms": 197000,
+            "active_start_ms": 179000,
+            "cooldown_end_ms": 204000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 176000
+          },
+          {
+            "active_end_ms": 225000,
+            "active_start_ms": 207000,
+            "cooldown_end_ms": 232000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 204000
+          },
+          {
+            "active_end_ms": 253000,
+            "active_start_ms": 235000,
+            "cooldown_end_ms": 260000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 232000
+          },
+          {
+            "active_end_ms": 281000,
+            "active_start_ms": 263000,
+            "cooldown_end_ms": 288000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 260000
+          },
+          {
+            "active_end_ms": 309000,
+            "active_start_ms": 291000,
+            "cooldown_end_ms": 316000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 288000
+          },
+          {
+            "active_end_ms": 337000,
+            "active_start_ms": 319000,
+            "cooldown_end_ms": 344000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 316000
+          },
+          {
+            "active_end_ms": 365000,
+            "active_start_ms": 347000,
+            "cooldown_end_ms": 372000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 344000
+          },
+          {
+            "active_end_ms": 393000,
+            "active_start_ms": 375000,
+            "cooldown_end_ms": 400000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 372000
+          },
+          {
+            "active_end_ms": 421000,
+            "active_start_ms": 403000,
+            "cooldown_end_ms": 428000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 400000
+          },
+          {
+            "active_end_ms": 449000,
+            "active_start_ms": 431000,
+            "cooldown_end_ms": 456000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 428000
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "seed_hex": "0708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20212223242526"
+      },
+      "number": 7,
+      "output": {
+        "schedule_commitment_cluck_hunt_hex": "460c8485332aae4908ea528652c873585f9f99558d37919a18b218a34e189924",
+        "schedule_commitment_right_of_way_hex": "894f025408ad909581527fe27ddcbd57113e87e7ac9fbc74658840649d23f2f4",
+        "scheduled_events": [
+          {
+            "name": "critter_burst",
+            "ordinal": 3
+          },
+          {
+            "name": "combo_frenzy",
+            "ordinal": 2
+          }
+        ],
+        "seed_commitment_hex": "34a9bdfeaa3a8d478c3b97ee5840ec3f7993f35765f8feadefc4ee732b2dd43a",
+        "windows": [
+          {
+            "active_end_ms": 29000,
+            "active_start_ms": 11000,
+            "cooldown_end_ms": 36000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 8000
+          },
+          {
+            "active_end_ms": 57000,
+            "active_start_ms": 39000,
+            "cooldown_end_ms": 64000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 36000
+          },
+          {
+            "active_end_ms": 85000,
+            "active_start_ms": 67000,
+            "cooldown_end_ms": 92000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 64000
+          },
+          {
+            "active_end_ms": 113000,
+            "active_start_ms": 95000,
+            "cooldown_end_ms": 120000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 92000
+          },
+          {
+            "active_end_ms": 141000,
+            "active_start_ms": 123000,
+            "cooldown_end_ms": 148000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 120000
+          },
+          {
+            "active_end_ms": 169000,
+            "active_start_ms": 151000,
+            "cooldown_end_ms": 176000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 148000
+          },
+          {
+            "active_end_ms": 197000,
+            "active_start_ms": 179000,
+            "cooldown_end_ms": 204000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 176000
+          },
+          {
+            "active_end_ms": 225000,
+            "active_start_ms": 207000,
+            "cooldown_end_ms": 232000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 204000
+          },
+          {
+            "active_end_ms": 253000,
+            "active_start_ms": 235000,
+            "cooldown_end_ms": 260000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 232000
+          },
+          {
+            "active_end_ms": 281000,
+            "active_start_ms": 263000,
+            "cooldown_end_ms": 288000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 260000
+          },
+          {
+            "active_end_ms": 309000,
+            "active_start_ms": 291000,
+            "cooldown_end_ms": 316000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 288000
+          },
+          {
+            "active_end_ms": 337000,
+            "active_start_ms": 319000,
+            "cooldown_end_ms": 344000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 316000
+          },
+          {
+            "active_end_ms": 365000,
+            "active_start_ms": 347000,
+            "cooldown_end_ms": 372000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 344000
+          },
+          {
+            "active_end_ms": 393000,
+            "active_start_ms": 375000,
+            "cooldown_end_ms": 400000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 372000
+          },
+          {
+            "active_end_ms": 421000,
+            "active_start_ms": 403000,
+            "cooldown_end_ms": 428000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 400000
+          },
+          {
+            "active_end_ms": 449000,
+            "active_start_ms": 431000,
+            "cooldown_end_ms": 456000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 428000
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "seed_hex": "08090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f2021222324252627"
+      },
+      "number": 8,
+      "output": {
+        "schedule_commitment_cluck_hunt_hex": "833ec49d6c2aada73be6f872c02330833dea01aeb488f21c5c096ff532ed67fe",
+        "schedule_commitment_right_of_way_hex": "dd0eb4a80b78f32fb7b948eb99f95b207a01e2db2482466e63ef92faf9dc7d99",
+        "scheduled_events": [
+          {
+            "name": "combo_frenzy",
+            "ordinal": 2
+          },
+          {
+            "name": "critter_burst",
+            "ordinal": 3
+          }
+        ],
+        "seed_commitment_hex": "8129054312f2fae543ce070e550e4b173e4ef85c77e6686c0a82ff9fe3b0426b",
+        "windows": [
+          {
+            "active_end_ms": 29000,
+            "active_start_ms": 11000,
+            "cooldown_end_ms": 36000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 8000
+          },
+          {
+            "active_end_ms": 57000,
+            "active_start_ms": 39000,
+            "cooldown_end_ms": 64000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 36000
+          },
+          {
+            "active_end_ms": 85000,
+            "active_start_ms": 67000,
+            "cooldown_end_ms": 92000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 64000
+          },
+          {
+            "active_end_ms": 113000,
+            "active_start_ms": 95000,
+            "cooldown_end_ms": 120000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 92000
+          },
+          {
+            "active_end_ms": 141000,
+            "active_start_ms": 123000,
+            "cooldown_end_ms": 148000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 120000
+          },
+          {
+            "active_end_ms": 169000,
+            "active_start_ms": 151000,
+            "cooldown_end_ms": 176000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 148000
+          },
+          {
+            "active_end_ms": 197000,
+            "active_start_ms": 179000,
+            "cooldown_end_ms": 204000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 176000
+          },
+          {
+            "active_end_ms": 225000,
+            "active_start_ms": 207000,
+            "cooldown_end_ms": 232000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 204000
+          },
+          {
+            "active_end_ms": 253000,
+            "active_start_ms": 235000,
+            "cooldown_end_ms": 260000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 232000
+          },
+          {
+            "active_end_ms": 281000,
+            "active_start_ms": 263000,
+            "cooldown_end_ms": 288000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 260000
+          },
+          {
+            "active_end_ms": 309000,
+            "active_start_ms": 291000,
+            "cooldown_end_ms": 316000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 288000
+          },
+          {
+            "active_end_ms": 337000,
+            "active_start_ms": 319000,
+            "cooldown_end_ms": 344000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 316000
+          },
+          {
+            "active_end_ms": 365000,
+            "active_start_ms": 347000,
+            "cooldown_end_ms": 372000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 344000
+          },
+          {
+            "active_end_ms": 393000,
+            "active_start_ms": 375000,
+            "cooldown_end_ms": 400000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 372000
+          },
+          {
+            "active_end_ms": 421000,
+            "active_start_ms": 403000,
+            "cooldown_end_ms": 428000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 400000
+          },
+          {
+            "active_end_ms": 449000,
+            "active_start_ms": 431000,
+            "cooldown_end_ms": 456000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 428000
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "seed_hex": "090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728"
+      },
+      "number": 9,
+      "output": {
+        "schedule_commitment_cluck_hunt_hex": "61c0f30a16a7c4d03b856b3a396ad64b33f61e72fca35eeffa74066726a33749",
+        "schedule_commitment_right_of_way_hex": "deb5d0a5f2d62d7b22a31f2319eead87c0c013c96b94a3233c18c568ba68c37a",
+        "scheduled_events": [
+          {
+            "name": "chicken_burst",
+            "ordinal": 1
+          },
+          {
+            "name": "critter_burst",
+            "ordinal": 3
+          }
+        ],
+        "seed_commitment_hex": "2f9a7a704f2aa8676693f846837c94c571336c02ac22bd1646b1109864273d8e",
+        "windows": [
+          {
+            "active_end_ms": 29000,
+            "active_start_ms": 11000,
+            "cooldown_end_ms": 36000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 8000
+          },
+          {
+            "active_end_ms": 57000,
+            "active_start_ms": 39000,
+            "cooldown_end_ms": 64000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 36000
+          },
+          {
+            "active_end_ms": 85000,
+            "active_start_ms": 67000,
+            "cooldown_end_ms": 92000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 64000
+          },
+          {
+            "active_end_ms": 113000,
+            "active_start_ms": 95000,
+            "cooldown_end_ms": 120000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 92000
+          },
+          {
+            "active_end_ms": 141000,
+            "active_start_ms": 123000,
+            "cooldown_end_ms": 148000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 120000
+          },
+          {
+            "active_end_ms": 169000,
+            "active_start_ms": 151000,
+            "cooldown_end_ms": 176000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 148000
+          },
+          {
+            "active_end_ms": 197000,
+            "active_start_ms": 179000,
+            "cooldown_end_ms": 204000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 176000
+          },
+          {
+            "active_end_ms": 225000,
+            "active_start_ms": 207000,
+            "cooldown_end_ms": 232000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 204000
+          },
+          {
+            "active_end_ms": 253000,
+            "active_start_ms": 235000,
+            "cooldown_end_ms": 260000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 232000
+          },
+          {
+            "active_end_ms": 281000,
+            "active_start_ms": 263000,
+            "cooldown_end_ms": 288000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 260000
+          },
+          {
+            "active_end_ms": 309000,
+            "active_start_ms": 291000,
+            "cooldown_end_ms": 316000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 288000
+          },
+          {
+            "active_end_ms": 337000,
+            "active_start_ms": 319000,
+            "cooldown_end_ms": 344000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 316000
+          },
+          {
+            "active_end_ms": 365000,
+            "active_start_ms": 347000,
+            "cooldown_end_ms": 372000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 344000
+          },
+          {
+            "active_end_ms": 393000,
+            "active_start_ms": 375000,
+            "cooldown_end_ms": 400000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 372000
+          },
+          {
+            "active_end_ms": 421000,
+            "active_start_ms": 403000,
+            "cooldown_end_ms": 428000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 400000
+          },
+          {
+            "active_end_ms": 449000,
+            "active_start_ms": 431000,
+            "cooldown_end_ms": 456000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 428000
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "seed_hex": "0a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20212223242526272829"
+      },
+      "number": 10,
+      "output": {
+        "schedule_commitment_cluck_hunt_hex": "45c7afc4e84f2733859099fc1803b91478e5b43a8a4ba7d827396b912b729e36",
+        "schedule_commitment_right_of_way_hex": "88f15f057071a469364c427fce1931954f55d5236c222c7c3098d2bc9589bcb5",
+        "scheduled_events": [
+          {
+            "name": "critter_burst",
+            "ordinal": 3
+          },
+          {
+            "name": "critter_burst",
+            "ordinal": 3
+          }
+        ],
+        "seed_commitment_hex": "83d8883ac422c10822fad3fb0075ffba947ec9a4f69c9307359ab95c6357f4ea",
+        "windows": [
+          {
+            "active_end_ms": 29000,
+            "active_start_ms": 11000,
+            "cooldown_end_ms": 36000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 8000
+          },
+          {
+            "active_end_ms": 57000,
+            "active_start_ms": 39000,
+            "cooldown_end_ms": 64000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 36000
+          },
+          {
+            "active_end_ms": 85000,
+            "active_start_ms": 67000,
+            "cooldown_end_ms": 92000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 64000
+          },
+          {
+            "active_end_ms": 113000,
+            "active_start_ms": 95000,
+            "cooldown_end_ms": 120000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 92000
+          },
+          {
+            "active_end_ms": 141000,
+            "active_start_ms": 123000,
+            "cooldown_end_ms": 148000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 120000
+          },
+          {
+            "active_end_ms": 169000,
+            "active_start_ms": 151000,
+            "cooldown_end_ms": 176000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 148000
+          },
+          {
+            "active_end_ms": 197000,
+            "active_start_ms": 179000,
+            "cooldown_end_ms": 204000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 176000
+          },
+          {
+            "active_end_ms": 225000,
+            "active_start_ms": 207000,
+            "cooldown_end_ms": 232000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 204000
+          },
+          {
+            "active_end_ms": 253000,
+            "active_start_ms": 235000,
+            "cooldown_end_ms": 260000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 232000
+          },
+          {
+            "active_end_ms": 281000,
+            "active_start_ms": 263000,
+            "cooldown_end_ms": 288000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 260000
+          },
+          {
+            "active_end_ms": 309000,
+            "active_start_ms": 291000,
+            "cooldown_end_ms": 316000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 288000
+          },
+          {
+            "active_end_ms": 337000,
+            "active_start_ms": 319000,
+            "cooldown_end_ms": 344000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 316000
+          },
+          {
+            "active_end_ms": 365000,
+            "active_start_ms": 347000,
+            "cooldown_end_ms": 372000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 344000
+          },
+          {
+            "active_end_ms": 393000,
+            "active_start_ms": 375000,
+            "cooldown_end_ms": 400000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 372000
+          },
+          {
+            "active_end_ms": 421000,
+            "active_start_ms": 403000,
+            "cooldown_end_ms": 428000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 400000
+          },
+          {
+            "active_end_ms": 449000,
+            "active_start_ms": 431000,
+            "cooldown_end_ms": 456000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 428000
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "seed_hex": "0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a"
+      },
+      "number": 11,
+      "output": {
+        "schedule_commitment_cluck_hunt_hex": "c2a7d64ab7802bfa5eb3fd9feee5b347c9b77f585523a019413a2f1bb0d0700f",
+        "schedule_commitment_right_of_way_hex": "9ef2cdd58be7135073053fea3aa101b8b058ddb996fe9bcda20ca79edd688e31",
+        "scheduled_events": [
+          {
+            "name": "traffic_surge",
+            "ordinal": 0
+          },
+          {
+            "name": "combo_frenzy",
+            "ordinal": 2
+          }
+        ],
+        "seed_commitment_hex": "32ae12de16439abf296be1fdda0a4772bd799ee956bc97a5830364d966c40507",
+        "windows": [
+          {
+            "active_end_ms": 29000,
+            "active_start_ms": 11000,
+            "cooldown_end_ms": 36000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 8000
+          },
+          {
+            "active_end_ms": 57000,
+            "active_start_ms": 39000,
+            "cooldown_end_ms": 64000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 36000
+          },
+          {
+            "active_end_ms": 85000,
+            "active_start_ms": 67000,
+            "cooldown_end_ms": 92000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 64000
+          },
+          {
+            "active_end_ms": 113000,
+            "active_start_ms": 95000,
+            "cooldown_end_ms": 120000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 92000
+          },
+          {
+            "active_end_ms": 141000,
+            "active_start_ms": 123000,
+            "cooldown_end_ms": 148000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 120000
+          },
+          {
+            "active_end_ms": 169000,
+            "active_start_ms": 151000,
+            "cooldown_end_ms": 176000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 148000
+          },
+          {
+            "active_end_ms": 197000,
+            "active_start_ms": 179000,
+            "cooldown_end_ms": 204000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 176000
+          },
+          {
+            "active_end_ms": 225000,
+            "active_start_ms": 207000,
+            "cooldown_end_ms": 232000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 204000
+          },
+          {
+            "active_end_ms": 253000,
+            "active_start_ms": 235000,
+            "cooldown_end_ms": 260000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 232000
+          },
+          {
+            "active_end_ms": 281000,
+            "active_start_ms": 263000,
+            "cooldown_end_ms": 288000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 260000
+          },
+          {
+            "active_end_ms": 309000,
+            "active_start_ms": 291000,
+            "cooldown_end_ms": 316000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 288000
+          },
+          {
+            "active_end_ms": 337000,
+            "active_start_ms": 319000,
+            "cooldown_end_ms": 344000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 316000
+          },
+          {
+            "active_end_ms": 365000,
+            "active_start_ms": 347000,
+            "cooldown_end_ms": 372000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 344000
+          },
+          {
+            "active_end_ms": 393000,
+            "active_start_ms": 375000,
+            "cooldown_end_ms": 400000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 372000
+          },
+          {
+            "active_end_ms": 421000,
+            "active_start_ms": 403000,
+            "cooldown_end_ms": 428000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 400000
+          },
+          {
+            "active_end_ms": 449000,
+            "active_start_ms": 431000,
+            "cooldown_end_ms": 456000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 428000
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "seed_hex": "0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b"
+      },
+      "number": 12,
+      "output": {
+        "schedule_commitment_cluck_hunt_hex": "fa8cae6c442c6ab16f1436b067628a660849f291548598ef306636ad25761225",
+        "schedule_commitment_right_of_way_hex": "1d1cf93b3eb3168c41949ce65dd2af1ff3856db6d9c92ca845a3b98f9f5cd7c4",
+        "scheduled_events": [
+          {
+            "name": "chicken_burst",
+            "ordinal": 1
+          },
+          {
+            "name": "chicken_burst",
+            "ordinal": 1
+          }
+        ],
+        "seed_commitment_hex": "542773e1dcdec7f27f7e4640faa0952e66cc7d16e2575b16bb71134af7f8652c",
+        "windows": [
+          {
+            "active_end_ms": 29000,
+            "active_start_ms": 11000,
+            "cooldown_end_ms": 36000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 8000
+          },
+          {
+            "active_end_ms": 57000,
+            "active_start_ms": 39000,
+            "cooldown_end_ms": 64000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 36000
+          },
+          {
+            "active_end_ms": 85000,
+            "active_start_ms": 67000,
+            "cooldown_end_ms": 92000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 64000
+          },
+          {
+            "active_end_ms": 113000,
+            "active_start_ms": 95000,
+            "cooldown_end_ms": 120000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 92000
+          },
+          {
+            "active_end_ms": 141000,
+            "active_start_ms": 123000,
+            "cooldown_end_ms": 148000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 120000
+          },
+          {
+            "active_end_ms": 169000,
+            "active_start_ms": 151000,
+            "cooldown_end_ms": 176000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 148000
+          },
+          {
+            "active_end_ms": 197000,
+            "active_start_ms": 179000,
+            "cooldown_end_ms": 204000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 176000
+          },
+          {
+            "active_end_ms": 225000,
+            "active_start_ms": 207000,
+            "cooldown_end_ms": 232000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 204000
+          },
+          {
+            "active_end_ms": 253000,
+            "active_start_ms": 235000,
+            "cooldown_end_ms": 260000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 232000
+          },
+          {
+            "active_end_ms": 281000,
+            "active_start_ms": 263000,
+            "cooldown_end_ms": 288000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 260000
+          },
+          {
+            "active_end_ms": 309000,
+            "active_start_ms": 291000,
+            "cooldown_end_ms": 316000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 288000
+          },
+          {
+            "active_end_ms": 337000,
+            "active_start_ms": 319000,
+            "cooldown_end_ms": 344000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 316000
+          },
+          {
+            "active_end_ms": 365000,
+            "active_start_ms": 347000,
+            "cooldown_end_ms": 372000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 344000
+          },
+          {
+            "active_end_ms": 393000,
+            "active_start_ms": 375000,
+            "cooldown_end_ms": 400000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 372000
+          },
+          {
+            "active_end_ms": 421000,
+            "active_start_ms": 403000,
+            "cooldown_end_ms": 428000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 400000
+          },
+          {
+            "active_end_ms": 449000,
+            "active_start_ms": 431000,
+            "cooldown_end_ms": 456000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 428000
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "seed_hex": "0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c"
+      },
+      "number": 13,
+      "output": {
+        "schedule_commitment_cluck_hunt_hex": "d418a5cac3e35063a237c22152b254787dfb17f4d74f2b717faa79aa24292e83",
+        "schedule_commitment_right_of_way_hex": "2838cd512820b3f74124b35b9a247fd71a739faa19ceae1f9a58d5b2779e30f6",
+        "scheduled_events": [
+          {
+            "name": "chicken_burst",
+            "ordinal": 1
+          },
+          {
+            "name": "critter_burst",
+            "ordinal": 3
+          }
+        ],
+        "seed_commitment_hex": "687776b97fb817f5acf493072aa42ebb4cce1f8503e0c04692c9002c874eee2e",
+        "windows": [
+          {
+            "active_end_ms": 29000,
+            "active_start_ms": 11000,
+            "cooldown_end_ms": 36000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 8000
+          },
+          {
+            "active_end_ms": 57000,
+            "active_start_ms": 39000,
+            "cooldown_end_ms": 64000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 36000
+          },
+          {
+            "active_end_ms": 85000,
+            "active_start_ms": 67000,
+            "cooldown_end_ms": 92000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 64000
+          },
+          {
+            "active_end_ms": 113000,
+            "active_start_ms": 95000,
+            "cooldown_end_ms": 120000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 92000
+          },
+          {
+            "active_end_ms": 141000,
+            "active_start_ms": 123000,
+            "cooldown_end_ms": 148000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 120000
+          },
+          {
+            "active_end_ms": 169000,
+            "active_start_ms": 151000,
+            "cooldown_end_ms": 176000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 148000
+          },
+          {
+            "active_end_ms": 197000,
+            "active_start_ms": 179000,
+            "cooldown_end_ms": 204000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 176000
+          },
+          {
+            "active_end_ms": 225000,
+            "active_start_ms": 207000,
+            "cooldown_end_ms": 232000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 204000
+          },
+          {
+            "active_end_ms": 253000,
+            "active_start_ms": 235000,
+            "cooldown_end_ms": 260000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 232000
+          },
+          {
+            "active_end_ms": 281000,
+            "active_start_ms": 263000,
+            "cooldown_end_ms": 288000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 260000
+          },
+          {
+            "active_end_ms": 309000,
+            "active_start_ms": 291000,
+            "cooldown_end_ms": 316000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 288000
+          },
+          {
+            "active_end_ms": 337000,
+            "active_start_ms": 319000,
+            "cooldown_end_ms": 344000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 316000
+          },
+          {
+            "active_end_ms": 365000,
+            "active_start_ms": 347000,
+            "cooldown_end_ms": 372000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 344000
+          },
+          {
+            "active_end_ms": 393000,
+            "active_start_ms": 375000,
+            "cooldown_end_ms": 400000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 372000
+          },
+          {
+            "active_end_ms": 421000,
+            "active_start_ms": 403000,
+            "cooldown_end_ms": 428000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 400000
+          },
+          {
+            "active_end_ms": 449000,
+            "active_start_ms": 431000,
+            "cooldown_end_ms": 456000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 428000
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "seed_hex": "0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d"
+      },
+      "number": 14,
+      "output": {
+        "schedule_commitment_cluck_hunt_hex": "ab0f87d6bd1aa0aa40becbc939999318b096919c40c06ed499737a3179a0c437",
+        "schedule_commitment_right_of_way_hex": "ecaa99475910a42288628d6ff4b49eb6aedd22214fa73722428fe0e07d269e99",
+        "scheduled_events": [
+          {
+            "name": "chicken_burst",
+            "ordinal": 1
+          },
+          {
+            "name": "combo_frenzy",
+            "ordinal": 2
+          }
+        ],
+        "seed_commitment_hex": "e74ebafaf7b5b8858c6d083501d3231d52ab64dbeffc08bde9bfe9b2a79cbba7",
+        "windows": [
+          {
+            "active_end_ms": 29000,
+            "active_start_ms": 11000,
+            "cooldown_end_ms": 36000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 8000
+          },
+          {
+            "active_end_ms": 57000,
+            "active_start_ms": 39000,
+            "cooldown_end_ms": 64000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 36000
+          },
+          {
+            "active_end_ms": 85000,
+            "active_start_ms": 67000,
+            "cooldown_end_ms": 92000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 64000
+          },
+          {
+            "active_end_ms": 113000,
+            "active_start_ms": 95000,
+            "cooldown_end_ms": 120000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 92000
+          },
+          {
+            "active_end_ms": 141000,
+            "active_start_ms": 123000,
+            "cooldown_end_ms": 148000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 120000
+          },
+          {
+            "active_end_ms": 169000,
+            "active_start_ms": 151000,
+            "cooldown_end_ms": 176000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 148000
+          },
+          {
+            "active_end_ms": 197000,
+            "active_start_ms": 179000,
+            "cooldown_end_ms": 204000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 176000
+          },
+          {
+            "active_end_ms": 225000,
+            "active_start_ms": 207000,
+            "cooldown_end_ms": 232000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 204000
+          },
+          {
+            "active_end_ms": 253000,
+            "active_start_ms": 235000,
+            "cooldown_end_ms": 260000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 232000
+          },
+          {
+            "active_end_ms": 281000,
+            "active_start_ms": 263000,
+            "cooldown_end_ms": 288000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 260000
+          },
+          {
+            "active_end_ms": 309000,
+            "active_start_ms": 291000,
+            "cooldown_end_ms": 316000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 288000
+          },
+          {
+            "active_end_ms": 337000,
+            "active_start_ms": 319000,
+            "cooldown_end_ms": 344000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 316000
+          },
+          {
+            "active_end_ms": 365000,
+            "active_start_ms": 347000,
+            "cooldown_end_ms": 372000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 344000
+          },
+          {
+            "active_end_ms": 393000,
+            "active_start_ms": 375000,
+            "cooldown_end_ms": 400000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 372000
+          },
+          {
+            "active_end_ms": 421000,
+            "active_start_ms": 403000,
+            "cooldown_end_ms": 428000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 400000
+          },
+          {
+            "active_end_ms": 449000,
+            "active_start_ms": 431000,
+            "cooldown_end_ms": 456000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 428000
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "seed_hex": "0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e"
+      },
+      "number": 15,
+      "output": {
+        "schedule_commitment_cluck_hunt_hex": "9a7e90fd49090f41ad9bb1af30f947f41c7f994cd930dc83b6ccf36cb8b75ce1",
+        "schedule_commitment_right_of_way_hex": "bcbb71e41a8b97b9a178bb011c82f41b840754cd504a172cd2808e82d50d039a",
+        "scheduled_events": [
+          {
+            "name": "chicken_burst",
+            "ordinal": 1
+          },
+          {
+            "name": "chicken_burst",
+            "ordinal": 1
+          }
+        ],
+        "seed_commitment_hex": "2e32647c9cf1421344e2ed837d99291d26ea98b7d880b7dbea9844bc66b9c58c",
+        "windows": [
+          {
+            "active_end_ms": 29000,
+            "active_start_ms": 11000,
+            "cooldown_end_ms": 36000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 8000
+          },
+          {
+            "active_end_ms": 57000,
+            "active_start_ms": 39000,
+            "cooldown_end_ms": 64000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 36000
+          },
+          {
+            "active_end_ms": 85000,
+            "active_start_ms": 67000,
+            "cooldown_end_ms": 92000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 64000
+          },
+          {
+            "active_end_ms": 113000,
+            "active_start_ms": 95000,
+            "cooldown_end_ms": 120000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 92000
+          },
+          {
+            "active_end_ms": 141000,
+            "active_start_ms": 123000,
+            "cooldown_end_ms": 148000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 120000
+          },
+          {
+            "active_end_ms": 169000,
+            "active_start_ms": 151000,
+            "cooldown_end_ms": 176000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 148000
+          },
+          {
+            "active_end_ms": 197000,
+            "active_start_ms": 179000,
+            "cooldown_end_ms": 204000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 176000
+          },
+          {
+            "active_end_ms": 225000,
+            "active_start_ms": 207000,
+            "cooldown_end_ms": 232000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 204000
+          },
+          {
+            "active_end_ms": 253000,
+            "active_start_ms": 235000,
+            "cooldown_end_ms": 260000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 232000
+          },
+          {
+            "active_end_ms": 281000,
+            "active_start_ms": 263000,
+            "cooldown_end_ms": 288000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 260000
+          },
+          {
+            "active_end_ms": 309000,
+            "active_start_ms": 291000,
+            "cooldown_end_ms": 316000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 288000
+          },
+          {
+            "active_end_ms": 337000,
+            "active_start_ms": 319000,
+            "cooldown_end_ms": 344000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 316000
+          },
+          {
+            "active_end_ms": 365000,
+            "active_start_ms": 347000,
+            "cooldown_end_ms": 372000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 344000
+          },
+          {
+            "active_end_ms": 393000,
+            "active_start_ms": 375000,
+            "cooldown_end_ms": 400000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 372000
+          },
+          {
+            "active_end_ms": 421000,
+            "active_start_ms": 403000,
+            "cooldown_end_ms": 428000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 400000
+          },
+          {
+            "active_end_ms": 449000,
+            "active_start_ms": 431000,
+            "cooldown_end_ms": 456000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 428000
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "seed_hex": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f"
+      },
+      "number": 16,
+      "output": {
+        "schedule_commitment_cluck_hunt_hex": "48a75a340a46570e3bb6bfea3aa6e6739567da78beea186d537e461f20c6cfdb",
+        "schedule_commitment_right_of_way_hex": "13727477ab58fe5d873de4be11366edc480ba823595cad8de60256078a673b00",
+        "scheduled_events": [
+          {
+            "name": "critter_burst",
+            "ordinal": 3
+          },
+          {
+            "name": "chicken_burst",
+            "ordinal": 1
+          }
+        ],
+        "seed_commitment_hex": "22782874120611f968dc4df9a302534b092e5d85f97189863d6abe44f57fb2db",
+        "windows": [
+          {
+            "active_end_ms": 29000,
+            "active_start_ms": 11000,
+            "cooldown_end_ms": 36000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 8000
+          },
+          {
+            "active_end_ms": 57000,
+            "active_start_ms": 39000,
+            "cooldown_end_ms": 64000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 36000
+          },
+          {
+            "active_end_ms": 85000,
+            "active_start_ms": 67000,
+            "cooldown_end_ms": 92000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 64000
+          },
+          {
+            "active_end_ms": 113000,
+            "active_start_ms": 95000,
+            "cooldown_end_ms": 120000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 92000
+          },
+          {
+            "active_end_ms": 141000,
+            "active_start_ms": 123000,
+            "cooldown_end_ms": 148000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 120000
+          },
+          {
+            "active_end_ms": 169000,
+            "active_start_ms": 151000,
+            "cooldown_end_ms": 176000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 148000
+          },
+          {
+            "active_end_ms": 197000,
+            "active_start_ms": 179000,
+            "cooldown_end_ms": 204000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 176000
+          },
+          {
+            "active_end_ms": 225000,
+            "active_start_ms": 207000,
+            "cooldown_end_ms": 232000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 204000
+          },
+          {
+            "active_end_ms": 253000,
+            "active_start_ms": 235000,
+            "cooldown_end_ms": 260000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 232000
+          },
+          {
+            "active_end_ms": 281000,
+            "active_start_ms": 263000,
+            "cooldown_end_ms": 288000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 260000
+          },
+          {
+            "active_end_ms": 309000,
+            "active_start_ms": 291000,
+            "cooldown_end_ms": 316000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 288000
+          },
+          {
+            "active_end_ms": 337000,
+            "active_start_ms": 319000,
+            "cooldown_end_ms": 344000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 316000
+          },
+          {
+            "active_end_ms": 365000,
+            "active_start_ms": 347000,
+            "cooldown_end_ms": 372000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 344000
+          },
+          {
+            "active_end_ms": 393000,
+            "active_start_ms": 375000,
+            "cooldown_end_ms": 400000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 372000
+          },
+          {
+            "active_end_ms": 421000,
+            "active_start_ms": 403000,
+            "cooldown_end_ms": 428000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 400000
+          },
+          {
+            "active_end_ms": 449000,
+            "active_start_ms": 431000,
+            "cooldown_end_ms": 456000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 428000
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "seed_hex": "1112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30"
+      },
+      "number": 17,
+      "output": {
+        "schedule_commitment_cluck_hunt_hex": "44abc664e087b818fab7c3c52b9a5b9ec314fe965cf443527db883c4f670e4e9",
+        "schedule_commitment_right_of_way_hex": "a5065400a24a96f354cdaeb067c6b17709a88e27d6d4a32d65f8fbac3c470e13",
+        "scheduled_events": [
+          {
+            "name": "critter_burst",
+            "ordinal": 3
+          },
+          {
+            "name": "combo_frenzy",
+            "ordinal": 2
+          }
+        ],
+        "seed_commitment_hex": "ba4a559bb957375c603af17cafb662ef475cd5efcd16cc61ebd10b4fb617d663",
+        "windows": [
+          {
+            "active_end_ms": 29000,
+            "active_start_ms": 11000,
+            "cooldown_end_ms": 36000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 8000
+          },
+          {
+            "active_end_ms": 57000,
+            "active_start_ms": 39000,
+            "cooldown_end_ms": 64000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 36000
+          },
+          {
+            "active_end_ms": 85000,
+            "active_start_ms": 67000,
+            "cooldown_end_ms": 92000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 64000
+          },
+          {
+            "active_end_ms": 113000,
+            "active_start_ms": 95000,
+            "cooldown_end_ms": 120000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 92000
+          },
+          {
+            "active_end_ms": 141000,
+            "active_start_ms": 123000,
+            "cooldown_end_ms": 148000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 120000
+          },
+          {
+            "active_end_ms": 169000,
+            "active_start_ms": 151000,
+            "cooldown_end_ms": 176000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 148000
+          },
+          {
+            "active_end_ms": 197000,
+            "active_start_ms": 179000,
+            "cooldown_end_ms": 204000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 176000
+          },
+          {
+            "active_end_ms": 225000,
+            "active_start_ms": 207000,
+            "cooldown_end_ms": 232000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 204000
+          },
+          {
+            "active_end_ms": 253000,
+            "active_start_ms": 235000,
+            "cooldown_end_ms": 260000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 232000
+          },
+          {
+            "active_end_ms": 281000,
+            "active_start_ms": 263000,
+            "cooldown_end_ms": 288000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 260000
+          },
+          {
+            "active_end_ms": 309000,
+            "active_start_ms": 291000,
+            "cooldown_end_ms": 316000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 288000
+          },
+          {
+            "active_end_ms": 337000,
+            "active_start_ms": 319000,
+            "cooldown_end_ms": 344000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 316000
+          },
+          {
+            "active_end_ms": 365000,
+            "active_start_ms": 347000,
+            "cooldown_end_ms": 372000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 344000
+          },
+          {
+            "active_end_ms": 393000,
+            "active_start_ms": 375000,
+            "cooldown_end_ms": 400000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 372000
+          },
+          {
+            "active_end_ms": 421000,
+            "active_start_ms": 403000,
+            "cooldown_end_ms": 428000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 400000
+          },
+          {
+            "active_end_ms": 449000,
+            "active_start_ms": 431000,
+            "cooldown_end_ms": 456000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 428000
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "seed_hex": "12131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f3031"
+      },
+      "number": 18,
+      "output": {
+        "schedule_commitment_cluck_hunt_hex": "1ff8355a97c85e24d2e7c120134ba80dd8dc00c4911bce969cd049e962422d00",
+        "schedule_commitment_right_of_way_hex": "9e54baef1562faa6d4ff68aa3ab9abc086faada8d224b537b6fe60e332a17ddf",
+        "scheduled_events": [
+          {
+            "name": "combo_frenzy",
+            "ordinal": 2
+          },
+          {
+            "name": "traffic_surge",
+            "ordinal": 0
+          }
+        ],
+        "seed_commitment_hex": "d713294ed3a7e5c2860d4c1880871222d4e7fc863866209c0a7e51ce0a7502fe",
+        "windows": [
+          {
+            "active_end_ms": 29000,
+            "active_start_ms": 11000,
+            "cooldown_end_ms": 36000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 8000
+          },
+          {
+            "active_end_ms": 57000,
+            "active_start_ms": 39000,
+            "cooldown_end_ms": 64000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 36000
+          },
+          {
+            "active_end_ms": 85000,
+            "active_start_ms": 67000,
+            "cooldown_end_ms": 92000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 64000
+          },
+          {
+            "active_end_ms": 113000,
+            "active_start_ms": 95000,
+            "cooldown_end_ms": 120000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 92000
+          },
+          {
+            "active_end_ms": 141000,
+            "active_start_ms": 123000,
+            "cooldown_end_ms": 148000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 120000
+          },
+          {
+            "active_end_ms": 169000,
+            "active_start_ms": 151000,
+            "cooldown_end_ms": 176000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 148000
+          },
+          {
+            "active_end_ms": 197000,
+            "active_start_ms": 179000,
+            "cooldown_end_ms": 204000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 176000
+          },
+          {
+            "active_end_ms": 225000,
+            "active_start_ms": 207000,
+            "cooldown_end_ms": 232000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 204000
+          },
+          {
+            "active_end_ms": 253000,
+            "active_start_ms": 235000,
+            "cooldown_end_ms": 260000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 232000
+          },
+          {
+            "active_end_ms": 281000,
+            "active_start_ms": 263000,
+            "cooldown_end_ms": 288000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 260000
+          },
+          {
+            "active_end_ms": 309000,
+            "active_start_ms": 291000,
+            "cooldown_end_ms": 316000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 288000
+          },
+          {
+            "active_end_ms": 337000,
+            "active_start_ms": 319000,
+            "cooldown_end_ms": 344000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 316000
+          },
+          {
+            "active_end_ms": 365000,
+            "active_start_ms": 347000,
+            "cooldown_end_ms": 372000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 344000
+          },
+          {
+            "active_end_ms": 393000,
+            "active_start_ms": 375000,
+            "cooldown_end_ms": 400000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 372000
+          },
+          {
+            "active_end_ms": 421000,
+            "active_start_ms": 403000,
+            "cooldown_end_ms": 428000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 400000
+          },
+          {
+            "active_end_ms": 449000,
+            "active_start_ms": 431000,
+            "cooldown_end_ms": 456000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 428000
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "seed_hex": "131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132"
+      },
+      "number": 19,
+      "output": {
+        "schedule_commitment_cluck_hunt_hex": "1c661830b47f49760236f9ead230196d9dacb8c9b5af95e14ef3eef22ddfb16c",
+        "schedule_commitment_right_of_way_hex": "ac9548471d60f65d6ffc7521ca321a15c88f004a9d5579330522085149fec8c6",
+        "scheduled_events": [
+          {
+            "name": "chicken_burst",
+            "ordinal": 1
+          },
+          {
+            "name": "traffic_surge",
+            "ordinal": 0
+          }
+        ],
+        "seed_commitment_hex": "9ba2de0f69174ed1c39d11abc5f7743df9fb2949c27d838af9190b48a175908f",
+        "windows": [
+          {
+            "active_end_ms": 29000,
+            "active_start_ms": 11000,
+            "cooldown_end_ms": 36000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 8000
+          },
+          {
+            "active_end_ms": 57000,
+            "active_start_ms": 39000,
+            "cooldown_end_ms": 64000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 36000
+          },
+          {
+            "active_end_ms": 85000,
+            "active_start_ms": 67000,
+            "cooldown_end_ms": 92000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 64000
+          },
+          {
+            "active_end_ms": 113000,
+            "active_start_ms": 95000,
+            "cooldown_end_ms": 120000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 92000
+          },
+          {
+            "active_end_ms": 141000,
+            "active_start_ms": 123000,
+            "cooldown_end_ms": 148000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 120000
+          },
+          {
+            "active_end_ms": 169000,
+            "active_start_ms": 151000,
+            "cooldown_end_ms": 176000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 148000
+          },
+          {
+            "active_end_ms": 197000,
+            "active_start_ms": 179000,
+            "cooldown_end_ms": 204000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 176000
+          },
+          {
+            "active_end_ms": 225000,
+            "active_start_ms": 207000,
+            "cooldown_end_ms": 232000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 204000
+          },
+          {
+            "active_end_ms": 253000,
+            "active_start_ms": 235000,
+            "cooldown_end_ms": 260000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 232000
+          },
+          {
+            "active_end_ms": 281000,
+            "active_start_ms": 263000,
+            "cooldown_end_ms": 288000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 260000
+          },
+          {
+            "active_end_ms": 309000,
+            "active_start_ms": 291000,
+            "cooldown_end_ms": 316000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 288000
+          },
+          {
+            "active_end_ms": 337000,
+            "active_start_ms": 319000,
+            "cooldown_end_ms": 344000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 316000
+          },
+          {
+            "active_end_ms": 365000,
+            "active_start_ms": 347000,
+            "cooldown_end_ms": 372000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 344000
+          },
+          {
+            "active_end_ms": 393000,
+            "active_start_ms": 375000,
+            "cooldown_end_ms": 400000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 372000
+          },
+          {
+            "active_end_ms": 421000,
+            "active_start_ms": 403000,
+            "cooldown_end_ms": 428000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 400000
+          },
+          {
+            "active_end_ms": 449000,
+            "active_start_ms": 431000,
+            "cooldown_end_ms": 456000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 428000
+          }
+        ]
+      }
+    },
+    {
+      "input": {
+        "seed_hex": "1415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30313233"
+      },
+      "number": 20,
+      "output": {
+        "schedule_commitment_cluck_hunt_hex": "3db7f479d56ddb5790c32765ca2c37adf0dccd1a6ba92fc3740ac722edc16228",
+        "schedule_commitment_right_of_way_hex": "abc51ca29d1dff0de62a6833101676833342353b169e0c15a986135d75cb38c8",
+        "scheduled_events": [
+          {
+            "name": "chicken_burst",
+            "ordinal": 1
+          },
+          {
+            "name": "chicken_burst",
+            "ordinal": 1
+          }
+        ],
+        "seed_commitment_hex": "12f7e80a5403318c8cacd471cec2e8347359b3733d316ec264a17716f44b6b56",
+        "windows": [
+          {
+            "active_end_ms": 29000,
+            "active_start_ms": 11000,
+            "cooldown_end_ms": 36000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 8000
+          },
+          {
+            "active_end_ms": 57000,
+            "active_start_ms": 39000,
+            "cooldown_end_ms": 64000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 36000
+          },
+          {
+            "active_end_ms": 85000,
+            "active_start_ms": 67000,
+            "cooldown_end_ms": 92000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 64000
+          },
+          {
+            "active_end_ms": 113000,
+            "active_start_ms": 95000,
+            "cooldown_end_ms": 120000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 92000
+          },
+          {
+            "active_end_ms": 141000,
+            "active_start_ms": 123000,
+            "cooldown_end_ms": 148000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 120000
+          },
+          {
+            "active_end_ms": 169000,
+            "active_start_ms": 151000,
+            "cooldown_end_ms": 176000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 148000
+          },
+          {
+            "active_end_ms": 197000,
+            "active_start_ms": 179000,
+            "cooldown_end_ms": 204000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 176000
+          },
+          {
+            "active_end_ms": 225000,
+            "active_start_ms": 207000,
+            "cooldown_end_ms": 232000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 204000
+          },
+          {
+            "active_end_ms": 253000,
+            "active_start_ms": 235000,
+            "cooldown_end_ms": 260000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 232000
+          },
+          {
+            "active_end_ms": 281000,
+            "active_start_ms": 263000,
+            "cooldown_end_ms": 288000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 260000
+          },
+          {
+            "active_end_ms": 309000,
+            "active_start_ms": 291000,
+            "cooldown_end_ms": 316000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 288000
+          },
+          {
+            "active_end_ms": 337000,
+            "active_start_ms": 319000,
+            "cooldown_end_ms": 344000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 316000
+          },
+          {
+            "active_end_ms": 365000,
+            "active_start_ms": 347000,
+            "cooldown_end_ms": 372000,
+            "effect": "stampede",
+            "effect_ordinal": 3,
+            "telegraph_start_ms": 344000
+          },
+          {
+            "active_end_ms": 393000,
+            "active_start_ms": 375000,
+            "cooldown_end_ms": 400000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 372000
+          },
+          {
+            "active_end_ms": 421000,
+            "active_start_ms": 403000,
+            "cooldown_end_ms": 428000,
+            "effect": "rush_hour",
+            "effect_ordinal": 1,
+            "telegraph_start_ms": 400000
+          },
+          {
+            "active_end_ms": 449000,
+            "active_start_ms": 431000,
+            "cooldown_end_ms": 456000,
+            "effect": "glass_cannon",
+            "effect_ordinal": 4,
+            "telegraph_start_ms": 428000
+          }
+        ]
+      }
+    }
+  ],
+  "stream_vectors": [
+    {
+      "input": {
+        "domain": "roady.rotation.v2.rotation",
+        "seed_hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+      },
+      "output": {
+        "first_three_u64_hex": [
+          "89ca1998c369bfad",
+          "0aeaa2d3a4bd2ca7",
+          "f7eb05ac42dd4bab"
+        ],
+        "fnv_hex": "5995f419c4dc0c2e",
+        "initial_state_hex": "d57b9ede6427d32c"
+      }
+    },
+    {
+      "input": {
+        "domain": "roady.rotation.v2.scheduled_events",
+        "seed_hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+      },
+      "output": {
+        "first_three_u64_hex": [
+          "208d629eaedd81ba",
+          "e8b774f1db6390e8",
+          "8623ad4049f5c1d0"
+        ],
+        "fnv_hex": "6d3eca77d6179b85",
+        "initial_state_hex": "f28bbdc6ed34a573"
+      }
+    },
+    {
+      "input": {
+        "domain": "roady.rotation.v2.frenzy.interval",
+        "seed_hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+      },
+      "output": {
+        "first_three_u64_hex": [
+          "b17e038983fee463",
+          "becafb243e5f4f19",
+          "a4b1819769ae7e8a"
+        ],
+        "fnv_hex": "5db24a622cfa7394",
+        "initial_state_hex": "f0641024cf58a791"
+      }
+    },
+    {
+      "input": {
+        "domain": "roady.rotation.v2.frenzy.roll",
+        "seed_hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+      },
+      "output": {
+        "first_three_u64_hex": [
+          "f697ff9ef8fb53fc",
+          "a60ebb95f873a38a",
+          "99d78656a9ca7da1"
+        ],
+        "fnv_hex": "da8b1128a64d8b06",
+        "initial_state_hex": "bd2f15367b6e6919"
+      }
+    },
+    {
+      "input": {
+        "domain": "roady.rotation.v2.frenzy.kind",
+        "seed_hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+      },
+      "output": {
+        "first_three_u64_hex": [
+          "f545f848d2eac7ab",
+          "bb71c0bcdf055f17",
+          "73aa75ec32aba654"
+        ],
+        "fnv_hex": "e6eba56363494e8b",
+        "initial_state_hex": "cebdc4c26cdade04"
+      }
+    },
+    {
+      "input": {
+        "domain": "roady.rotation.v2.frenzy.position",
+        "seed_hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+      },
+      "output": {
+        "first_three_u64_hex": [
+          "00753500035cb7d4",
+          "69a93c210f8a7fa4",
+          "189926de55fa5c8a"
+        ],
+        "fnv_hex": "4b4ad0b4be929e2e",
+        "initial_state_hex": "2f19e691358c35b2"
+      }
+    },
+    {
+      "input": {
+        "domain": "roady.rotation.v2.frenzy.relocation",
+        "seed_hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+      },
+      "output": {
+        "first_three_u64_hex": [
+          "5bd7327ec997ff40",
+          "93569596d5a0709f",
+          "1e0a8b401ec06592"
+        ],
+        "fnv_hex": "1678c319a195569d",
+        "initial_state_hex": "a180f2b460780b20"
+      }
+    }
+  ]
+}

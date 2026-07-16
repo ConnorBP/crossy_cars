@@ -1,0 +1,285 @@
+{
+  "$id": "https://roady.game/rules/roady-rules.v2.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "const": {
+    "canonical_encoding": {
+      "domains": {
+        "event": "roady.v2.event",
+        "evidence": "roady.v2.evidence",
+        "proof": "roady.v2.proof",
+        "root": "roady.v2.root",
+        "schedule": "roady.v2.schedule",
+        "score": "roady.v2.score",
+        "seed": "roady.v2.seed",
+        "session": "roady.v2.session"
+      },
+      "event_hash": "sha256(previous_hash32||event_record)",
+      "event_record": "lp1(event_domain)||u32(seq)||u64(active_ms)||u8(kind)||payload",
+      "evidence": "lp1(evidence_domain)||lp1(session_id)||u32(event_count)||lp4(stored_events)",
+      "final_root": "sha256(lp1(root_domain)||h0||hN||conduct_aggregates)",
+      "hash": "sha256",
+      "integer_byte_order": "big_endian",
+      "payload_layouts": {
+        "animal_hit": "u8,i32,u32,u32,u64,i64,i64",
+        "chicken_hit": "u32,u32,u32,u8,u8,u32,u32",
+        "coin_award": "u32,u32,u8,u32,i64,i64,u64,u64",
+        "coin_collected": "u8,u32,u8,u8,u32,u32,u64,u64",
+        "courtesy_award": "u32,u32,u8,u32,i64,i64,u32",
+        "critter_penalty": "u32,u32,u32,u64",
+        "frenzy_changed": "u8,u64,u64",
+        "objective_completed_cluck": "u8,u32,u32,u32,u32",
+        "objective_completed_right_of_way": "u8,u32,u32,u32,u8,u32,i64,i64",
+        "package_delivery": "u8,u32,u32,u32,u8,u32,i64,i64,u64,u64",
+        "package_pickup": "u8,u8",
+        "segment_changed": "u8,u8,u8,u64,u64",
+        "terminal_cluck": "u8,u8,u32,u32,u32,u8,u8,u64,u64,lp1,u8",
+        "terminal_right_of_way": "u8,u8,u32,i64,u32,u32,u32,u32,u32,u8,u64,u64,lp1,u8",
+        "time_pickup": "u64,u64",
+        "wave_award": "u32,u32,u8,u32,i64,i64"
+      },
+      "same_ms_order": [
+        "expirations",
+        "segment_ends",
+        "segment_starts",
+        "activation_spawns",
+        "collections",
+        "activations",
+        "gameplay_kind_then_stable_id",
+        "terminal"
+      ],
+      "stored_event": "event_record||event_hash32"
+    },
+    "categories": [
+      {
+        "conduct": "cluck_hunt",
+        "key": "rotation.v1.cluck_hunt",
+        "ordinal": 0
+      },
+      {
+        "conduct": "right_of_way",
+        "key": "rotation.v1.right_of_way",
+        "ordinal": 1
+      }
+    ],
+    "cluck_hunt": {
+      "chicken_base_award": 1,
+      "coin_award": 1,
+      "combo_tiers": [
+        {
+          "minimum_count": 0,
+          "multiplier": 1
+        },
+        {
+          "minimum_count": 5,
+          "multiplier": 2
+        },
+        {
+          "minimum_count": 10,
+          "multiplier": 3
+        },
+        {
+          "minimum_count": 15,
+          "multiplier": 4
+        },
+        {
+          "minimum_count": 20,
+          "multiplier": 5
+        }
+      ],
+      "combo_window_ms": 2500,
+      "critter_penalty": 2,
+      "live_bucket_policy": "saturating",
+      "mega_coin_award": 5,
+      "objective_award": 10,
+      "ranked_wave_award": 2,
+      "terminal_policy": "checked_chickens_plus_coins"
+    },
+    "frenzy": {
+      "active_ms": 15000,
+      "eligible_ms": 8000,
+      "interval_span": 4001,
+      "orb_lifetime_ms": 12000,
+      "pity_ms": 55000,
+      "relocation_age_ms": 6000,
+      "relocation_candidates": 8,
+      "relocation_draws": 16,
+      "roll_range": 10000,
+      "success_range": 400,
+      "telegraph_ms": 2000
+    },
+    "limits": {
+      "max_build_bytes": 64,
+      "max_event_record_bytes": 192,
+      "max_events": 4096,
+      "max_evidence_bytes": 524288,
+      "max_ledger_bytes": 262144,
+      "max_lp1_bytes": 255,
+      "max_lp4_bytes": 524288,
+      "max_remaining_ms": 99000,
+      "schedule_segments": 16
+    },
+    "mode": "rotation",
+    "objectives": {
+      "cluck_hunt": [
+        {
+          "objective": "hit_chickens",
+          "target": 10
+        },
+        {
+          "objective": "collect_coins",
+          "target": 6
+        },
+        {
+          "objective": "reach_combo",
+          "target": 3
+        }
+      ],
+      "right_of_way": [
+        {
+          "objective": "deliver_packages",
+          "target": 3
+        },
+        {
+          "objective": "courtesy_awards",
+          "target": 3
+        },
+        {
+          "objective": "collect_coins",
+          "target": 6
+        }
+      ]
+    },
+    "ordinals": {
+      "effects": {
+        "chicken_frenzy": 2,
+        "glass_cannon": 4,
+        "rush_hour": 1,
+        "stampede": 3,
+        "standard": 0
+      },
+      "event_kinds": {
+        "animal_hit": 11,
+        "chicken_hit": 1,
+        "coin_award": 13,
+        "coin_collected": 2,
+        "courtesy_award": 10,
+        "critter_penalty": 5,
+        "frenzy_changed": 14,
+        "objective_completed": 4,
+        "package_delivery": 9,
+        "package_pickup": 8,
+        "segment_changed": 6,
+        "terminal": 7,
+        "time_pickup": 3,
+        "wave_award": 12
+      },
+      "frenzy_phases": {
+        "active": 3,
+        "expired": 4,
+        "spawned": 1,
+        "telegraph": 2
+      },
+      "objectives": {
+        "collect_coins": 2,
+        "courtesy_awards": 5,
+        "deliver_packages": 4,
+        "hit_chickens": 1,
+        "reach_combo": 3
+      },
+      "platforms": {
+        "native": 2,
+        "web": 1
+      },
+      "scheduled_events": {
+        "chicken_burst": 1,
+        "combo_frenzy": 2,
+        "critter_burst": 3,
+        "traffic_surge": 0
+      },
+      "terminal_reasons": {
+        "time_up": 1,
+        "wrecked": 2
+      }
+    },
+    "policy_version": 1,
+    "population": {
+      "chicken_target": "min(14*chicken_burst*frenzy,40)",
+      "critter_target": "min(5*stampede+critter_burst_extra,16)",
+      "traffic_speed": "min((5+level*0.7)*(0.85+roll*0.30)*rush_speed*surge_speed,11.5)",
+      "traffic_target": "min(min(1+floor(level/2),8)*rush*surge,8)"
+    },
+    "prng": {
+      "algorithm": "splitmix64",
+      "domains": [
+        "roady.rotation.v2.rotation",
+        "roady.rotation.v2.scheduled_events",
+        "roady.rotation.v2.frenzy.interval",
+        "roady.rotation.v2.frenzy.roll",
+        "roady.rotation.v2.frenzy.kind",
+        "roady.rotation.v2.frenzy.position",
+        "roady.rotation.v2.frenzy.relocation"
+      ],
+      "fnv_offset_hex": "cbf29ce484222325",
+      "fnv_prime_hex": "00000100000001b3",
+      "increment_hex": "9e3779b97f4a7c15",
+      "multiplier_1_hex": "bf58476d1ce4e5b9",
+      "multiplier_2_hex": "94d049bb133111eb",
+      "range_mapping": "next_u64_mod_n",
+      "stream_derivation": "fnv1a64_seed_domain_length_le_domain_then_splitmix_finalizer"
+    },
+    "protocol_version": 2,
+    "right_of_way": {
+      "accumulator_policy": "checked_i64_terminal_max_zero_checked_u32",
+      "animal_hit_delta": -10,
+      "chicken_hit_radius": 1.0,
+      "courtesy_base_award": 2,
+      "courtesy_cooldown_ms": 500,
+      "courtesy_min_speed": 4.0,
+      "courtesy_outer_radius": 2.119999885559082,
+      "guilt_ms": 5000,
+      "guilt_multiplier_bps": 5000,
+      "initial_premium_bps": 10000,
+      "package_base_award": 5,
+      "package_capacity": 3,
+      "positive_award_policy": "floor_base_times_premium_then_floor_guilt",
+      "premium_decay_bps": 9000
+    },
+    "rotation": {
+      "active_ms": 18000,
+      "anti_repeat": "one_retry_then_cyclic_successor",
+      "cadence_ms": 28000,
+      "cooldown_ms": 7000,
+      "initial_grace_ms": 8000,
+      "pool": [
+        1,
+        3,
+        4
+      ],
+      "scheduled_event_windows_ms": [
+        [
+          15000,
+          23000
+        ],
+        [
+          40000,
+          48000
+        ]
+      ],
+      "telegraph_ms": 3000
+    },
+    "rules_id": "roady-rules.v2",
+    "rules_version": 2,
+    "time_and_health": {
+      "coin_and_package_cap_ms": 90000,
+      "coin_bonus_ms": 1500,
+      "health_cap": 100,
+      "health_pickup": 35,
+      "package_bonus_ms": 3000,
+      "time_pickup_bonus_ms": 5000,
+      "time_pickup_cap_ms": 99000
+    }
+  },
+  "description": "The generated v2 manifest is an exact immutable contract.",
+  "title": "Roady immutable gameplay and canonical protocol rules v2",
+  "type": "object"
+}

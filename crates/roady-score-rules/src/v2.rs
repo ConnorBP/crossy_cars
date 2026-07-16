@@ -6,6 +6,8 @@
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 
+/// Generated immutable manifest, schema, and cross-language golden fixtures.
+pub mod artifacts;
 /// Canonical big-endian session, schedule, ledger, evidence, root, and score bytes.
 pub mod canonical;
 
