@@ -53,10 +53,7 @@ use crate::touch::{
 };
 #[cfg(target_arch = "wasm32")]
 use crate::toy_shading::ToyCastShadow;
-use crate::toy_shading::{
-    ImportedMeshTangentSet, ImportedMeshTangents, ImportedTrafficVisualRoot, ToyContactShadow,
-    ToyShadingAssets, contact_shadow_transform,
-};
+use crate::toy_shading::{ToyContactShadow, ToyShadingAssets, contact_shadow_transform};
 #[cfg(test)]
 use crate::toy_shading::{ToyMaterialFamily, toy_material};
 use crate::world::{
@@ -514,7 +511,7 @@ impl Plugin for DifficultyPlugin {
                 Update,
                 (
                     bind_imported_traffic_wheels,
-                    bind_imported_traffic_paint.after(ImportedMeshTangentSet),
+                    bind_imported_traffic_paint,
                     update_imported_traffic_ready,
                     animate_imported_traffic_wheels,
                 )
@@ -1099,18 +1096,16 @@ fn bind_imported_traffic_paint(
     mut primitives: Query<(
         Entity,
         &GltfMaterialName,
-        &Mesh3d,
         &mut MeshMaterial3d<StandardMaterial>,
         Option<&ImportedTrafficPaintOwner>,
     )>,
     parents: Query<&ChildOf>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     details: Option<Res<PbrDetailAssets>>,
-    tangents: Option<Res<ImportedMeshTangents>>,
 ) {
     for (wrapper, visual, wrapper_parent, mut instance_material) in &mut wrappers {
         let owner = wrapper_parent.parent();
-        for (entity, name, mesh_handle, mut primitive_material, assigned_owner) in &mut primitives {
+        for (entity, name, mut primitive_material, assigned_owner) in &mut primitives {
             if name.0 != "Toy_Paint"
                 || !is_traffic_descendant_of(entity, wrapper, |candidate| {
                     parents.get(candidate).ok().map(ChildOf::parent)
@@ -1119,22 +1114,7 @@ fn bind_imported_traffic_paint(
                 continue;
             }
 
-            let tangent_ready = tangents
-                .as_deref()
-                .is_some_and(|cache| cache.is_ready(mesh_handle.id()));
             let instance_handle = if let Some(handle) = &instance_material.0 {
-                // A shared Toy_Paint material may own multiple primitives. If
-                // an earlier one lacked tangent inputs, a later ready owner may
-                // unlock detail on the existing per-instance clone.
-                if tangent_ready {
-                    if let (Some(details), Some(mut cloned)) =
-                        (details.as_deref(), materials.get_mut(handle.id()))
-                    {
-                        if cloned.normal_map_texture.is_none() {
-                            cloned.normal_map_texture = Some(details.plastic_normal.clone());
-                        }
-                    }
-                }
                 handle.clone()
             } else {
                 let Some(mut cloned) = materials.get(primitive_material.0.id()).cloned() else {
@@ -1143,18 +1123,14 @@ fn bind_imported_traffic_paint(
                     continue;
                 };
                 cloned.base_color = TRAFFIC_PAINT_COLORS[visual.paint_index];
-                // ORM is always safe. Normal detail is assigned only when this
-                // owning Toy_Paint primitive's shared mesh has a tangent basis.
-                // Every authored map remains authoritative.
+                // Traffic GLBs have UV0 but no tangents, so add only shared
+                // plastic roughness/AO detail and preserve authored maps.
                 if let Some(details) = details.as_deref() {
                     if cloned.metallic_roughness_texture.is_none() {
                         cloned.metallic_roughness_texture = Some(details.plastic_orm.clone());
                     }
                     if cloned.occlusion_texture.is_none() {
                         cloned.occlusion_texture = Some(details.plastic_orm.clone());
-                    }
-                    if tangent_ready && cloned.normal_map_texture.is_none() {
-                        cloned.normal_map_texture = Some(details.plastic_normal.clone());
                     }
                 }
                 let handle = materials.add(cloned);
@@ -1695,7 +1671,6 @@ fn spawn_one_traffic(
                     asset_prefix: kind.asset_prefix(),
                     paint_index,
                 },
-                ImportedTrafficVisualRoot,
                 ImportedTrafficPaintMaterial::default(),
                 ImportedTrafficWheelAnimation::default(),
             ));
@@ -1859,7 +1834,6 @@ mod tests {
     fn traffic_paint_test_app() -> App {
         let mut app = App::new();
         app.init_resource::<Assets<StandardMaterial>>()
-            .init_resource::<ImportedMeshTangents>()
             .add_systems(Update, bind_imported_traffic_paint);
         app
     }
@@ -1890,7 +1864,6 @@ mod tests {
                     asset_prefix: TrafficKind::Sedan.asset_prefix(),
                     paint_index,
                 },
-                ImportedTrafficVisualRoot,
                 ImportedTrafficPaintMaterial::default(),
             ))
             .id();
@@ -1903,34 +1876,15 @@ mod tests {
         parent: Entity,
         material: Handle<StandardMaterial>,
     ) -> Entity {
-        let mesh = app
-            .world_mut()
-            .get_resource_or_init::<Assets<Mesh>>()
-            .add(Mesh::from(Cuboid::new(1.0, 1.0, 1.0)));
         let primitive = app
             .world_mut()
             .spawn((
                 GltfMaterialName("Toy_Paint".to_owned()),
-                Mesh3d(mesh),
                 MeshMaterial3d(material),
             ))
             .id();
         app.world_mut().entity_mut(parent).add_child(primitive);
         primitive
-    }
-
-    fn pbr_detail_test_assets() -> PbrDetailAssets {
-        PbrDetailAssets {
-            plastic_normal: Handle::Uuid(bevy::asset::uuid::Uuid::from_u128(11), default()),
-            plastic_orm: Handle::Uuid(bevy::asset::uuid::Uuid::from_u128(12), default()),
-            concrete_normal: Handle::default(),
-            concrete_orm: Handle::default(),
-            wood_normal: Handle::default(),
-            wood_orm: Handle::default(),
-            grass_normal: Handle::default(),
-            grass_orm: Handle::default(),
-            soil_orm: Handle::default(),
-        }
     }
 
     #[test]
@@ -2308,96 +2262,6 @@ mod tests {
         assert_eq!(cloned.base_color_texture.as_ref(), Some(&base_texture));
         assert_eq!(cloned.emissive_texture.as_ref(), Some(&emissive_texture));
         assert_eq!(cloned.alpha_mode, AlphaMode::Blend);
-    }
-
-    #[test]
-    fn imported_traffic_normal_detail_requires_owning_mesh_readiness_and_preserves_authored_maps() {
-        let mut fallback = traffic_paint_test_app();
-        let details = pbr_detail_test_assets();
-        fallback.insert_resource(details.clone());
-        let source = fallback
-            .world_mut()
-            .resource_mut::<Assets<StandardMaterial>>()
-            .add(StandardMaterial::default());
-        let (_, wrapper) = spawn_paint_wrapper(&mut fallback, 0);
-        let primitive = spawn_paint_primitive(&mut fallback, wrapper, source);
-        fallback.update();
-        let clone_handle = fallback
-            .world()
-            .get::<MeshMaterial3d<StandardMaterial>>(primitive)
-            .unwrap();
-        let cloned = fallback
-            .world()
-            .resource::<Assets<StandardMaterial>>()
-            .get(&clone_handle.0)
-            .unwrap();
-        assert!(cloned.normal_map_texture.is_none());
-        assert_eq!(
-            cloned.metallic_roughness_texture,
-            Some(details.plastic_orm.clone())
-        );
-        assert_eq!(cloned.occlusion_texture, Some(details.plastic_orm.clone()));
-
-        let mut ready = traffic_paint_test_app();
-        ready.insert_resource(details.clone());
-        let authored_normal = Handle::Uuid(bevy::asset::uuid::Uuid::from_u128(13), default());
-        let source = ready
-            .world_mut()
-            .resource_mut::<Assets<StandardMaterial>>()
-            .add(StandardMaterial {
-                normal_map_texture: Some(authored_normal.clone()),
-                ..default()
-            });
-        let (_, wrapper) = spawn_paint_wrapper(&mut ready, 1);
-        let primitive = spawn_paint_primitive(&mut ready, wrapper, source);
-        let mesh_id = ready.world().get::<Mesh3d>(primitive).unwrap().0.id();
-        ready
-            .world_mut()
-            .resource_mut::<ImportedMeshTangents>()
-            .mark_ready_for_test(mesh_id);
-        ready.update();
-        let clone_handle = ready
-            .world()
-            .get::<MeshMaterial3d<StandardMaterial>>(primitive)
-            .unwrap();
-        assert_eq!(
-            ready
-                .world()
-                .resource::<Assets<StandardMaterial>>()
-                .get(&clone_handle.0)
-                .unwrap()
-                .normal_map_texture,
-            Some(authored_normal),
-            "authored traffic normal maps remain authoritative"
-        );
-
-        let mut generated = traffic_paint_test_app();
-        generated.insert_resource(details.clone());
-        let source = generated
-            .world_mut()
-            .resource_mut::<Assets<StandardMaterial>>()
-            .add(StandardMaterial::default());
-        let (_, wrapper) = spawn_paint_wrapper(&mut generated, 2);
-        let primitive = spawn_paint_primitive(&mut generated, wrapper, source);
-        let mesh_id = generated.world().get::<Mesh3d>(primitive).unwrap().0.id();
-        generated
-            .world_mut()
-            .resource_mut::<ImportedMeshTangents>()
-            .mark_ready_for_test(mesh_id);
-        generated.update();
-        let clone_handle = generated
-            .world()
-            .get::<MeshMaterial3d<StandardMaterial>>(primitive)
-            .unwrap();
-        assert_eq!(
-            generated
-                .world()
-                .resource::<Assets<StandardMaterial>>()
-                .get(&clone_handle.0)
-                .unwrap()
-                .normal_map_texture,
-            Some(details.plastic_normal)
-        );
     }
 
     #[test]

@@ -60,11 +60,9 @@ const CONCRETE_SRGB: [f32; 3] = [0.72, 0.71, 0.68]; // palette::CONCRETE
 /// Every handle is loaded once and reused by cached materials.
 #[derive(Resource, Clone)]
 pub(crate) struct PbrDetailAssets {
-    pub(crate) plastic_normal: Handle<Image>,
     pub(crate) plastic_orm: Handle<Image>,
     pub(crate) concrete_normal: Handle<Image>,
     pub(crate) concrete_orm: Handle<Image>,
-    pub(crate) wood_normal: Handle<Image>,
     pub(crate) wood_orm: Handle<Image>,
     pub(crate) grass_normal: Handle<Image>,
     pub(crate) grass_orm: Handle<Image>,
@@ -92,11 +90,9 @@ impl FromWorld for PbrDetailAssets {
                 .load(path)
         };
         Self {
-            plastic_normal: load("textures/pbr_detail/plastic_normal.png"),
             plastic_orm: load("textures/pbr_detail/plastic_orm.png"),
             concrete_normal: load("textures/pbr_detail/concrete_normal.png"),
             concrete_orm: load("textures/pbr_detail/concrete_orm.png"),
-            wood_normal: load("textures/pbr_detail/wood_normal.png"),
             wood_orm: load("textures/pbr_detail/wood_orm.png"),
             grass_normal: load("textures/pbr_detail/grass_normal.png"),
             grass_orm: load("textures/pbr_detail/grass_orm.png"),
@@ -166,9 +162,9 @@ impl FromWorld for TextureAssets {
                 let mut materials = world.resource_mut::<Assets<StandardMaterial>>();
 
                 // --- Procedural normal maps ---
-                // Keep asphalt relief in its procedural color texture. A tiled
-                // normal at gameplay distance creates moire once tangents are
-                // enabled, while the requested PBR pass targets toy materials.
+                // Road/asphalt gets a gravelly normal map (stronger) so the surface
+                // catches light per-pixel instead of looking like flat paint.
+                let road_normal = images.add(asphalt_normal_map());
                 // Grass gets gentle blade bumps for natural light scatter.
                 let grass_normal = details.as_ref().map_or_else(
                     || images.add(grass_normal_map()),
@@ -206,6 +202,7 @@ impl FromWorld for TextureAssets {
                     StandardMaterial {
                         base_color: Color::WHITE,
                         base_color_texture: Some(images.add(road_texture())),
+                        normal_map_texture: Some(road_normal),
                         uv_transform: Affine2::from_scale(Vec2::splat(8.0)),
                         ..default()
                     },
@@ -904,6 +901,23 @@ fn grass_normal_map() -> Image {
             clump + blade
         },
         0.7,
+    )
+}
+
+/// Asphalt/road normal map: a mix of low-frequency bumps + sharper gravel
+/// specks so the road catches light with a gravelly grain. T15: richer with
+/// a third high-frequency octave for finer gravel.
+fn asphalt_normal_map() -> Image {
+    make_normal_map(
+        |x, y| {
+            let base = signed_noise(x, y) as f32 / 128.0;
+            // Sharper speckles at a different frequency for gravel grain.
+            let speck = signed_noise(x * 3, y * 3) as f32 / 128.0;
+            // Finer high-frequency gravel dust.
+            let dust = signed_noise2(x * 5, y * 5) as f32 / 128.0;
+            base * 0.5 + speck * 0.35 + dust * 0.15
+        },
+        0.8,
     )
 }
 

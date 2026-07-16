@@ -209,43 +209,6 @@ pub(crate) struct ToyShadingAssets {
 #[derive(Component, Clone, Copy, Debug, Default)]
 pub(crate) struct ImportedWorldVisual;
 
-/// Marks an asynchronously instantiated traffic scene as eligible for the
-/// same imported-mesh tangent preparation as world-kit scenes. The player car
-/// deliberately carries neither imported-visual marker.
-#[derive(Component, Clone, Copy, Debug, Default)]
-pub(crate) struct ImportedTrafficVisualRoot;
-
-/// Result of preparing each shared imported mesh for tangent-space detail.
-///
-/// glTF scenes are recycled and instanced from a fixed set of mesh assets.
-/// Caching both outcomes means a malformed mesh is rejected once rather than
-/// retried for every primitive instance or streaming cycle.
-#[derive(Resource, Default)]
-pub(crate) struct ImportedMeshTangents {
-    ready: HashSet<AssetId<Mesh>>,
-    failed: HashSet<AssetId<Mesh>>,
-}
-
-impl ImportedMeshTangents {
-    pub(crate) fn is_ready(&self, id: AssetId<Mesh>) -> bool {
-        self.ready.contains(&id)
-    }
-
-    fn is_known(&self, id: AssetId<Mesh>) -> bool {
-        self.ready.contains(&id) || self.failed.contains(&id)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn mark_ready_for_test(&mut self, id: AssetId<Mesh>) {
-        self.ready.insert(id);
-    }
-}
-
-/// Ordering boundary used by traffic paint assignment. Imported mesh tangent
-/// preparation must run before any material can opt into normal detail.
-#[derive(SystemSet, Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct ImportedMeshTangentSet;
-
 /// Imported glTF material handles that have already received semantic tuning.
 ///
 /// World scenes are instanced many times and share their material assets. The
@@ -274,19 +237,10 @@ pub(crate) struct ToyShadingPlugin;
 impl Plugin for ToyShadingPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ToyShadingAssets>()
-            .init_resource::<ImportedMeshTangents>()
             .init_resource::<TunedWorldMaterials>()
-            // glTF scene primitives are added asynchronously. Restricting both
-            // queries to Added avoids permanent whole-world scans. Tangents
-            // must exist before semantic tuning may attach a normal map.
-            .add_systems(
-                Update,
-                prepare_imported_mesh_tangents.in_set(ImportedMeshTangentSet),
-            )
-            .add_systems(
-                Update,
-                tune_imported_world_materials.after(ImportedMeshTangentSet),
-            );
+            // glTF scene primitives are added asynchronously. Restricting the
+            // query to Added avoids a permanent whole-world material scan.
+            .add_systems(Update, tune_imported_world_materials);
     }
 }
 
@@ -347,40 +301,14 @@ fn classify_world_material(name: &str) -> Option<WorldMaterialSemantic> {
     None
 }
 
-fn world_normal_detail(
-    semantic: WorldMaterialSemantic,
-    details: &PbrDetailAssets,
-) -> Option<&Handle<Image>> {
-    use WorldMaterialSemantic::*;
-    match semantic {
-        RawWood => Some(&details.wood_normal),
-        Concrete => Some(&details.concrete_normal),
-        Coated => Some(&details.plastic_normal),
-        PaintedWood | Glass | Metal | Clay | Foliage => None,
-    }
-}
-
-fn apply_world_normal_detail(
-    material: &mut StandardMaterial,
-    semantic: WorldMaterialSemantic,
-    details: Option<&PbrDetailAssets>,
-    tangent_ready: bool,
-) {
-    if tangent_ready && material.normal_map_texture.is_none() {
-        material.normal_map_texture =
-            details.and_then(|assets| world_normal_detail(semantic, assets).cloned());
-    }
-}
-
 fn apply_world_semantic(
     material: &mut StandardMaterial,
     semantic: WorldMaterialSemantic,
     details: Option<&PbrDetailAssets>,
-    tangent_ready: bool,
 ) {
     use WorldMaterialSemantic::*;
-    // ORM does not need a tangent basis and remains the fallback for imported
-    // geometry that lacks UV0/normals or fails MikkTSpace generation.
+    // Imported GLBs have UV0 but no authored tangents. Apply only safe ORM
+    // modulation; normal detail remains on tangent-bearing procedural meshes.
     let (family, detail) = match semantic {
         Glass => return,
         PaintedWood => (ToyMaterialFamily::PaintedWood, None),
@@ -409,131 +337,52 @@ fn apply_world_semantic(
             material.occlusion_texture = Some(orm.clone());
         }
     }
-    apply_world_normal_detail(material, semantic, details, tangent_ready);
 }
 
-fn has_imported_ancestor(
+fn has_imported_world_ancestor(
     mut entity: Entity,
     parents: &Query<&ChildOf>,
     world_roots: &Query<(), With<ImportedWorldVisual>>,
-    traffic_roots: &Query<(), With<ImportedTrafficVisualRoot>>,
 ) -> bool {
     for _ in 0..MAX_WORLD_VISUAL_ANCESTRY {
         let Ok(parent) = parents.get(entity) else {
             return false;
         };
         entity = parent.parent();
-        if world_roots.contains(entity) || traffic_roots.contains(entity) {
+        if world_roots.contains(entity) {
             return true;
         }
     }
     false
 }
 
-fn mesh_has_tangent_inputs(mesh: &Mesh) -> bool {
-    mesh.attribute(Mesh::ATTRIBUTE_UV_0).is_some()
-        && mesh.attribute(Mesh::ATTRIBUTE_NORMAL).is_some()
-}
-
-/// Prepare each shared world/traffic glTF mesh once. Both successes and
-/// failures are terminal for the asset ID, bounding work by the imported asset
-/// catalog rather than by streamed instances. Existing authored tangents are
-/// accepted without regeneration.
-fn prepare_imported_mesh_tangents(
-    primitives: Query<(Entity, &Mesh3d), Added<Mesh3d>>,
-    parents: Query<&ChildOf>,
-    world_roots: Query<(), With<ImportedWorldVisual>>,
-    traffic_roots: Query<(), With<ImportedTrafficVisualRoot>>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut cache: ResMut<ImportedMeshTangents>,
-) {
-    for (entity, mesh_handle) in &primitives {
-        if !has_imported_ancestor(entity, &parents, &world_roots, &traffic_roots) {
-            continue;
-        }
-        let id = mesh_handle.id();
-        if cache.is_known(id) {
-            continue;
-        }
-        let Some(mut mesh) = meshes.get_mut(id) else {
-            // Added glTF mesh primitives normally arrive with their dependency;
-            // do not cache a transient absence as malformed geometry.
-            continue;
-        };
-        let ready = mesh_has_tangent_inputs(&mesh)
-            && (mesh.attribute(Mesh::ATTRIBUTE_TANGENT).is_some()
-                || mesh.generate_tangents().is_ok());
-        if ready {
-            cache.ready.insert(id);
-        } else {
-            cache.failed.insert(id);
-        }
-    }
-}
-
 fn tune_imported_world_materials(
     primitives: Query<
-        (
-            Entity,
-            &GltfMaterialName,
-            &Mesh3d,
-            &MeshMaterial3d<StandardMaterial>,
-        ),
+        (Entity, &GltfMaterialName, &MeshMaterial3d<StandardMaterial>),
         Added<GltfMaterialName>,
     >,
     parents: Query<&ChildOf>,
     world_roots: Query<(), With<ImportedWorldVisual>>,
-    traffic_roots: Query<(), With<ImportedTrafficVisualRoot>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     details: Option<Res<PbrDetailAssets>>,
-    tangents: Res<ImportedMeshTangents>,
     mut tuned: ResMut<TunedWorldMaterials>,
 ) {
-    for (entity, name, mesh_handle, material_handle) in &primitives {
-        if !has_imported_ancestor(entity, &parents, &world_roots, &traffic_roots)
-            || traffic_roots.contains(entity)
-        {
-            continue;
-        }
-        // This system semantically tunes world ancestors only. Traffic paint
-        // owns its per-instance clone in difficulty.rs.
-        let mut ancestor = entity;
-        let mut world_owned = false;
-        for _ in 0..MAX_WORLD_VISUAL_ANCESTRY {
-            let Ok(parent) = parents.get(ancestor) else {
-                break;
-            };
-            ancestor = parent.parent();
-            if world_roots.contains(ancestor) {
-                world_owned = true;
-                break;
-            }
-            if traffic_roots.contains(ancestor) {
-                break;
-            }
-        }
-        if !world_owned {
+    for (entity, name, material_handle) in &primitives {
+        if !has_imported_world_ancestor(entity, &parents, &world_roots) {
             continue;
         }
         let id = material_handle.id();
         let Some(semantic) = classify_world_material(name) else {
             continue;
         };
-        let tangent_ready = tangents.is_ready(mesh_handle.id());
+        // Added glTF primitives appear only after their material dependency is
+        // loaded. Record the shared ID immediately before its sole mutation.
         if tuned.0.contains(&id) {
-            // A shared authored material may span primitives with different
-            // mesh readiness. Finish/ORM tuning stays one-time, while a later
-            // tangent-ready owner can safely unlock normal detail.
-            if tangent_ready {
-                if let Some(mut material) = materials.get_mut(id) {
-                    apply_world_normal_detail(&mut material, semantic, details.as_deref(), true);
-                }
-            }
             continue;
         }
         if let Some(mut material) = materials.get_mut(id) {
             tuned.0.insert(id);
-            apply_world_semantic(&mut material, semantic, details.as_deref(), tangent_ready);
+            apply_world_semantic(&mut material, semantic, details.as_deref());
         }
     }
 }
@@ -768,82 +617,12 @@ mod tests {
         name: &str,
         material: Handle<StandardMaterial>,
     ) -> Entity {
-        let mesh = app
-            .world_mut()
-            .resource_mut::<Assets<Mesh>>()
-            .add(Mesh::from(Cuboid::new(1.0, 1.0, 1.0)));
         let primitive = app
             .world_mut()
-            .spawn((
-                GltfMaterialName(name.to_owned()),
-                Mesh3d(mesh),
-                MeshMaterial3d(material),
-            ))
+            .spawn((GltfMaterialName(name.to_owned()), MeshMaterial3d(material)))
             .id();
         app.world_mut().entity_mut(parent).add_child(primitive);
         primitive
-    }
-
-    fn imported_mesh_test_app() -> App {
-        let mut app = App::new();
-        app.init_resource::<Assets<Mesh>>()
-            .init_resource::<ImportedMeshTangents>()
-            .add_systems(Update, prepare_imported_mesh_tangents);
-        app
-    }
-
-    fn spawn_imported_mesh(app: &mut App, mesh: Mesh, imported: bool) -> Handle<Mesh> {
-        let handle = app.world_mut().resource_mut::<Assets<Mesh>>().add(mesh);
-        let root = if imported {
-            app.world_mut().spawn(ImportedWorldVisual).id()
-        } else {
-            app.world_mut().spawn_empty().id()
-        };
-        let primitive = app.world_mut().spawn(Mesh3d(handle.clone())).id();
-        app.world_mut().entity_mut(root).add_child(primitive);
-        handle
-    }
-
-    #[test]
-    fn imported_tangent_cache_records_readiness_failure_once_and_excludes_player_meshes() {
-        let mut app = imported_mesh_test_app();
-        let ready = spawn_imported_mesh(&mut app, Mesh::from(Cuboid::new(1.0, 1.0, 1.0)), true);
-        let broken = spawn_imported_mesh(
-            &mut app,
-            Mesh::new(
-                bevy::render::render_resource::PrimitiveTopology::TriangleList,
-                RenderAssetUsages::default(),
-            ),
-            true,
-        );
-        let player = spawn_imported_mesh(&mut app, Mesh::from(Cuboid::new(1.0, 1.0, 1.0)), false);
-
-        app.update();
-        let cache = app.world().resource::<ImportedMeshTangents>();
-        assert!(cache.ready.contains(&ready.id()));
-        assert!(cache.failed.contains(&broken.id()));
-        assert!(
-            !cache.is_known(player.id()),
-            "unmarked player meshes are excluded"
-        );
-        assert_eq!(cache.ready.len() + cache.failed.len(), 2);
-        assert!(
-            app.world()
-                .resource::<Assets<Mesh>>()
-                .get(&ready)
-                .unwrap()
-                .attribute(Mesh::ATTRIBUTE_TANGENT)
-                .is_some()
-        );
-
-        // New instances of known assets do not grow or retry the cache.
-        let second_root = app.world_mut().spawn(ImportedWorldVisual).id();
-        let second = app.world_mut().spawn(Mesh3d(broken.clone())).id();
-        app.world_mut().entity_mut(second_root).add_child(second);
-        app.update();
-        let cache = app.world().resource::<ImportedMeshTangents>();
-        assert_eq!(cache.ready.len() + cache.failed.len(), 2);
-        assert!(cache.failed.contains(&broken.id()));
     }
 
     #[test]
@@ -1018,58 +797,6 @@ mod tests {
     }
 
     #[test]
-    fn imported_world_normal_detail_requires_readiness_and_preserves_authored_map() {
-        let fallback = Handle::<Image>::default();
-        let details = PbrDetailAssets {
-            plastic_normal: Handle::Uuid(bevy::asset::uuid::Uuid::from_u128(1), default()),
-            plastic_orm: Handle::default(),
-            concrete_normal: Handle::Uuid(bevy::asset::uuid::Uuid::from_u128(2), default()),
-            concrete_orm: Handle::default(),
-            wood_normal: Handle::Uuid(bevy::asset::uuid::Uuid::from_u128(3), default()),
-            wood_orm: Handle::default(),
-            grass_normal: Handle::default(),
-            grass_orm: Handle::default(),
-            soil_orm: Handle::default(),
-        };
-        let mut failed = StandardMaterial::default();
-        apply_world_semantic(
-            &mut failed,
-            WorldMaterialSemantic::Concrete,
-            Some(&details),
-            false,
-        );
-        assert!(failed.normal_map_texture.is_none());
-        assert_eq!(
-            failed.metallic_roughness_texture,
-            Some(details.concrete_orm.clone())
-        );
-
-        let mut ready = StandardMaterial::default();
-        apply_world_semantic(
-            &mut ready,
-            WorldMaterialSemantic::Concrete,
-            Some(&details),
-            true,
-        );
-        assert_eq!(
-            ready.normal_map_texture,
-            Some(details.concrete_normal.clone())
-        );
-
-        let mut authored = StandardMaterial {
-            normal_map_texture: Some(fallback.clone()),
-            ..default()
-        };
-        apply_world_semantic(
-            &mut authored,
-            WorldMaterialSemantic::Concrete,
-            Some(&details),
-            true,
-        );
-        assert_eq!(authored.normal_map_texture, Some(fallback));
-    }
-
-    #[test]
     fn glass_is_classified_but_preserved_exactly() {
         let mut material = StandardMaterial {
             metallic: 0.37,
@@ -1080,7 +807,7 @@ mod tests {
             ..default()
         };
         let before = material.clone();
-        apply_world_semantic(&mut material, WorldMaterialSemantic::Glass, None, false);
+        apply_world_semantic(&mut material, WorldMaterialSemantic::Glass, None);
         assert_eq!(material.metallic, before.metallic);
         assert_eq!(material.perceptual_roughness, before.perceptual_roughness);
         assert_eq!(material.reflectance, before.reflectance);
