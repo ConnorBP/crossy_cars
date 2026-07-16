@@ -80,6 +80,12 @@ pub(crate) struct DriftLatch {
     side: Option<DriftSide>,
 }
 
+impl DriftLatch {
+    pub(crate) const fn is_latched(self) -> bool {
+        self.side.is_some()
+    }
+}
+
 // Exponential speed-response rates (per second). Service braking is
 // deliberately stronger than acceleration/coasting without snapping the car
 // to a halt: from speed 12 it takes about 1.75 s to reach the stop threshold,

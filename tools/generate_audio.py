@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Procedural WAV generator for Wave-Q audio assets.
 
-Generates two new reward/penalty sound effects using only the Python
+Generates three original sound effects using only the Python
 standard library (``wave``, ``math``, ``struct``, ``random``):
 
 - ``assets/audio/positive.wav`` -- a short, bright, *rising* reward chime.
@@ -20,7 +20,8 @@ Both files are deterministic (seeded), mono, 16-bit PCM, 44100 Hz -- the
 same format as the existing six audio assets -- normalized to ~90% of full
 scale with hard anti-clipping so they are web-safe and consistent in level.
 
-This script only writes the two new files; it never touches the existing
+It also writes ``assets/audio/tire_scrub.wav``: a short, softened tire scrub
+used for hard turns and handbrake drifts. The script never touches the existing
 six audio assets (ambient, click, coin, crash, engine, hit).
 
 Run::
@@ -131,7 +132,7 @@ def _write_wav(path: str, samples: list[float]) -> None:
     if name in EXISTING_ASSETS:
         raise RuntimeError(
             f"Refusing to overwrite existing asset '{name}'. "
-            "This generator only owns positive.wav and penalty.wav."
+            "This generator only owns positive.wav, penalty.wav, and tire_scrub.wav."
         )
     os.makedirs(os.path.dirname(path), exist_ok=True)
     pcm = _to_pcm16(_normalize(samples))
@@ -243,6 +244,32 @@ def synth_penalty() -> list[float]:
 
 
 # ---------------------------------------------------------------------------
+# tire_scrub.wav -- softened broadband tire scrub for turns/drifts.
+# ---------------------------------------------------------------------------
+def synth_tire_scrub() -> list[float]:
+    random.seed(20260716)
+    duration = 0.48
+    n = int(duration * SAMPLE_RATE)
+    output = [0.0] * n
+    filtered = 0.0
+    phase = 0.0
+    for i in range(n):
+        t = i / SAMPLE_RATE
+        # Low-pass deterministic white noise so the cue reads as rubber scrub,
+        # not static. A soft tonal component adds tire character.
+        white = random.uniform(-1.0, 1.0)
+        filtered += 0.16 * (white - filtered)
+        frequency = 520.0 - 130.0 * (i / n)
+        phase += 2.0 * math.pi * frequency / SAMPLE_RATE
+        attack = min(1.0, t / 0.035)
+        release = min(1.0, (duration - t) / 0.11)
+        envelope = math.sin(math.pi * 0.5 * attack) * math.sin(math.pi * 0.5 * release)
+        wobble = 0.82 + 0.18 * math.sin(2.0 * math.pi * 11.0 * t)
+        output[i] = (0.78 * filtered + 0.14 * math.sin(phase)) * envelope * wobble
+    return output
+
+
+# ---------------------------------------------------------------------------
 # Entry point.
 # ---------------------------------------------------------------------------
 def main() -> None:
@@ -251,6 +278,7 @@ def main() -> None:
     targets = [
         ("positive.wav", synth_positive),
         ("penalty.wav", synth_penalty),
+        ("tire_scrub.wav", synth_tire_scrub),
     ]
 
     print(f"Audio dir: {AUDIO_DIR}")

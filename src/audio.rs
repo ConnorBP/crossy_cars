@@ -4,7 +4,7 @@ use bevy::audio::{
 };
 use bevy::prelude::*;
 
-use crate::car::Car;
+use crate::car::{Car, DriftLatch, DrivingSet, PlayerInput};
 use crate::critters::CritterHit;
 use crate::game::events::{ChickenHit, CoinCollected};
 use crate::game::resources::GameConfig;
@@ -24,6 +24,7 @@ struct AudioHandles {
     ambient: Handle<AudioSource>,
     positive: Handle<AudioSource>,
     penalty: Handle<AudioSource>,
+    tire_scrub: Handle<AudioSource>,
 }
 
 /// Marker + smoothed state for the single looping engine audio entity, so we
@@ -47,6 +48,23 @@ const ENABLE_AMBIENT_BED: bool = false;
 #[derive(Component)]
 struct AmbientSound;
 
+#[derive(Component)]
+struct TireScrubSound;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum TireScrubKind {
+    #[default]
+    None,
+    HardTurn,
+    Drift,
+}
+
+#[derive(Resource, Default, Debug, PartialEq)]
+struct TireScrubState {
+    active: TireScrubKind,
+    cooldown: f32,
+}
+
 /// Unscaled local gain retained so live master changes do not compound.
 /// Constructible crate-wide so any audio-emitting module can attach it to a
 /// spawned one-shot and have the live master bridge scale it without
@@ -59,6 +77,7 @@ pub struct AudioPlugin;
 impl Plugin for AudioPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<AudioHandles>()
+            .init_resource::<TireScrubState>()
             .add_systems(
                 Update,
                 (
@@ -72,6 +91,9 @@ impl Plugin for AudioPlugin {
                         .chain()
                         .before(update_engine),
                     update_engine.run_if(in_state(GameState::Playing)),
+                    update_tire_scrub
+                        .after(DrivingSet)
+                        .run_if(in_state(GameState::Playing)),
                 ),
             )
             .add_systems(
@@ -80,7 +102,7 @@ impl Plugin for AudioPlugin {
             )
             .add_systems(
                 OnExit(GameState::Playing),
-                (cleanup_engine, cleanup_ambient),
+                (cleanup_engine, cleanup_ambient, cleanup_tire_scrub),
             )
             .add_systems(OnEnter(GameState::Menu), play_click);
     }
@@ -167,6 +189,7 @@ impl FromWorld for AudioHandles {
             ambient: asset_server.load("audio/ambient.wav"),
             positive: asset_server.load("audio/positive.wav"),
             penalty: asset_server.load("audio/penalty.wav"),
+            tire_scrub: asset_server.load("audio/tire_scrub.wav"),
         }
     }
 }
@@ -184,6 +207,11 @@ const CHICKEN_HIT_VOLUME: f32 = 0.6;
 const CHICKEN_HIT_PITCH: f32 = 1.1;
 const POSITIVE_CUE_VOLUME: f32 = 0.55;
 const PENALTY_CUE_VOLUME: f32 = 0.5;
+const HARD_TURN_VOLUME: f32 = 0.24;
+const HARD_TURN_PITCH: f32 = 1.10;
+const DRIFT_VOLUME: f32 = 0.32;
+const DRIFT_PITCH: f32 = 0.92;
+const TIRE_SCRUB_COOLDOWN: f32 = 0.55;
 
 /// Clamp an authored cue gain to the safe linear range [0, 1] and replace
 /// non-finite values with silence. Bounds every one-shot cue so the master
@@ -338,6 +366,98 @@ fn cleanup_ambient(mut commands: Commands, ambient: Query<Entity, With<AmbientSo
     }
 }
 
+fn cleanup_tire_scrub(
+    mut commands: Commands,
+    cues: Query<Entity, With<TireScrubSound>>,
+    mut state: ResMut<TireScrubState>,
+) {
+    for entity in &cues {
+        commands.entity(entity).despawn();
+    }
+    *state = TireScrubState::default();
+}
+
+fn tire_scrub_kind(
+    previous: TireScrubKind,
+    speed: f32,
+    steer: f32,
+    slip: f32,
+    drift_latched: bool,
+    max_speed: f32,
+    turn_rate: f32,
+) -> TireScrubKind {
+    if ![speed, steer, slip, max_speed, turn_rate]
+        .into_iter()
+        .all(f32::is_finite)
+        || max_speed <= 0.0
+        || turn_rate < 0.0
+    {
+        return TireScrubKind::None;
+    }
+    let speed_abs = speed.abs();
+    let yaw_rate = steer.abs().clamp(0.0, 1.0) * turn_rate * speed_abs / max_speed;
+    let drift = match previous {
+        TireScrubKind::Drift => drift_latched && speed > 1.0 && slip.abs() > 0.025,
+        _ => drift_latched && speed > 1.25 && slip.abs() >= 0.06,
+    };
+    if drift {
+        return TireScrubKind::Drift;
+    }
+    let hard_turn = match previous {
+        TireScrubKind::HardTurn => speed_abs > 3.5 && yaw_rate > 0.9,
+        _ => speed_abs > 4.0 && yaw_rate > 1.2,
+    };
+    if hard_turn {
+        TireScrubKind::HardTurn
+    } else {
+        TireScrubKind::None
+    }
+}
+
+fn update_tire_scrub(
+    mut commands: Commands,
+    handles: Res<AudioHandles>,
+    car: Query<(&Car, &DriftLatch)>,
+    input: Res<PlayerInput>,
+    config: Res<GameConfig>,
+    time: Res<Time>,
+    mut state: ResMut<TireScrubState>,
+) {
+    state.cooldown = (state.cooldown - time.delta_secs().min(0.1)).max(0.0);
+    let Ok((car, latch)) = car.single() else {
+        state.active = TireScrubKind::None;
+        return;
+    };
+    let next = tire_scrub_kind(
+        state.active,
+        car.speed,
+        input.steer,
+        car.drift,
+        latch.is_latched(),
+        config.max_speed,
+        config.turn_rate,
+    );
+    state.active = next;
+    if next == TireScrubKind::None || state.cooldown > 0.0 {
+        return;
+    }
+    let (gain, pitch) = match next {
+        TireScrubKind::HardTurn => (HARD_TURN_VOLUME, HARD_TURN_PITCH),
+        TireScrubKind::Drift => (DRIFT_VOLUME, DRIFT_PITCH),
+        TireScrubKind::None => unreachable!(),
+    };
+    let gain = bounded_cue_gain(gain);
+    commands.spawn((
+        AudioPlayer::new(handles.tire_scrub.clone()),
+        PlaybackSettings::DESPAWN
+            .with_volume(Volume::Linear(gain))
+            .with_speed(pitch),
+        AudioBaseGain(gain),
+        TireScrubSound,
+    ));
+    state.cooldown = TIRE_SCRUB_COOLDOWN;
+}
+
 // --- Engine curve constants ----------------------------------------------
 //
 // A believable engine curve: idle rumble at speed 0, rising pitch + a slight
@@ -446,6 +566,67 @@ mod tests {
         let world = app.world_mut();
         assert_eq!(world.query::<&EngineSound>().iter(world).count(), 0);
         assert_eq!(world.query::<&AmbientSound>().iter(world).count(), 0);
+    }
+
+    #[test]
+    fn tire_scrub_policy_prioritizes_drift_and_uses_hysteresis() {
+        assert_eq!(
+            tire_scrub_kind(TireScrubKind::None, 8.0, 1.0, 0.0, false, 12.0, 2.5),
+            TireScrubKind::HardTurn
+        );
+        assert_eq!(
+            tire_scrub_kind(TireScrubKind::None, 8.0, 1.0, 0.08, true, 12.0, 2.5),
+            TireScrubKind::Drift
+        );
+        assert_eq!(
+            tire_scrub_kind(TireScrubKind::Drift, 5.0, 0.0, 0.03, true, 12.0, 2.5),
+            TireScrubKind::Drift,
+            "latched centered steering should retain an audible slide"
+        );
+        assert_eq!(
+            tire_scrub_kind(TireScrubKind::Drift, 8.0, 1.0, 0.08, false, 12.0, 2.5),
+            TireScrubKind::HardTurn
+        );
+        assert_eq!(
+            tire_scrub_kind(TireScrubKind::HardTurn, 3.9, 1.0, 0.0, false, 5.0, 2.5),
+            TireScrubKind::HardTurn
+        );
+    }
+
+    #[test]
+    fn tire_scrub_policy_rejects_boundaries_reverse_drift_and_nonfinite() {
+        assert_eq!(
+            tire_scrub_kind(TireScrubKind::None, 4.0, 1.0, 0.0, false, 6.0, 2.0),
+            TireScrubKind::None
+        );
+        assert_eq!(
+            tire_scrub_kind(TireScrubKind::None, -8.0, 1.0, 0.08, true, 12.0, 2.5),
+            TireScrubKind::HardTurn,
+            "reverse may squeal during a hard turn but cannot drift"
+        );
+        for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert_eq!(
+                tire_scrub_kind(TireScrubKind::Drift, value, 1.0, 0.1, true, 12.0, 2.5),
+                TireScrubKind::None
+            );
+        }
+    }
+
+    #[test]
+    fn tire_scrub_cleanup_resets_state_and_removes_cues() {
+        let mut app = App::new();
+        app.init_resource::<TireScrubState>()
+            .add_systems(Update, cleanup_tire_scrub);
+        app.world_mut().resource_mut::<TireScrubState>().active = TireScrubKind::Drift;
+        app.world_mut().resource_mut::<TireScrubState>().cooldown = 0.4;
+        app.world_mut().spawn(TireScrubSound);
+        app.update();
+        assert_eq!(
+            *app.world().resource::<TireScrubState>(),
+            TireScrubState::default()
+        );
+        let world = app.world_mut();
+        assert_eq!(world.query::<&TireScrubSound>().iter(world).count(), 0);
     }
 
     #[test]
