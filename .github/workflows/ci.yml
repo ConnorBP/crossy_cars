@@ -67,8 +67,8 @@ jobs:
             assets/textures/pbr_detail \
             src/pbr_detail_constants.rs
           python -c "import PIL, playwright.sync_api"
+          python tools/build_pbr_details.py --verify
           python -m unittest tools.test_build_pbr_details tools.test_microtexture_review_capture
-          python tools/build_pbr_details.py
           git diff --exit-code -- assets/textures/pbr_detail src/pbr_detail_constants.rs
       - name: Install locked Trunk
         run: cargo install --locked trunk --version "$TRUNK_VERSION"

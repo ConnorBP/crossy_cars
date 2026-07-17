@@ -11,6 +11,7 @@ import hashlib
 import json
 import math
 import random
+import sys
 from pathlib import Path
 
 from PIL import Image
@@ -205,24 +206,46 @@ def normal_metrics(image: Image.Image) -> dict[str, float]:
     }
 
 
+def pixel_sha256(image: Image.Image) -> str:
+    return sha256(image.convert("RGBA").tobytes())
+
+
 def save(image: Image.Image, name: str) -> dict[str, object]:
+    """Preserve committed PNG bytes when deterministic decoded pixels match.
+
+    Pillow/zlib PNG encoding is not byte-stable across OS/version combinations.
+    The transformation contract is RGBA pixels; an existing matching PNG stays
+    byte-identical, while genuinely changed pixels still replace the asset.
+    """
     path = OUT / name
-    image.save(path, format="PNG", optimize=True, compress_level=9)
+    rgba = image.convert("RGBA")
+    if path.exists():
+        with Image.open(path) as existing_image:
+            existing_rgba = existing_image.convert("RGBA")
+            matches = existing_rgba.size == rgba.size and existing_rgba.tobytes() == rgba.tobytes()
+        if not matches:
+            rgba.save(path, format="PNG", optimize=True, compress_level=9)
+    else:
+        rgba.save(path, format="PNG", optimize=True, compress_level=9)
     data = path.read_bytes()
     return {
         "path": path.relative_to(OUT.parents[2]).as_posix(),
         "bytes": len(data),
         "sha256": sha256(data),
+        "pixel_sha256": pixel_sha256(rgba),
     }
 
 
 def existing(name: str) -> dict[str, object]:
     path = OUT / name
     data = path.read_bytes()
+    with Image.open(path) as image:
+        pixels = pixel_sha256(image)
     return {
         "path": path.relative_to(OUT.parents[2]).as_posix(),
         "bytes": len(data),
         "sha256": sha256(data),
+        "pixel_sha256": pixels,
         "generation": "preserved unchanged by final correction",
     }
 
@@ -236,6 +259,22 @@ pub(crate) const TRAFFIC_PAINT_ALBEDO_LINEAR_MEAN: f32 = {traffic:.12f};\n\
 pub(crate) const TRAFFIC_PAINT_ROUGHNESS_LINEAR_MEAN: f32 = {roughness:.12f};\n\
 """.format(**means)
     CONSTANTS.write_text(text, encoding="utf-8", newline="\n")
+
+
+def verify_committed() -> None:
+    manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+    for key, output in manifest["outputs"].items():
+        path = OUT.parents[2] / output["path"]
+        data = path.read_bytes()
+        assert len(data) == output["bytes"], key
+        assert sha256(data) == output["sha256"], key
+        with Image.open(path) as image:
+            assert image.size == (SIZE, SIZE), key
+            assert pixel_sha256(image) == output["pixel_sha256"], key
+            assert_exact_edges(image, key)
+    constants = CONSTANTS.read_bytes()
+    assert constants.startswith(b"// @generated") and b"\r" not in constants
+    print("PBR detail verification passed")
 
 
 def main() -> None:
@@ -318,4 +357,9 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    if sys.argv[1:] == ["--verify"]:
+        verify_committed()
+    elif sys.argv[1:]:
+        raise SystemExit("usage: build_pbr_details.py [--verify]")
+    else:
+        main()

@@ -116,18 +116,21 @@
       "compensation_reciprocal": 1.13676981993,
       "decoded_linear_mean": 0.879685563839,
       "path": "assets/textures/pbr_detail/concrete_albedo.png",
+      "pixel_sha256": "e802816e7628e3e5dd0287066b36c29a2cb52da30df1e7d4181fe9cd576acba1",
       "sha256": "1cfad41fa2148bde7bd31e9ff3e8cc8b7fc1402f1985ad6f86240b0655dcc2c4"
     },
     "concrete_normal": {
       "bytes": 38264,
       "generation": "preserved unchanged by final correction",
       "path": "assets/textures/pbr_detail/concrete_normal.png",
+      "pixel_sha256": "7b5c82140d037e0287833931c2b6c33661a11a2841d050b6fd58adeabb174973",
       "sha256": "5df8a179267f02c14e82f801e84c63e5cbd0f74daef870d39d9951314070dba4"
     },
     "concrete_orm": {
       "bytes": 25062,
       "generation": "preserved unchanged by final correction",
       "path": "assets/textures/pbr_detail/concrete_orm.png",
+      "pixel_sha256": "9ca17c8bebb5efcf889c74bd6bbfd48d184d8cab00f4890bccf01b21e7d80730",
       "sha256": "e3932426fed9fb8cbe83d010dad95960d7629dbad9d17596cc829585f600c2b6"
     },
     "foliage_albedo": {
@@ -135,6 +138,7 @@
       "compensation_reciprocal": 1.095526602125,
       "decoded_linear_mean": 0.912803028298,
       "path": "assets/textures/pbr_detail/foliage_albedo.png",
+      "pixel_sha256": "ac3bc40c030d164795f021ae0e266574a03813b6e48780fd25590f7af48624b3",
       "sha256": "22cd828582a492b0f47fafbfbb4229593ebc2cc608e18c6cbf1683f3cb73a291"
     },
     "grass_normal": {
@@ -146,28 +150,33 @@
         "seam_max": 0.0
       },
       "path": "assets/textures/pbr_detail/grass_normal.png",
+      "pixel_sha256": "ffb78f3e49ec856381ef42a7b959e1dcf8ecf4c77369bb276452aa96b19b09b2",
       "sha256": "c69f4c394188c3642d3ab6f7902fcc16d45f189e37eb915de8c2e5f54265f8a5"
     },
     "grass_orm": {
       "bytes": 20361,
       "path": "assets/textures/pbr_detail/grass_orm.png",
+      "pixel_sha256": "afa36e2c34a171e34296a7b9cba3fa38f49802e336001c2ae0f7561382779718",
       "sha256": "edc1c1b9de602a3764fa7f15436ce0fc0a678f52b328dce048bcc5ec4ad506b0"
     },
     "plastic_normal": {
       "bytes": 20223,
       "generation": "preserved unchanged by final correction",
       "path": "assets/textures/pbr_detail/plastic_normal.png",
+      "pixel_sha256": "d8b1896e19074076d241371197ffc6fccb6d83b0675779295cd9084c00857104",
       "sha256": "3a017091a5379c7cf9cde4bd87b2c707d185d5f85ff9c31b3c3e0e7bc653f671"
     },
     "plastic_orm": {
       "bytes": 14953,
       "generation": "preserved unchanged by final correction",
       "path": "assets/textures/pbr_detail/plastic_orm.png",
+      "pixel_sha256": "63dfe7440b38ceb865fb6f9c4ecf57f114f91153829fec6af85f25f511e5492e",
       "sha256": "327077bb119686a881a6678e308f993511e38628987578550a62be0f570e04bd"
     },
     "soil_orm": {
       "bytes": 22719,
       "path": "assets/textures/pbr_detail/soil_orm.png",
+      "pixel_sha256": "a94cab7688df70d2ae2d09972ebeecacff6a669057cf6f01584df9c7e6de39eb",
       "sha256": "7bdf542012cbf29ca1b7297a78effab137784384d4807caf964ed20a534f4990"
     },
     "traffic_paint_albedo": {
@@ -175,11 +184,13 @@
       "compensation_reciprocal": 1.099738066456,
       "decoded_linear_mean": 0.909307434653,
       "path": "assets/textures/pbr_detail/traffic_paint_albedo.png",
+      "pixel_sha256": "a3a1f47d4d0ef11381be86076276d7289192d522784231da9fc357ac9cc6e911",
       "sha256": "7592ec31faa80335f9314d2856e0d6cac14106d800424fac2d6dea49385b3d29"
     },
     "traffic_paint_orm": {
       "bytes": 22224,
       "path": "assets/textures/pbr_detail/traffic_paint_orm.png",
+      "pixel_sha256": "d1f8f5e0838581101f324501e053d779b10f818620a18605a0de363c479b42f6",
       "roughness_compensation_reciprocal": 1.075748374599,
       "roughness_linear_mean": 0.929585415709,
       "sha256": "9c68350a08d2081c524abb082426afacea5c834760d596eb190aa6b568c55506"
@@ -188,12 +199,14 @@
       "bytes": 20239,
       "generation": "preserved unchanged by final correction",
       "path": "assets/textures/pbr_detail/wood_normal.png",
+      "pixel_sha256": "f04c1cf93c143d98b7f2bc6128ae27f67f8893bc506d1775bdb0494b87888a50",
       "sha256": "b21c9425ac5d05104955b026ca8fbb7c1ad4b1ebea19676d60253f7a0e0db740"
     },
     "wood_orm": {
       "bytes": 18416,
       "generation": "preserved unchanged by final correction",
       "path": "assets/textures/pbr_detail/wood_orm.png",
+      "pixel_sha256": "715f9722a27cc3e8a0963f56e3b4a811cd14ac629e7c0dff3740fc35d1a0c752",
       "sha256": "8906aaee4615d697161185e4c6f69de64a1cc33012cdeda225a0cbc09f0312f5"
     }
   },
