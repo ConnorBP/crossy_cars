@@ -14,7 +14,7 @@ use bevy::{
     window::PrimaryWindow,
 };
 
-use crate::competitive_v3::RankedV3Client;
+use crate::competitive_v3::{RankedV3Client, RankedV3Phase};
 use crate::game::{RestartRequested, settings_closed, state::GameState};
 use crate::game_modes::{Competition, Conduct, ManualCondition, SelectedGameMode};
 use crate::modifiers::{ModifierKind, SelectedModifier};
@@ -205,16 +205,127 @@ struct ConditionCard(usize);
 struct CarouselDot(usize);
 #[derive(Component)]
 struct TipText;
+/// The one explicit menu activation control. Product cells only move focus;
+/// keyboard Enter/Space and this button share the same activation path.
 #[derive(Component)]
 struct DriveHint;
+#[derive(Component)]
+struct DriveLabel;
 #[derive(Component, Default)]
 struct GlowAnimation(f32);
-#[derive(Component, Clone, Copy)]
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
 enum MenuAction {
     Previous,
     Next,
     Select(usize),
     Product(Competition, Conduct),
+    Drive,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DrivePresentation {
+    Drive,
+    Connecting,
+    RankedUnavailable,
+}
+
+impl DrivePresentation {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Drive => "DRIVE",
+            Self::Connecting => "CONNECTING",
+            Self::RankedUnavailable => "RANKED UNAVAILABLE",
+        }
+    }
+
+    fn enabled(self) -> bool {
+        self == Self::Drive
+    }
+}
+
+fn drive_presentation(focus: ProductFocus, ranked: &RankedV3Client) -> DrivePresentation {
+    if focus.product().0 == Competition::Casual {
+        DrivePresentation::Drive
+    } else if ranked.phase == RankedV3Phase::Starting {
+        DrivePresentation::Connecting
+    } else if ranked.ranked_available() {
+        DrivePresentation::Drive
+    } else {
+        DrivePresentation::RankedUnavailable
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct MenuRect {
+    left: f32,
+    top: f32,
+    width: f32,
+    height: f32,
+}
+
+impl MenuRect {
+    #[cfg(test)]
+    fn right(self) -> f32 {
+        self.left + self.width
+    }
+
+    fn bottom(self) -> f32 {
+        self.top + self.height
+    }
+
+    fn contains(self, point: Vec2) -> bool {
+        (self.left..=self.right()).contains(&point.x)
+            && (self.top..=self.bottom()).contains(&point.y)
+    }
+
+    #[cfg(test)]
+    fn overlaps(self, other: Self) -> bool {
+        self.left < other.right()
+            && self.right() > other.left
+            && self.top < other.bottom()
+            && self.bottom() > other.top
+    }
+}
+
+const SHORT_PRODUCT_GRID_TOP: f32 = 256.0;
+const SHORT_PRODUCT_GRID_HEIGHT: f32 = 70.0;
+const SHORT_DRIVE_TOP: f32 = 330.0;
+const SHORT_DRIVE_WIDTH: f32 = 244.0;
+const SHORT_DRIVE_HEIGHT: f32 = 36.0;
+
+fn drive_rect(layout: MenuLayout, width: f32, height: f32) -> MenuRect {
+    match layout {
+        MenuLayout::ShortLandscape => MenuRect {
+            left: (width - SHORT_DRIVE_WIDTH) * 0.5,
+            top: SHORT_DRIVE_TOP,
+            width: SHORT_DRIVE_WIDTH,
+            height: SHORT_DRIVE_HEIGHT,
+        },
+        MenuLayout::Portrait => {
+            let drive_width = (width * 0.8).clamp(220.0, 360.0);
+            MenuRect {
+                left: (width - drive_width) * 0.5,
+                top: (height - 122.0).max(0.0),
+                width: drive_width,
+                height: 52.0,
+            }
+        }
+        MenuLayout::Wide => MenuRect {
+            left: (width - 300.0) * 0.5,
+            top: (height - 76.0).max(0.0),
+            width: 300.0,
+            height: 52.0,
+        },
+    }
+}
+
+fn short_product_grid_rect(width: f32) -> MenuRect {
+    MenuRect {
+        left: (width - 500.0) * 0.5,
+        top: SHORT_PRODUCT_GRID_TOP,
+        width: 500.0,
+        height: SHORT_PRODUCT_GRID_HEIGHT,
+    }
 }
 
 pub struct MenuPlugin;
@@ -242,6 +353,7 @@ impl Plugin for MenuPlugin {
                 menu_keyboard,
                 menu_swipe,
                 menu_buttons,
+                menu_touch_actions,
                 (animate_menu_geometry, animate_menu_materials),
             )
                 .chain()
@@ -427,6 +539,23 @@ fn menu_swipe(
     }
 }
 
+fn resolve_activation_action(
+    action: MenuAction,
+    focus: &mut ProductFocus,
+) -> Option<(Competition, Conduct)> {
+    match action {
+        MenuAction::Product(competition, conduct) => {
+            focus.index = ProductFocus::PRODUCTS
+                .iter()
+                .position(|product| *product == (competition, conduct))
+                .expect("known product");
+            None
+        }
+        MenuAction::Drive => Some(focus.product()),
+        _ => None,
+    }
+}
+
 fn menu_buttons(
     interactions: Query<(&Interaction, &MenuAction), Changed<Interaction>>,
     mut selected: ResMut<SelectedModifier>,
@@ -450,33 +579,78 @@ fn menu_buttons(
             MenuAction::Select(index) if focus.product().0 == Competition::Casual => {
                 selected.0 = CONDITIONS[index]
             }
-            MenuAction::Product(competition, conduct) => {
-                if competition == Competition::Ranked && !ranked.ranked_available() {
-                    continue;
+            action @ (MenuAction::Product(_, _) | MenuAction::Drive) => {
+                // Product cells are selection-only. Repeated clicks/taps never
+                // activate a run; this also preserves the rebuild debounce by
+                // requiring a separate press on the stable DRIVE target.
+                if let Some((competition, conduct)) = resolve_activation_action(action, &mut focus)
+                {
+                    activate_product(
+                        competition,
+                        conduct,
+                        &selected,
+                        &mut mode,
+                        &mut ranked,
+                        &mut restart,
+                        &mut next,
+                    );
                 }
-                let target = ProductFocus::PRODUCTS
-                    .iter()
-                    .position(|product| *product == (competition, conduct))
-                    .expect("known product");
-                if target != focus.index {
-                    // First tap/click moves explicit focus and reveals the
-                    // Casual controls (or Ranked forced-rotation copy). A
-                    // second activation starts it, preventing touch-through
-                    // and resize/debounce surprises.
-                    focus.index = target;
-                    continue;
-                }
-                activate_product(
-                    competition,
-                    conduct,
-                    &selected,
-                    &mut mode,
-                    &mut ranked,
-                    &mut restart,
-                    &mut next,
-                );
             }
             _ => {}
+        }
+    }
+}
+
+fn short_product_at(point: Vec2, width: f32) -> Option<(Competition, Conduct)> {
+    let grid = short_product_grid_rect(width);
+    if !grid.contains(point) {
+        return None;
+    }
+    let local = point - Vec2::new(grid.left, grid.top);
+    let column = usize::from(local.x >= (grid.width + 6.0) * 0.5);
+    let row = usize::from(local.y >= 35.0);
+    Some(ProductFocus::PRODUCTS[row * 2 + column])
+}
+
+/// Bevy's WebGL touch-to-Interaction bridge is not reliable on all mobile
+/// browsers. Resolve the exact same short-landscape button geometry from raw
+/// touches as a fallback; desktop clicks and other layouts still use Button
+/// Interaction. A just-pressed touch can produce at most one action.
+fn menu_touch_actions(
+    touches: Res<Touches>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    layout: Res<MenuLayout>,
+    mut focus: ResMut<ProductFocus>,
+    selected: Res<SelectedModifier>,
+    mut mode: ResMut<SelectedGameMode>,
+    mut ranked: ResMut<RankedV3Client>,
+    mut restart: ResMut<RestartRequested>,
+    mut next: ResMut<NextState<GameState>>,
+) {
+    if *layout != MenuLayout::ShortLandscape {
+        return;
+    }
+    let Ok(window) = windows.single() else { return };
+    let drive = drive_rect(*layout, window.width(), window.height());
+    for touch in touches.iter_just_pressed() {
+        let point = touch.position();
+        if drive.contains(point) {
+            let (competition, conduct) = focus.product();
+            activate_product(
+                competition,
+                conduct,
+                &selected,
+                &mut mode,
+                &mut ranked,
+                &mut restart,
+                &mut next,
+            );
+            return;
+        }
+        if let Some((competition, conduct)) = short_product_at(point, window.width()) {
+            let _ =
+                resolve_activation_action(MenuAction::Product(competition, conduct), &mut focus);
+            return;
         }
     }
 }
@@ -514,6 +688,7 @@ fn spawn_menu(
         &mut commands,
         *layout,
         width,
+        height,
         &records.products,
         &settings,
         selected.0,
@@ -566,6 +741,7 @@ fn rebuild_responsive_menu(
         &mut commands,
         next_layout,
         window.width(),
+        window.height(),
         &records.products,
         &settings,
         selected.0,
@@ -627,6 +803,7 @@ fn build_menu(
     commands: &mut Commands,
     layout: MenuLayout,
     window_width: f32,
+    window_height: f32,
     product_bests: &ProductBests,
     settings: &Settings,
     selected: ModifierKind,
@@ -643,7 +820,7 @@ fn build_menu(
     let compact = short || portrait;
     let gap = if compact { 12.0 } else { 20.0 };
     let (card_width, card_height, viewport_width) = if short {
-        (205.0, 142.0, (window_width * 0.64).clamp(260.0, 590.0))
+        (205.0, 82.0, (window_width * 0.64).clamp(260.0, 590.0))
     } else if portrait {
         (
             (window_width * 0.72).clamp(220.0, 340.0),
@@ -712,10 +889,20 @@ fn build_menu(
                 flex_direction: FlexDirection::Column,
                 align_items: AlignItems::Center,
                 justify_content: JustifyContent::SpaceBetween,
-                padding: UiRect::axes(
-                    px(if short { 8.0 } else { 12.0 }),
-                    px(if short { 5.0 } else { 12.0 }),
-                ),
+                // Reserve the bottom activation lane on non-short layouts;
+                // short landscape uses audited absolute product/DRIVE lanes.
+                padding: UiRect {
+                    left: px(if short { 8.0 } else { 12.0 }),
+                    right: px(if short { 8.0 } else { 12.0 }),
+                    top: px(if short { 5.0 } else { 12.0 }),
+                    bottom: px(if short {
+                        5.0
+                    } else if portrait {
+                        130.0
+                    } else {
+                        76.0
+                    }),
+                },
                 ..default()
             },
             GlobalZIndex(2),
@@ -827,6 +1014,12 @@ fn build_menu(
                 } else {
                     Display::None
                 },
+                position_type: if short {
+                    PositionType::Absolute
+                } else {
+                    PositionType::Relative
+                },
+                top: if short { px(160.0) } else { Val::Auto },
                 flex_direction: FlexDirection::Column,
                 align_items: AlignItems::Center,
                 row_gap: px(if short { 3.0 } else { 8.0 }),
@@ -914,6 +1107,16 @@ fn build_menu(
             let selected_color = selected.color();
             let manual_visible = focus.product().0 == Competition::Casual;
             root.spawn(Node {
+                position_type: if short {
+                    PositionType::Absolute
+                } else {
+                    PositionType::Relative
+                },
+                top: if short {
+                    px(SHORT_PRODUCT_GRID_TOP - 13.0)
+                } else {
+                    Val::Auto
+                },
                 flex_direction: FlexDirection::Column,
                 align_items: AlignItems::Center,
                 row_gap: px(if short { 2.0 } else { 6.0 }),
@@ -1021,15 +1224,10 @@ fn build_menu(
                                     params2: Vec4::new(reduced, 0.0, 0.0, 0.0),
                                 })),
                             ));
-                            if enabled {
-                                cell_entity
-                                    .insert((Button, MenuAction::Product(competition, conduct)));
-                            } else {
-                                // A disabled cell has no Button, action, or hit
-                                // target. Mouse and touch cannot even dispatch a
-                                // selection attempt to it.
-                                cell_entity.insert(Pickable::IGNORE);
-                            }
+                            // Even unavailable Ranked products remain selectable
+                            // so the explicit action control can explain its
+                            // disabled state. Cells themselves never activate.
+                            cell_entity.insert((Button, MenuAction::Product(competition, conduct)));
                             cell_entity.with_children(|cell| {
                                 cell.spawn((
                                     Text::new(if enabled {
@@ -1057,22 +1255,25 @@ fn build_menu(
                             });
                         }
                     });
-                bottom.spawn((
-                    Text::new(if ranked.ranked_available() {
-                        "RANKED ADMITTED · EXACT v3 TUPLE + ORDERED CATEGORIES VERIFIED".to_string()
-                    } else {
-                        format!(
-                            "RANKED DISABLED · {} · CHOOSE A CASUAL CELL",
-                            ranked.message
-                        )
-                    }),
-                    font(if short { 8.0 } else { 10.0 }),
-                    TextColor(if ranked.ranked_available() {
-                        yellow()
-                    } else {
-                        dim()
-                    }),
-                ));
+                if !short {
+                    bottom.spawn((
+                        Text::new(if ranked.ranked_available() {
+                            "RANKED ADMITTED · EXACT v3 TUPLE + ORDERED CATEGORIES VERIFIED"
+                                .to_string()
+                        } else {
+                            format!(
+                                "RANKED DISABLED · {} · CHOOSE A CASUAL CELL",
+                                ranked.message
+                            )
+                        }),
+                        font(10.0),
+                        TextColor(if ranked.ranked_available() {
+                            yellow()
+                        } else {
+                            dim()
+                        }),
+                    ));
+                }
                 if !short {
                     bottom.spawn((
                         TipText,
@@ -1081,6 +1282,63 @@ fn build_menu(
                         TextColor(dim()),
                     ));
                 }
+            });
+
+            // Exactly one activation target exists at every responsive size.
+            // It is absolute in short landscape so product/status reflow can
+            // never move it away from the audited touch rectangle.
+            let drive = drive_rect(layout, window_width, window_height);
+            let presentation = drive_presentation(focus, ranked);
+            let drive_color = if presentation.enabled() {
+                selected_color
+            } else {
+                dim()
+            };
+            root.spawn((
+                DriveHint,
+                GlowAnimation::default(),
+                Button,
+                MenuAction::Drive,
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: px(drive.left),
+                    top: px(drive.top),
+                    width: px(drive.width),
+                    height: px(drive.height),
+                    border: UiRect::all(px(2.0)),
+                    border_radius: BorderRadius::all(px(10.0)),
+                    align_items: AlignItems::Center,
+                    justify_content: JustifyContent::Center,
+                    ..default()
+                },
+                BorderColor::all(if presentation.enabled() {
+                    yellow()
+                } else {
+                    dim().with_alpha(0.65)
+                }),
+                MaterialNode(glow_materials.add(GlowButtonMaterial {
+                    color_fill: to_vec4(drive_color),
+                    color_glow: to_vec4(drive_color),
+                    params: Vec4::new(
+                        0.0,
+                        if presentation.enabled() { 0.60 } else { 0.0 },
+                        0.25,
+                        0.0,
+                    ),
+                    params2: Vec4::new(reduced, 0.0, 0.0, 0.0),
+                })),
+            ))
+            .with_children(|button| {
+                button.spawn((
+                    DriveLabel,
+                    Text::new(presentation.label()),
+                    font(if short { 17.0 } else { 21.0 }),
+                    TextColor(if presentation.enabled() {
+                        ink()
+                    } else {
+                        text()
+                    }),
+                ));
             });
         });
 }
@@ -1156,6 +1414,7 @@ fn spawn_condition_card(
                 ));
             });
             card.spawn(Node {
+                display: if short { Display::None } else { Display::Flex },
                 flex_direction: FlexDirection::Column,
                 align_items: AlignItems::Center,
                 row_gap: px(4.0),
@@ -1209,15 +1468,13 @@ fn animate_menu_geometry(
     settings: Res<Settings>,
     selected: Res<SelectedModifier>,
     metrics: Res<MenuMetrics>,
-    layout: Res<MenuLayout>,
     built_at: Res<MenuBuiltAt>,
     mut tips: ResMut<TipState>,
     mut rows: Query<(&mut CarouselRow, &mut Node), Without<ConditionCard>>,
     mut cards: Query<(&ConditionCard, &mut Node, &MaterialNode<MenuCardMaterial>)>,
     mut dots: Query<(&CarouselDot, &mut BackgroundColor), Without<ConditionCard>>,
     mut letters: Query<(&TitleLetter, &mut Node), (Without<ConditionCard>, Without<CarouselRow>)>,
-    mut tip_text: Query<(&mut Text, &mut TextColor), (With<TipText>, Without<DriveHint>)>,
-    mut drive_hints: Query<&mut Text, (With<DriveHint>, Without<TipText>)>,
+    mut tip_text: Query<(&mut Text, &mut TextColor), With<TipText>>,
     mut card_materials: ResMut<Assets<MenuCardMaterial>>,
 ) {
     let now = time.elapsed_secs();
@@ -1246,18 +1503,6 @@ fn animate_menu_geometry(
                 f32::from(settings.reduced_motion),
             );
         }
-    }
-    let drive_label = format!(
-        "{} - {}",
-        selected.0.display_name().to_uppercase(),
-        if *layout == MenuLayout::Portrait {
-            "TAP"
-        } else {
-            "ENTER / SPACE"
-        }
-    );
-    for mut hint in &mut drive_hints {
-        hint.0.clone_from(&drive_label);
     }
     for (dot, mut background) in &mut dots {
         background.0 = if dot.0 == selected_index {
@@ -1304,6 +1549,7 @@ fn animate_menu_materials(
     time: Res<Time>,
     settings: Res<Settings>,
     selected: Res<SelectedModifier>,
+    focus: Res<ProductFocus>,
     ranked: Res<RankedV3Client>,
     stripes: Query<&MaterialNode<HazardStripeMaterial>>,
     vignettes: Query<&MaterialNode<VignetteMaterial>>,
@@ -1313,6 +1559,7 @@ fn animate_menu_materials(
         &MenuAction,
         &mut GlowAnimation,
     )>,
+    mut drive_labels: Query<(&mut Text, &mut TextColor), With<DriveLabel>>,
     mut stripe_materials: ResMut<Assets<HazardStripeMaterial>>,
     mut vignette_materials: ResMut<Assets<VignetteMaterial>>,
     mut glow_materials: ResMut<Assets<GlowButtonMaterial>>,
@@ -1336,9 +1583,21 @@ fn animate_menu_materials(
             material.params.w = f32::from(settings.reduced_motion);
         }
     }
+    let presentation = drive_presentation(*focus, &ranked);
+    for (mut label, mut color) in &mut drive_labels {
+        label.0 = presentation.label().into();
+        color.0 = if presentation.enabled() {
+            ink()
+        } else {
+            text()
+        };
+    }
     for (handle, interaction, action, mut animation) in &mut glows {
-        let enabled = !matches!(action, MenuAction::Product(Competition::Ranked, _))
-            || ranked.ranked_available();
+        let enabled = match action {
+            MenuAction::Drive => presentation.enabled(),
+            MenuAction::Product(Competition::Ranked, _) => ranked.ranked_available(),
+            _ => true,
+        };
         let target = if !enabled {
             0.0
         } else {
@@ -1428,5 +1687,73 @@ mod tests {
             assert_eq!(medal_for(kind, silver), Medal::Silver);
             assert_eq!(medal_for(kind, gold), Medal::Gold);
         }
+    }
+
+    #[test]
+    fn product_actions_only_select_and_drive_is_the_only_activation_action() {
+        let mut focus = ProductFocus::default();
+        let product = MenuAction::Product(Competition::Casual, Conduct::RightOfWay);
+        assert_eq!(resolve_activation_action(product, &mut focus), None);
+        assert_eq!(focus.product(), (Competition::Casual, Conduct::RightOfWay));
+        // A second product activation remains selection-only.
+        assert_eq!(resolve_activation_action(product, &mut focus), None);
+        assert_eq!(
+            resolve_activation_action(MenuAction::Drive, &mut focus),
+            Some((Competition::Casual, Conduct::RightOfWay))
+        );
+    }
+
+    #[test]
+    fn drive_labels_follow_casual_ranked_disabled_and_connecting_states() {
+        let casual = ProductFocus::default();
+        let mut ranked_focus = casual;
+        ranked_focus.index = 0;
+        let mut ranked = RankedV3Client::default();
+        assert_eq!(
+            drive_presentation(casual, &ranked),
+            DrivePresentation::Drive
+        );
+        assert_eq!(
+            drive_presentation(ranked_focus, &ranked),
+            DrivePresentation::RankedUnavailable
+        );
+        ranked.phase = RankedV3Phase::Starting;
+        assert_eq!(
+            drive_presentation(ranked_focus, &ranked),
+            DrivePresentation::Connecting
+        );
+        assert!(!DrivePresentation::Connecting.enabled());
+        assert!(!DrivePresentation::RankedUnavailable.enabled());
+    }
+
+    #[test]
+    fn short_landscape_drive_geometry_is_single_clear_stable_target() {
+        let drive = drive_rect(MenuLayout::ShortLandscape, 844.0, 390.0);
+        let products = short_product_grid_rect(844.0);
+        let settings = MenuRect {
+            left: 844.0 - 12.0 - 104.0,
+            top: 10.0,
+            width: 104.0,
+            height: 34.0,
+        };
+        assert!(drive.contains(Vec2::new(422.0, 340.0)));
+        assert_eq!(
+            drive,
+            MenuRect {
+                left: 300.0,
+                top: 330.0,
+                width: 244.0,
+                height: 36.0,
+            }
+        );
+        assert!(products.bottom() <= 326.0);
+        assert!(!drive.overlaps(products));
+        assert!(!drive.overlaps(settings));
+        assert!(drive.bottom() <= 366.0);
+        assert_eq!(
+            short_product_at(Vec2::new(548.0, 309.0), 844.0),
+            Some((Competition::Casual, Conduct::RightOfWay))
+        );
+        assert_eq!(short_product_at(Vec2::new(422.0, 340.0), 844.0), None);
     }
 }

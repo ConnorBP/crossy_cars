@@ -264,11 +264,24 @@ def main() -> int:
 
             shot("00_mobile_menu.png")
 
-            # Tap the explicit DRIVE button; generic Menu touches only select/swipe.
+            # Regression: an already-focused product remains selection-only on
+            # the second tap. Select Casual Right Of Way twice, then prove the
+            # menu is still alive by opening Settings and changing Volume. Only
+            # the separate, stable DRIVE target may start the selected product.
+            page.touchscreen.tap(548, 309)
+            page.wait_for_timeout(220)
+            page.touchscreen.tap(548, 309)
+            page.wait_for_timeout(220)
+            settings_volume_minus(
+                "v2:90:0:0:",
+                "two product taps must remain selection-only before DRIVE",
+            )
+            summary["two_product_tap_then_drive"] = "passed"
+
             page.touchscreen.tap(422, 340)
             page.wait_for_timeout(3_800)
             settings_volume_minus_must_not_change(
-                "v2:100:0:0:",
+                "v2:90:0:0:",
                 "after touch start: Playing must reject Settings adjustment",
             )
             shot("01_touch_hud.png")
@@ -344,8 +357,8 @@ def main() -> int:
             page.wait_for_timeout(500)
             shot("04_paused.png")
             settings_volume_minus(
-                "v2:90:0:0:",
-                "first pause: Paused must allow Settings volume 100 -> 90",
+                "v2:80:0:0:",
+                "first pause: Paused must allow Settings volume 90 -> 80",
             )
 
             # Left third resumes. Playing must make the identical Settings touch
@@ -353,7 +366,7 @@ def main() -> int:
             page.touchscreen.tap(100, 195)
             page.wait_for_timeout(500)
             settings_volume_minus_must_not_change(
-                "v2:90:0:0:",
+                "v2:80:0:0:",
                 "after resume: Playing must reject Settings adjustment",
             )
             shot("05_resumed.png")
@@ -366,7 +379,7 @@ def main() -> int:
             shot("06_touch_restart_countdown.png")
             page.wait_for_timeout(3_200)
             settings_volume_minus_must_not_change(
-                "v2:90:0:0:",
+                "v2:80:0:0:",
                 "after restart countdown: Playing must reject Settings adjustment",
             )
 
@@ -376,14 +389,14 @@ def main() -> int:
             page.touchscreen.tap(422, 25)
             page.wait_for_timeout(350)
             settings_volume_minus(
-                "v2:80:0:0:",
-                "second pause: Paused must allow Settings volume 90 -> 80",
+                "v2:70:0:0:",
+                "second pause: Paused must allow Settings volume 80 -> 70",
             )
             page.touchscreen.tap(760, 195)
             page.wait_for_timeout(700)
             settings_volume_minus(
-                "v2:70:0:0:",
-                "right-third return: Menu must allow Settings volume 80 -> 70",
+                "v2:60:0:0:",
+                "right-third return: Menu must allow Settings volume 70 -> 60",
             )
             shot("07_touch_menu.png")
 
@@ -395,7 +408,7 @@ def main() -> int:
             page.touchscreen.tap(422, 340)
             page.wait_for_timeout(3_800)
             settings_volume_minus_must_not_change(
-                "v2:70:0:0:",
+                "v2:60:0:0:",
                 "menu proof: DRIVE touch must start Playing, not leave Paused/Menu",
             )
             page.wait_for_timeout(300)
