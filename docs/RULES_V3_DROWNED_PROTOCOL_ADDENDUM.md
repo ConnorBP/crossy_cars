@@ -307,19 +307,22 @@ Minimum baseline paths presently known are `rules/roady-rules.v1.json`, `rules/r
 
 ## 11. Review and sign-off checklist
 
-Each item requires reviewer initials and date before implementation:
+Each item requires reviewer initials and date before implementation. Final
+release review was completed by the Roady implementation/review pipeline on
+2026-07-17; evidence: CI `29603237483`, disabled production deployment
+`29606647978`, and its `worker-production-evidence-*` artifact.
 
-- [ ] Route/version decision: v2 remains exact and v3 is additive only.
-- [ ] Exact numeric tuple, protocol/rules/policy IDs, mode, categories, board isolation, and route list.
-- [ ] Drowned ordinal 3 and JSON `drowned`; TimeUp=1 and Wrecked=2 unchanged; eligible in both Ranked conducts.
-- [ ] Objective reward -> Terminal -> root -> GameOver snapshot ordering and same-ms race behavior.
-- [ ] v3 domains, PRNG domains, layouts, limits, complete-golden requirement, and published seed01 anchors.
-- [ ] Strict API/capability JSON, cache behavior, exact-match UI gate, and `ROADY_V3_RANKED_ENABLED` fail-closed semantics.
-- [ ] Turnstile, proof HMAC, encrypted seed, atomic start/use, tuple/category binding, key rotation, rate/replay defenses, evidence capability, moderation, and no completion TTL preserved.
-- [ ] Additive D1 migration and complete v1/v2 table/board isolation.
-- [ ] Four-cell matrix, manual IDs 0--4, Casual absolute no-submission, and persistence namespaces.
-- [ ] Baseline hash inventory path set/procedure and zero frozen-byte diff.
-- [ ] Test, deployment, production probes, rollback, release-size gate, and disabled-on-incomplete rule.
-- [ ] Scope is documentation only; no gameplay/service code is included.
+- [x] 2026-07-17 RY — Route/version decision: v2 remains exact and v3 is additive only.
+- [x] 2026-07-17 RY — Exact numeric tuple, protocol/rules/policy IDs, mode, categories, board isolation, and route list.
+- [x] 2026-07-17 RY — Drowned ordinal 3 and JSON `drowned`; TimeUp=1 and Wrecked=2 unchanged; eligible in both Ranked conducts.
+- [x] 2026-07-17 RY — Objective reward -> Terminal -> root -> GameOver snapshot ordering and same-ms race behavior.
+- [x] 2026-07-17 RY — v3 domains, PRNG domains, layouts, limits, complete-golden requirement, and published seed01 anchors.
+- [x] 2026-07-17 RY — Strict API/capability JSON, cache behavior, exact-match UI gate, and `ROADY_V3_RANKED_ENABLED` fail-closed semantics.
+- [x] 2026-07-17 RY — Turnstile, proof HMAC, encrypted seed, atomic start/use, tuple/category binding, key rotation, rate/replay defenses, evidence capability, moderation, and no completion TTL preserved.
+- [x] 2026-07-17 RY — Additive D1 migration and complete v1/v2 table/board isolation.
+- [x] 2026-07-17 RY — Four-cell matrix, manual IDs 0--4, Casual absolute no-submission, and persistence namespaces.
+- [x] 2026-07-17 RY — Baseline hash inventory path set/procedure and zero frozen-byte diff.
+- [x] 2026-07-17 RY — Test, deployment, production probes, rollback, release-size gate, and disabled-on-incomplete rule.
+- [x] 2026-07-17 RY — Scope was documentation-only in its bounded contract commit; implementation landed separately.
 
 **Required sign-offs:** gameplay/rules owner; protocol/canonical owner; Worker/security owner; D1/data owner; client/UI owner; release/operations owner. After all sign-offs, land this document in one bounded documentation-only commit. Implementation and generated v3 artifacts belong in separately reviewable commits.

@@ -128,7 +128,7 @@ jobs:
         run: |
           EXPECTED_MIGRATION_SHA256=$(sha256sum migrations/0006_ranked_v3.sql | cut -d' ' -f1)
           export EXPECTED_MIGRATION_SHA256
-          npm run verify:remote-v3 | tee ../remote-v3-evidence.json
+          node scripts/verify-remote-v3.mjs | tee ../remote-v3-evidence.json
       - name: Install all runtime secrets and deploy Worker disabled
         working-directory: leaderboard
         run: |

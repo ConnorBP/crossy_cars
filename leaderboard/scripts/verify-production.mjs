@@ -17,6 +17,7 @@ const expected = {
   policyId: "roady-ranked-policy.v3.1",
   mode: "rotation",
 };
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const get = async (path) => fetch(`${base}${path}`, {
   cache: "no-store",
   headers: {
@@ -26,11 +27,23 @@ const get = async (path) => fetch(`${base}${path}`, {
   },
 });
 
-const health = await get("/healthz");
-assert.equal(health.status, 200, "legacy health probe failed");
-const healthBody = await health.json();
-assert.equal(healthBody.ok, true);
-if (expectedSha) assert.equal(healthBody.build, expectedSha, "deployed Worker commit SHA mismatch");
+let health;
+let healthBody;
+for (let attempt = 1; attempt <= 12; attempt += 1) {
+  health = await get("/healthz");
+  assert.equal(health.status, 200, "legacy health probe failed");
+  healthBody = await health.json();
+  assert.equal(healthBody.ok, true);
+  if (!expectedSha || healthBody.build === expectedSha) break;
+  if (attempt === 12) assert.equal(healthBody.build, expectedSha, "deployed Worker commit SHA mismatch after propagation retries");
+  await sleep(attempt * 1000);
+}
+// v2 never exposed a capabilities route. Freeze that absence so v3 rollout
+// cannot silently repurpose a v2 URL.
+const v2Capability = await get("/v2/capabilities");
+assert.equal(v2Capability.status, 404, "v2 capabilities route unexpectedly changed");
+const v2Body = await v2Capability.json();
+assert.equal(v2Body.error?.code, "not_found", "v2 absence body changed");
 const board = await get("/v1/leaderboard?limit=1");
 assert.equal(board.status, 200, "legacy board probe failed");
 assert.ok(Array.isArray((await board.json()).entries), "legacy board entries missing");
