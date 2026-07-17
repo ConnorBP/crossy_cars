@@ -50,8 +50,11 @@ use crate::game::SpawnSet;
 use crate::game::events::CoinCollected;
 use crate::game::resources::{Drowning, RoundActive, Score, TimeLeft};
 use crate::game::state::GameState;
+use crate::game_modes::{ActivePlayClock, ActiveRunRules, Conduct};
+use crate::ledger::{CanonicalEventQueue, PendingCanonicalEvent};
 use crate::modifiers::{ActiveModifier, ModifierKind};
 use crate::palette;
+use crate::right_of_way::{RightOfWayRun, award_coin};
 use crate::shaders::{WaterFamilyPreset, WaterMaterial};
 use crate::textures::{GROUND_VARIANTS, TextureAssets};
 use crate::toy_shading::ImportedWorldVisual;
@@ -5519,6 +5522,10 @@ fn collect_coins(
     input_frozen: Res<InputFrozen>,
     drowning: Res<Drowning>,
     mut coin_events: MessageWriter<CoinCollected>,
+    rules: Option<Res<ActiveRunRules>>,
+    clock: Option<Res<ActivePlayClock>>,
+    mut right_of_way: Option<ResMut<RightOfWayRun>>,
+    mut canonical_queue: Option<ResMut<CanonicalEventQueue>>,
 ) {
     // Fresh blocks are spawned during the countdown. Waiting until input is
     // released avoids collecting anything before the round visibly begins.
@@ -5539,9 +5546,41 @@ fn collect_coins(
         }
         if car_t.translation.distance(coin_t.translation()) < 1.2 {
             commands.entity(e).despawn();
-            score.coins += roady_score_rules::COIN_SCORE_AWARD;
-            timeleft.0 = coin_time_after_collect(timeleft.0);
-            coin_events.write(CoinCollected);
+            if rules
+                .as_ref()
+                .is_some_and(|rules| rules.conduct == Conduct::RightOfWay)
+            {
+                if let Some(run) = right_of_way.as_mut() {
+                    if let Some((award, remaining_before, remaining_after, premium_bps, guilt)) =
+                        award_coin(run, &mut timeleft)
+                    {
+                        if let (Some(clock), Some(queue)) =
+                            (clock.as_ref(), canonical_queue.as_mut())
+                        {
+                            queue.push(PendingCanonicalEvent {
+                                active_ms: clock.milliseconds(),
+                                stable_id: u64::from(run.score.coins_collected),
+                                payload:
+                                    roady_score_rules::v3::canonical::EventPayload::CoinAward {
+                                        base: award.base,
+                                        premium_bps,
+                                        guilt,
+                                        credited: award.credited,
+                                        accumulator_before: award.before,
+                                        accumulator_after: award.after,
+                                        remaining_before_ms: remaining_before,
+                                        remaining_after_ms: remaining_after,
+                                    },
+                            });
+                        }
+                        coin_events.write(CoinCollected);
+                    }
+                }
+            } else {
+                score.coins += roady_score_rules::COIN_SCORE_AWARD;
+                timeleft.0 = coin_time_after_collect(timeleft.0);
+                coin_events.write(CoinCollected);
+            }
         }
     }
 }

@@ -8,6 +8,7 @@ use bevy::{
 };
 
 use crate::game::{RestartRequested, settings_closed, state::GameState};
+use crate::game_modes::{Conduct, SelectedGameMode};
 use crate::modifiers::{ModifierKind, SelectedModifier};
 use crate::persist::{BestScore, ConditionBests, Medal, medal_for};
 use crate::settings::Settings;
@@ -246,6 +247,7 @@ fn cycle_selection(selected: &mut SelectedModifier, delta: i32) {
 fn menu_keyboard(
     keys: Res<ButtonInput<KeyCode>>,
     mut selected: ResMut<SelectedModifier>,
+    mut mode: ResMut<SelectedGameMode>,
     mut restart: ResMut<RestartRequested>,
     mut next: ResMut<NextState<GameState>>,
 ) {
@@ -254,6 +256,14 @@ fn menu_keyboard(
     }
     if keys.any_just_pressed([KeyCode::ArrowRight, KeyCode::KeyD]) {
         cycle_selection(&mut selected, 1);
+    }
+    // Compact keyboard conduct selector until the four-cell capability-gated
+    // menu lands. Casual remains the default and performs no network work.
+    if keys.just_pressed(KeyCode::KeyC) {
+        mode.conduct = match mode.conduct {
+            Conduct::CluckHunt => Conduct::RightOfWay,
+            Conduct::RightOfWay => Conduct::CluckHunt,
+        };
     }
     if keys.any_just_pressed([KeyCode::Enter, KeyCode::Space]) {
         restart.0 = false;

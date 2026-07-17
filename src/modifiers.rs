@@ -9,6 +9,8 @@ use bevy::prelude::*;
 use crate::game::SpawnSet;
 use crate::game::resources::RoundActive;
 use crate::game::state::GameState;
+use crate::game_modes::{ActiveRunRules, GameModeSetupSet, RunCondition};
+use crate::rotation::RotationState;
 
 /// The rule set applied to a round.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -201,7 +203,7 @@ impl Plugin for ModifiersPlugin {
             // set has completed.
             .add_systems(
                 OnEnter(GameState::Playing),
-                select_modifier.before(SpawnSet),
+                select_modifier.after(GameModeSetupSet).before(SpawnSet),
             );
     }
 }
@@ -211,10 +213,34 @@ impl Plugin for ModifiersPlugin {
 fn select_modifier(
     round_active: Res<RoundActive>,
     selected: Res<SelectedModifier>,
+    rules: Option<Res<ActiveRunRules>>,
+    rotation: Option<Res<RotationState>>,
     mut active: ResMut<ActiveModifier>,
 ) {
-    if let Some(kind) = fresh_round_selection(round_active.0, selected.0) {
+    if round_active.0 {
+        return;
+    }
+    if let Some(rules) = rules {
+        active.0 = match &rules.condition {
+            RunCondition::Casual(condition) => (*condition).into(),
+            RunCondition::Ranked(_) => rotation
+                .as_ref()
+                .and_then(|rotation| rotation.effect_at(0))
+                .map(effect_modifier)
+                .unwrap_or(ModifierKind::Standard),
+        };
+    } else if let Some(kind) = fresh_round_selection(false, selected.0) {
         active.0 = kind;
+    }
+}
+
+pub(crate) const fn effect_modifier(effect: roady_score_rules::v3::Effect) -> ModifierKind {
+    match effect {
+        roady_score_rules::v3::Effect::Standard => ModifierKind::Standard,
+        roady_score_rules::v3::Effect::RushHour => ModifierKind::RushHour,
+        roady_score_rules::v3::Effect::ChickenFrenzy => ModifierKind::ChickenFrenzy,
+        roady_score_rules::v3::Effect::Stampede => ModifierKind::Stampede,
+        roady_score_rules::v3::Effect::GlassCannon => ModifierKind::GlassCannon,
     }
 }
 

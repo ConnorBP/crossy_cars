@@ -5,10 +5,15 @@ pub mod state;
 use bevy::prelude::*;
 
 use crate::car::{Car, DriftLatch, InputFrozen};
+use crate::combos::Combo;
 use crate::game::events::{ChickenHit, CoinCollected, ObstacleHit, PondEntered};
 use crate::game::resources::{Drowning, GameConfig, GameOverReason, RoundActive, Score, TimeLeft};
 use crate::game::state::GameState;
+use crate::game_modes::{ActivePlayClock, ActiveRunRules};
+use crate::ledger::{V3LedgerState, finalize_terminal};
+use crate::objectives::ActiveObjective;
 use crate::persist::{BestAtRoundStart, BestScore, ConditionBests, ConditionBestsAtRoundStart};
+use crate::right_of_way::RightOfWayRun;
 use crate::settings::SettingsOpen;
 
 /// Set while a paused run is being routed through Menu for a safe restart.
@@ -132,6 +137,10 @@ pub(crate) struct KeyboardStateSet;
 #[derive(SystemSet, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct RoundClockSet;
 
+/// Same-frame terminal finalization after objective processing.
+#[derive(SystemSet, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct TerminalFinalizeSet;
+
 pub struct GamePlugin;
 
 impl Plugin for GamePlugin {
@@ -145,6 +154,8 @@ impl Plugin for GamePlugin {
             .init_resource::<InputFrozen>()
             .init_resource::<GameOverReason>()
             .init_resource::<RestartRequested>()
+            // Competition/conduct runtime is registered by GameModesPlugin;
+            // optional consumers below keep focused legacy harnesses valid.
             .add_message::<ChickenHit>()
             .add_message::<CoinCollected>()
             .add_message::<ObstacleHit>()
@@ -286,6 +297,45 @@ fn tick_timeleft(
         t.0 = 0.0;
         *reason = GameOverReason::TimeUp;
         next.set(GameState::GameOver);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn finalize_pending_terminal(
+    next: Res<NextState<GameState>>,
+    rules: Option<Res<ActiveRunRules>>,
+    clock: Option<Res<ActivePlayClock>>,
+    reason: Res<GameOverReason>,
+    score: Res<Score>,
+    timeleft: Res<TimeLeft>,
+    objective: Option<Res<ActiveObjective>>,
+    combo: Option<Res<Combo>>,
+    right_of_way: Option<Res<RightOfWayRun>>,
+    ledger: Option<ResMut<V3LedgerState>>,
+) {
+    if !matches!(
+        &*next,
+        NextState::Pending(GameState::GameOver) | NextState::PendingIfNeq(GameState::GameOver)
+    ) {
+        return;
+    }
+    let (Some(rules), Some(clock), Some(objective), Some(combo), Some(mut ledger)) =
+        (rules, clock, objective, combo, ledger)
+    else {
+        return;
+    };
+    if let Err(error) = finalize_terminal(
+        &rules,
+        &clock,
+        *reason,
+        &score,
+        &timeleft,
+        &objective,
+        &combo,
+        right_of_way.as_deref(),
+        &mut ledger,
+    ) {
+        ledger.failure = Some(error);
     }
 }
 

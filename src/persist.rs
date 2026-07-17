@@ -292,7 +292,7 @@ fn flush_pending_best_write(
 /// cannot create records.
 fn persist_best_on_round_end(
     score: Res<Score>,
-    reason: Res<crate::game::resources::GameOverReason>,
+    _reason: Res<crate::game::resources::GameOverReason>,
     active: Res<ActiveModifier>,
     mut best: ResMut<BestScore>,
     mut conditions: ResMut<ConditionBests>,
@@ -300,11 +300,8 @@ fn persist_best_on_round_end(
     mut persisted_best: ResMut<PersistedBest>,
     mut persisted_conditions: ResMut<PersistedConditionBests>,
 ) {
-    // Local pond outcomes are explicitly ineligible for records just as they
-    // are ineligible for leaderboard submission.
-    if *reason == crate::game::resources::GameOverReason::Drowned {
-        return;
-    }
+    // Every terminal outcome, including Drowned, is a completed local run.
+    // Network eligibility is separately owned by the competition runtime.
     // Preserve an earlier failed completed-round result when a player starts
     // another round directly from Game Over. A later terminal score can only
     // add to that pending snapshot, never replace it with a lower record.

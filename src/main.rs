@@ -9,8 +9,10 @@ mod difficulty;
 mod drowned;
 mod effects;
 mod game;
+mod game_modes;
 mod health;
 mod leaderboard;
+mod ledger;
 mod menu;
 mod microtexture_review;
 mod minimap;
@@ -21,6 +23,8 @@ mod pbr_detail_constants;
 mod persist;
 mod pickups;
 mod readiness;
+mod right_of_way;
+mod rotation;
 mod round_intro;
 mod run_events;
 mod settings;
@@ -48,8 +52,10 @@ use difficulty::DifficultyPlugin;
 use drowned::DrownedPlugin;
 use effects::EffectsPlugin;
 use game::GamePlugin;
+use game_modes::GameModesPlugin;
 use health::HealthPlugin;
 use leaderboard::LeaderboardPlugin;
+use ledger::LedgerPlugin;
 use menu::MenuPlugin;
 use microtexture_review::MicrotextureReviewPlugin;
 use minimap::MinimapPlugin;
@@ -58,6 +64,8 @@ use objectives::ObjectivesPlugin;
 use persist::PersistPlugin;
 use pickups::PickupsPlugin;
 use readiness::ReadinessPlugin;
+use right_of_way::RightOfWayPlugin;
+use rotation::RotationPlugin;
 use round_intro::RoundIntroPlugin;
 use run_events::RunEventsPlugin;
 use settings::SettingsPlugin;
@@ -259,6 +267,10 @@ fn main() {
         .add_plugins(SettingsPlugin)
         .add_plugins((
             GamePlugin,
+            GameModesPlugin,
+            RotationPlugin,
+            RightOfWayPlugin,
+            LedgerPlugin,
             CameraPlugin,
             CarPlugin,
             WaterMaterialPlugin,

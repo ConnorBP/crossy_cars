@@ -45,6 +45,7 @@ use crate::game::SpawnSet;
 use crate::game::TouchStateSet;
 use crate::game::resources::{RoundActive, not_drowning};
 use crate::game::state::GameState;
+use crate::game_modes::ActivePlayClock;
 use crate::modifiers::ActiveModifier;
 use crate::pbr_detail_constants::{
     TRAFFIC_PAINT_ALBEDO_LINEAR_MEAN, TRAFFIC_PAINT_ROUGHNESS_LINEAR_MEAN,
@@ -557,13 +558,17 @@ impl Plugin for DifficultyPlugin {
 /// `tick_timeleft`). Runs only while `Playing`.
 fn tick_difficulty(
     mut difficulty: ResMut<Difficulty>,
+    clock: Option<Res<ActivePlayClock>>,
     time: Res<Time>,
     input_frozen: Res<InputFrozen>,
 ) {
-    if input_frozen.0 {
-        return;
+    // v3 uses the shared integer active-play clock. Lightweight legacy test
+    // harnesses without that resource retain the exact classic float path.
+    if let Some(clock) = clock {
+        difficulty.elapsed = clock.milliseconds() as f32 / 1_000.0;
+    } else if !input_frozen.0 {
+        difficulty.elapsed += time.delta_secs();
     }
-    difficulty.elapsed += time.delta_secs();
     difficulty.level = ((difficulty.elapsed / LEVEL_SECONDS) as u32).min(MAX_LEVEL);
 }
 

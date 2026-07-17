@@ -10,6 +10,7 @@ use crate::game::events::{ChickenHit, CoinCollected};
 use crate::game::resources::GameConfig;
 use crate::game::state::GameState;
 use crate::objectives::ObjectiveCompleted;
+use crate::right_of_way::{CourtesyAwarded, PackageDelivered, PackagePickedUp};
 use crate::settings::Settings;
 
 /// Handles for every sound effect plus the looping engine + ambient sources.
@@ -91,6 +92,7 @@ impl Plugin for AudioPlugin {
                     play_coin,
                     play_positive,
                     play_penalty,
+                    play_right_of_way,
                     // Settings is the single source of truth. M writes it and
                     // this bridge applies it before dynamic engine updates.
                     (toggle_mute, apply_audio_settings, sync_new_audio_sinks)
@@ -298,6 +300,24 @@ fn play_positive(
 /// one-shot with `AudioBaseGain` so master volume changes apply cleanly.
 /// This `MessageReader` is independent; consuming the message here does not
 /// affect any other `CritterHit` reader.
+fn play_right_of_way(
+    mut pickups: MessageReader<PackagePickedUp>,
+    mut deliveries: MessageReader<PackageDelivered>,
+    mut courtesy: MessageReader<CourtesyAwarded>,
+    mut commands: Commands,
+    handles: Res<AudioHandles>,
+) {
+    let count = pickups.read().count() + deliveries.read().count() + courtesy.read().count();
+    for _ in 0..count {
+        let gain = bounded_cue_gain(POSITIVE_CUE_VOLUME);
+        commands.spawn((
+            AudioPlayer::new(handles.positive.clone()),
+            PlaybackSettings::DESPAWN.with_volume(Volume::Linear(gain)),
+            AudioBaseGain(gain),
+        ));
+    }
+}
+
 fn play_penalty(
     mut events: MessageReader<CritterHit>,
     mut commands: Commands,

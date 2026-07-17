@@ -21,6 +21,7 @@ use crate::car::Car;
 use crate::chickens::Chicken;
 use crate::game::TouchStateSet;
 use crate::game::state::GameState;
+use crate::right_of_way::{DeliveryTarget, PackagePickup};
 use crate::touch::{
     TOUCH_MINIMAP_OUTER_SIZE, TOUCH_MINIMAP_RIGHT, TOUCH_MINIMAP_TOP, TouchControlsActive,
     is_touch_portrait, touch_minimap_bounds,
@@ -210,6 +211,8 @@ enum DotKind {
     Chicken,
     Car,
     Obstacle,
+    Package,
+    Delivery,
 }
 
 /// Complete, reusable visual style for a pooled dot.
@@ -464,6 +467,8 @@ fn update_minimap(
     coins: Query<&GlobalTransform, With<Coin>>,
     chickens: Query<&GlobalTransform, With<Chicken>>,
     obstacles: Query<&GlobalTransform, With<Collider>>,
+    packages: Query<&GlobalTransform, With<PackagePickup>>,
+    deliveries: Query<&GlobalTransform, With<DeliveryTarget>>,
     mut dots: Query<(
         &mut Node,
         &mut BackgroundColor,
@@ -511,6 +516,26 @@ fn update_minimap(
         sin_h,
         cos_h,
         DotKind::Chicken,
+        &mut plots,
+        max_plots,
+        layout,
+    );
+    collect_plots(
+        deliveries.iter(),
+        car_pos,
+        sin_h,
+        cos_h,
+        DotKind::Delivery,
+        &mut plots,
+        max_plots,
+        layout,
+    );
+    collect_plots(
+        packages.iter(),
+        car_pos,
+        sin_h,
+        cos_h,
+        DotKind::Package,
         &mut plots,
         max_plots,
         layout,
@@ -668,6 +693,22 @@ fn dot_style(kind: DotKind, compact: bool) -> DotStyle {
             if compact { 1.0 } else { 2.0 },
             Color::srgb(0.38, 0.62, 0.82),
             Color::srgb(0.04, 0.08, 0.13),
+        ),
+        // Package and destination are intentionally distinct in both shape
+        // and color; delivery guidance therefore remains non-color-only.
+        DotKind::Package => scaled(
+            9.0,
+            7.0,
+            1.0,
+            Color::srgb(1.0, 0.48, 0.08),
+            Color::srgb(0.25, 0.08, 0.0),
+        ),
+        DotKind::Delivery => scaled(
+            13.0,
+            13.0,
+            if compact { 1.0 } else { 2.0 },
+            Color::srgb(0.12, 1.0, 0.42),
+            Color::srgb(0.92, 1.0, 0.94),
         ),
     }
 }

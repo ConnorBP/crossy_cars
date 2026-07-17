@@ -4,12 +4,14 @@ use crate::car::Car;
 use crate::game::resources::{GameOverReason, Score, TimeLeft};
 use crate::game::state::GameState;
 use crate::game::{SpawnSet, TouchStateSet};
+use crate::game_modes::{ActiveRunRules, Conduct};
 use crate::modifiers::{ActiveModifier, ModifierKind};
 use crate::objectives::ActiveObjective;
 use crate::palette;
 use crate::persist::{
     BestAtRoundStart, ConditionBests, ConditionBestsAtRoundStart, Medal, medal_for,
 };
+use crate::right_of_way::RightOfWayRun;
 use crate::settings::Settings;
 use crate::touch::{
     TOUCH_COCKPIT_HEIGHT, TOUCH_COCKPIT_LEFT, TOUCH_COCKPIT_TOP, TOUCH_COCKPIT_WIDTH,
@@ -396,6 +398,8 @@ struct ChickensText;
 #[derive(Component)]
 struct CoinsText;
 #[derive(Component)]
+struct ConductText;
+#[derive(Component)]
 struct TimerText;
 #[derive(Component)]
 struct MenuMedalsText;
@@ -441,6 +445,7 @@ impl Plugin for UiPlugin {
                     update_score_text,
                     update_chickens_text,
                     update_coins_text,
+                    update_conduct_text,
                     update_timer_text,
                     update_hint.after(TouchStateSet),
                     update_cockpit_layout.after(TouchStateSet),
@@ -605,6 +610,8 @@ fn spawn_hud(
     active_modifier: Res<ActiveModifier>,
     touch: Res<TouchControlsActive>,
     windows: Query<&Window, With<PrimaryWindow>>,
+    rules: Option<Res<ActiveRunRules>>,
+    right_of_way: Option<Res<RightOfWayRun>>,
 ) {
     let viewport = windows
         .single()
@@ -828,6 +835,40 @@ fn spawn_hud(
                 ..default()
             },
             CockpitSecondaryInfo,
+        ));
+        // Reuse the audited cockpit panel. The compact line stays visible on
+        // touch and replaces no drive-control or status-panel real estate.
+        let conduct_copy = if rules
+            .as_ref()
+            .is_some_and(|rules| rules.conduct == Conduct::RightOfWay)
+        {
+            if let Some(run) = right_of_way.as_ref() {
+                right_of_way_hud_copy(run)
+            } else {
+                "PKG 0/3 | PREM 100% | GUILT 0.0s".into()
+            }
+        } else {
+            String::new()
+        };
+        p.spawn((
+            Text::new(conduct_copy),
+            TextFont {
+                font_size: FontSize::Px(if touch.0 { 10.0 } else { 14.0 }),
+                ..default()
+            },
+            TextColor(Color::srgb(0.30, 1.0, 0.55)),
+            Node {
+                display: if rules
+                    .as_ref()
+                    .is_some_and(|rules| rules.conduct == Conduct::RightOfWay)
+                {
+                    Display::Flex
+                } else {
+                    Display::None
+                },
+                ..default()
+            },
+            ConductText,
         ));
     });
 
@@ -1438,6 +1479,30 @@ fn update_chickens_text(score: Res<Score>, mut query: Query<&mut TextSpan, With<
 fn update_coins_text(score: Res<Score>, mut query: Query<&mut TextSpan, With<CoinsText>>) {
     for mut span in &mut query {
         **span = format!("{}", score.coins);
+    }
+}
+
+fn right_of_way_hud_copy(run: &RightOfWayRun) -> String {
+    format!(
+        "PKG {}/{} | PREM {}.{:02}% | GUILT {}.{:01}s | SCORE {}",
+        run.score.carried_packages,
+        roady_score_rules::v3::PACKAGE_CAPACITY,
+        run.score.premium_bps / 100,
+        run.score.premium_bps % 100,
+        run.score.guilt_remaining_ms / 1_000,
+        (run.score.guilt_remaining_ms % 1_000) / 100,
+        run.score.accumulator.max(0),
+    )
+}
+
+fn update_conduct_text(
+    run: Option<Res<RightOfWayRun>>,
+    mut query: Query<&mut Text, With<ConductText>>,
+) {
+    let Some(run) = run else { return };
+    let copy = right_of_way_hud_copy(&run);
+    for mut text in &mut query {
+        **text = copy.clone();
     }
 }
 

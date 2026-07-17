@@ -30,6 +30,7 @@ use crate::game::SpawnSet;
 use crate::game::events::ChickenHit;
 use crate::game::resources::{Drowning, GameConfig, Score};
 use crate::game::state::GameState;
+use crate::game_modes::{ActiveRunRules, Conduct};
 use crate::modifiers::ActiveModifier;
 use crate::run_events::{ActiveEvent, EventKind, RoundEventStarted};
 use crate::settings::Settings;
@@ -702,6 +703,7 @@ fn hit_chickens(
     car: Query<&Transform, (With<Car>, Without<Chicken>)>,
     chickens: Query<(Entity, &Transform, Option<&ChickenBurstExtra>), With<Chicken>>,
     mut score: ResMut<Score>,
+    rules: Option<Res<ActiveRunRules>>,
     mut chicken_hits: MessageWriter<ChickenHit>,
     settings: Res<Settings>,
     input_frozen: Res<InputFrozen>,
@@ -726,9 +728,17 @@ fn hit_chickens(
             commands.entity(e).despawn();
             // Keep combo handling on the single ChickenHit message; only the
             // direct award receives road-condition and run-event bonuses here.
-            score.chickens = score
-                .chickens
-                .saturating_add(chicken_score_per_hit(&modifier, &event));
+            // Right of Way turns every chicken contact into an animal
+            // penalty in its checked signed accumulator; it never leaks a
+            // classic chicken-hit point into Score.
+            if !rules
+                .as_ref()
+                .is_some_and(|rules| rules.conduct == Conduct::RightOfWay)
+            {
+                score.chickens = score
+                    .chickens
+                    .saturating_add(chicken_score_per_hit(&modifier, &event));
+            }
             chicken_hits.write(ChickenHit);
             // Consume the same random sequence either way so this visual
             // preference cannot alter replacement gameplay placement.

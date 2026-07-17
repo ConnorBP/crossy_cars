@@ -14,7 +14,9 @@ use crate::difficulty::Difficulty;
 use crate::game::resources::{RoundActive, not_drowning};
 use crate::game::state::GameState;
 use crate::game::{SpawnSet, TouchStateSet};
+use crate::game_modes::{ActivePlayClock, ActiveRunRules};
 use crate::modifiers::{ActiveModifier, ModifierKind};
+use crate::rotation::{RotationPhase, RotationState};
 use crate::touch::{
     TOUCH_EVENT_HEIGHT, TOUCH_EVENT_LEFT, TOUCH_EVENT_TOP, TOUCH_EVENT_WIDTH, TouchControlsActive,
 };
@@ -137,6 +139,15 @@ pub enum EventKind {
 }
 
 impl EventKind {
+    const fn from_v3(value: roady_score_rules::v3::ScheduledEvent) -> Self {
+        match value {
+            roady_score_rules::v3::ScheduledEvent::TrafficSurge => Self::TrafficSurge,
+            roady_score_rules::v3::ScheduledEvent::ChickenBurst => Self::ChickenBurst,
+            roady_score_rules::v3::ScheduledEvent::ComboFrenzy => Self::ComboFrenzy,
+            roady_score_rules::v3::ScheduledEvent::CritterBurst => Self::CritterBurst,
+        }
+    }
+
     /// Engine-independent stable ID from the shared scoring-rules crate.
     pub(crate) const fn rules_id(self) -> roady_score_rules::EventId {
         match self {
@@ -342,6 +353,27 @@ struct EventDurationState {
 /// Return display progress for either event window. Active windows never show
 /// zero seconds or an empty bar: their half-open end boundary becomes inactive.
 fn event_duration_state(elapsed: f32) -> Option<EventDurationState> {
+    legacy_event_duration_state(elapsed)
+}
+
+fn event_duration_state_ms(active_ms: u64) -> Option<EventDurationState> {
+    let (start, end) = if active_ms >= 15_000 && active_ms < 23_000 {
+        (15_000, 23_000)
+    } else if active_ms >= 40_000 && active_ms < 48_000 {
+        (40_000, 48_000)
+    } else {
+        return None;
+    };
+    let remaining_ms = end - active_ms;
+    Some(EventDurationState {
+        remaining_seconds: remaining_ms.div_ceil(1_000) as u32,
+        remaining_fraction: remaining_ms as f32 / (end - start) as f32,
+        filled_bar_segments: ((remaining_ms * u64::from(EVENT_BAR_SEGMENTS)).div_ceil(end - start))
+            as u8,
+    })
+}
+
+fn legacy_event_duration_state(elapsed: f32) -> Option<EventDurationState> {
     let end = if elapsed >= FIRST_EVENT_START && elapsed < FIRST_EVENT_END {
         FIRST_EVENT_END
     } else if elapsed >= SECOND_EVENT_START && elapsed < SECOND_EVENT_END {
@@ -362,24 +394,55 @@ fn event_duration_state(elapsed: f32) -> Option<EventDurationState> {
 fn event_banner_text(kind: EventKind, duration: EventDurationState, touch_active: bool) -> String {
     let filled = usize::from(duration.filled_bar_segments);
     let empty = usize::from(EVENT_BAR_SEGMENTS - duration.filled_bar_segments);
-    if touch_active {
-        format!(
-            "{}  [{}{}] {}s",
-            kind.display_name(),
-            "=".repeat(filled),
-            "-".repeat(empty),
-            duration.remaining_seconds,
-        )
+    let name = if touch_active {
+        kind.display_name()
     } else {
-        format!(
-            "{}  {}\n[{}{}] {}s remaining",
-            kind.semantic_signature(),
-            kind.display_name(),
-            "=".repeat(filled),
-            "-".repeat(empty),
-            duration.remaining_seconds,
-        )
+        kind.semantic_signature()
+    };
+    format!(
+        "{name}  [{}{}] {}s",
+        "=".repeat(filled),
+        "-".repeat(empty),
+        duration.remaining_seconds
+    )
+}
+
+fn effect_signature(effect: roady_score_rules::v3::Effect) -> &'static str {
+    use roady_score_rules::v3::Effect::*;
+    match effect {
+        RushHour => ">> TRAFFIC",
+        Stampede => "** CRITTERS",
+        GlassCannon => "!! GLASS",
+        ChickenFrenzy => "<> FRENZY",
+        Standard => "-- STANDARD",
     }
+}
+
+fn rotation_banner_row(phase: RotationPhase, now: u64) -> Option<String> {
+    let (effect, end) = match phase {
+        RotationPhase::Telegraph { index, effect } => (
+            effect,
+            roady_score_rules::v3::window_times(index as usize, effect).active_start_ms,
+        ),
+        RotationPhase::Active { index, effect } => (
+            effect,
+            roady_score_rules::v3::window_times(index as usize, effect).active_end_ms,
+        ),
+        _ => return None,
+    };
+    let remaining = end.saturating_sub(now).max(1);
+    let duration = match phase {
+        RotationPhase::Telegraph { .. } => 3_000,
+        _ => 18_000,
+    };
+    let filled = ((remaining.saturating_mul(8) + duration - 1) / duration).clamp(1, 8) as usize;
+    Some(format!(
+        "{}  [{}{}] {}s",
+        effect_signature(effect),
+        "=".repeat(filled),
+        "-".repeat(8 - filled),
+        remaining.div_ceil(1_000)
+    ))
 }
 
 /// Pure fresh-entry decision used by the setup system. A pause resume returns
@@ -443,10 +506,25 @@ impl Plugin for RunEventsPlugin {
 fn arm_event_plan(
     round_active: Res<RoundActive>,
     modifier: Res<ActiveModifier>,
+    rules: Option<Res<ActiveRunRules>>,
+    rotation: Option<Res<RotationState>>,
     mut plan: ResMut<EventPlan>,
     mut active: ResMut<ActiveEvent>,
 ) {
-    let Some((fresh_plan, cleared_event)) = fresh_event_setup(round_active.0, *modifier) else {
+    if round_active.0 {
+        return;
+    }
+    if rules.as_ref().is_some_and(|rules| rules.is_ranked()) {
+        if let Some(events) = rotation.and_then(|rotation| rotation.events) {
+            *plan = EventPlan {
+                first: EventKind::from_v3(events[0]),
+                second: EventKind::from_v3(events[1]),
+            };
+            *active = ActiveEvent(None);
+            return;
+        }
+    }
+    let Some((fresh_plan, cleared_event)) = fresh_event_setup(false, *modifier) else {
         return;
     };
     *plan = fresh_plan;
@@ -535,6 +613,9 @@ fn update_event_banner_layout(
 
 fn tick_events(
     difficulty: Res<Difficulty>,
+    clock: Option<Res<ActivePlayClock>>,
+    rules: Option<Res<ActiveRunRules>>,
+    rotation: Option<Res<RotationState>>,
     plan: Res<EventPlan>,
     touch: Res<TouchControlsActive>,
     mut active: ResMut<ActiveEvent>,
@@ -542,7 +623,19 @@ fn tick_events(
     mut roots: Query<&mut Visibility, With<EventBannerRoot>>,
     mut labels: Query<(&mut Text, &mut TextColor), With<EventBannerText>>,
 ) {
-    let next = scheduled_event(difficulty.elapsed, *plan);
+    let elapsed = clock.as_ref().map_or(difficulty.elapsed, |clock| {
+        clock.milliseconds() as f32 / 1_000.0
+    });
+    let next = if rules.as_ref().is_some_and(|rules| rules.is_ranked()) {
+        rotation
+            .as_ref()
+            .and_then(|rotation| {
+                rotation.event_at(clock.as_ref().map_or(0, |clock| clock.milliseconds()))
+            })
+            .map(EventKind::from_v3)
+    } else {
+        scheduled_event(elapsed, *plan)
+    };
     if next != active.0 {
         active.0 = next;
         if let Some(kind) = next {
@@ -557,11 +650,36 @@ fn tick_events(
             Visibility::Hidden
         };
     }
-    if let (Some(kind), Some(duration)) = (active.0, event_duration_state(difficulty.elapsed)) {
-        for (mut text, mut color) in &mut labels {
-            **text = event_banner_text(kind, duration, touch.0);
+    let event_duration = if let Some(clock) = clock.as_ref() {
+        event_duration_state_ms(clock.milliseconds())
+    } else {
+        event_duration_state(elapsed)
+    };
+    let event_row = active.0.zip(event_duration);
+    let rotation_row = rotation.as_ref().and_then(|state| {
+        rotation_banner_row(
+            state.phase,
+            clock.as_ref().map_or(0, |clock| clock.milliseconds()),
+        )
+    });
+    let visible = event_row.is_some() || rotation_row.is_some();
+    for mut visibility in &mut roots {
+        *visibility = if visible {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+    }
+    for (mut text, mut color) in &mut labels {
+        let mut rows = Vec::with_capacity(2);
+        if let Some(row) = rotation_row.as_ref() {
+            rows.push(row.clone());
+        }
+        if let Some((kind, duration)) = event_row {
+            rows.push(event_banner_text(kind, duration, touch.0));
             color.0 = kind.color();
         }
+        **text = rows.join("\n");
     }
 }
 
@@ -832,13 +950,13 @@ mod tests {
         let start = event_duration_state(FIRST_EVENT_START).unwrap();
         assert_eq!(
             event_banner_text(EventKind::TrafficSurge, start, false),
-            ">> TRAFFIC  Traffic Surge\n[========] 8s remaining"
+            ">> TRAFFIC  [========] 8s"
         );
 
         let final_second = event_duration_state(FIRST_EVENT_END - 0.5).unwrap();
         assert_eq!(
             event_banner_text(EventKind::TrafficSurge, final_second, false),
-            ">> TRAFFIC  Traffic Surge\n[=-------] 1s remaining"
+            ">> TRAFFIC  [=-------] 1s"
         );
     }
 

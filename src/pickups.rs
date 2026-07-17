@@ -38,6 +38,7 @@
 
 use bevy::audio::{AudioPlayer, AudioSource, PlaybackSettings, Volume};
 use bevy::color::LinearRgba;
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy::text::FontSize;
 
@@ -47,7 +48,10 @@ use crate::game::events::CoinCollected;
 use crate::game::resources::{Drowning, GameConfig, Score, TimeLeft};
 use crate::game::state::GameState;
 use crate::game::{SpawnSet, TouchStateSet};
+use crate::game_modes::{ActivePlayClock, ActiveRunRules, Conduct};
 use crate::health::Health;
+use crate::ledger::{CanonicalEventQueue, PendingCanonicalEvent};
+use crate::right_of_way::{RightOfWayRun, award_coin};
 use crate::settings::Settings;
 #[cfg(test)]
 use crate::touch::ScreenBounds;
@@ -145,6 +149,14 @@ pub struct MagnetTimer(pub f32);
 /// Cleanup-driven fresh-round latch, independent of `reset_run` ordering.
 #[derive(Resource)]
 struct PickupResetPending(bool);
+
+#[derive(SystemParam)]
+struct ConductPickupScoring<'w> {
+    rules: Option<Res<'w, ActiveRunRules>>,
+    clock: Option<Res<'w, ActivePlayClock>>,
+    run: Option<ResMut<'w, RightOfWayRun>>,
+    queue: Option<ResMut<'w, CanonicalEventQueue>>,
+}
 
 impl Default for PickupResetPending {
     fn default() -> Self {
@@ -554,6 +566,7 @@ fn collect_pickup(
     audio: Res<PickupAudio>,
     settings: Res<Settings>,
     drowning: Res<Drowning>,
+    mut conduct: ConductPickupScoring,
 ) {
     if drowning.active {
         return;
@@ -588,11 +601,46 @@ fn collect_pickup(
                     }
                 }
                 PowerKind::MegaCoin => {
-                    score.coins += MEGA_COIN_AMOUNT;
-                    // One message -> audio.rs plays the coin chime + combos.rs
-                    // applies the combo multiplier (the +5 score is applied
-                    // directly above; the message is the "coin got" signal).
-                    coin_events.write(CoinCollected);
+                    if conduct
+                        .rules
+                        .as_ref()
+                        .is_some_and(|rules| rules.conduct == Conduct::RightOfWay)
+                    {
+                        if let Some(run) = conduct.run.as_mut() {
+                            if let Some((
+                                award,
+                                remaining_before,
+                                remaining_after,
+                                premium_bps,
+                                guilt,
+                            )) = award_coin(run, &mut timeleft)
+                            {
+                                if let (Some(clock), Some(queue)) =
+                                    (conduct.clock.as_ref(), conduct.queue.as_mut())
+                                {
+                                    queue.push(PendingCanonicalEvent {
+                                        active_ms: clock.milliseconds(),
+                                        stable_id: u64::from(run.score.coins_collected),
+                                        payload: roady_score_rules::v3::canonical::EventPayload::CoinAward {
+                                            base: award.base,
+                                            premium_bps,
+                                            guilt,
+                                            credited: award.credited,
+                                            accumulator_before: award.before,
+                                            accumulator_after: award.after,
+                                            remaining_before_ms: remaining_before,
+                                            remaining_after_ms: remaining_after,
+                                        },
+                                    });
+                                }
+                                coin_events.write(CoinCollected);
+                            }
+                        }
+                    } else {
+                        score.coins += MEGA_COIN_AMOUNT;
+                        // One message -> audio.rs and legacy combo handling.
+                        coin_events.write(CoinCollected);
+                    }
                     if pickup_flash_enabled(settings.reduced_motion) {
                         spawn_pickup_flash(&mut commands, megacoin_flash_rgb());
                     }

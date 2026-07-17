@@ -68,7 +68,7 @@ pub fn not_drowning(drowning: Res<Drowning>) -> bool {
 
 /// Why the round ended — drives the GameOver screen title. Defaults to
 /// `TimeUp`; `health.rs` sets `Wrecked` when the car is destroyed. `Drowned`
-/// is a local-only pond outcome and is never serialized as a ranked terminal.
+/// maps to the stable rules-v3 terminal discriminant for either conduct.
 #[derive(Resource, Default, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GameOverReason {
     #[default]

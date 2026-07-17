@@ -19,6 +19,7 @@ use crate::game::SpawnSet;
 use crate::game::events::{ChickenHit, CoinCollected};
 use crate::game::resources::{RoundActive, Score};
 use crate::game::state::GameState;
+use crate::game_modes::{ActiveRunRules, Conduct};
 use crate::modifiers::ActiveModifier;
 use crate::palette;
 use crate::run_events::{ActiveEvent, EventKind};
@@ -387,7 +388,16 @@ fn register_hit(
     mut score: ResMut<Score>,
     modifier: Res<ActiveModifier>,
     event: Res<ActiveEvent>,
+    rules: Option<Res<ActiveRunRules>>,
 ) {
+    // Right of Way awards use only the exact premium/guilt arithmetic. Combo
+    // state and bonuses are a Cluck Hunt mechanic and must not mutate either
+    // legacy Score bucket for this conduct.
+    if rules.is_some_and(|rules| rules.conduct == Conduct::RightOfWay) {
+        chicken_hits.read().for_each(drop);
+        coin_hits.read().for_each(drop);
+        return;
+    }
     // Process each hit individually so the counter + multiplier advance
     // correctly even if multiple hits arrive in one frame (rare but possible
     // — e.g. hitting two chickens simultaneously).

@@ -23,6 +23,7 @@
 //!   fresh-round latch, so pause/resume skips spawning regardless of reset order.
 //! - Critter entities have **no** `Collider` component.
 
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use std::f32::consts::TAU;
 
@@ -30,6 +31,7 @@ use crate::car::{Car, DrivingSet};
 use crate::game::SpawnSet;
 use crate::game::resources::{Drowning, GameConfig, GameOverReason, Score};
 use crate::game::state::GameState;
+use crate::game_modes::{ActiveRunRules, Conduct};
 use crate::health::Health;
 use crate::modifiers::ActiveModifier;
 use crate::run_events::{EventKind, RoundEventStarted};
@@ -180,6 +182,12 @@ pub struct CritterHit;
 /// lets fresh-round spawning explicitly clear it independent of reset order.
 #[derive(Resource, Default)]
 struct CritterPenaltyCooldown(f32);
+
+#[derive(SystemParam)]
+struct CritterScoring<'w> {
+    score: ResMut<'w, Score>,
+    rules: Option<Res<'w, ActiveRunRules>>,
+}
 
 /// Fresh-round spawn latch set by cleanup and unaffected by reset ordering.
 #[derive(Resource)]
@@ -938,7 +946,7 @@ fn hit_critters(
     mut car: Query<(&mut Car, &Transform), Without<Critter>>,
     critters: Query<(Entity, &Transform, &CritterKind, Has<CritterBurstExtra>), With<Critter>>,
     mut health: ResMut<Health>,
-    mut score: ResMut<Score>,
+    mut scoring: CritterScoring,
     mut critter_hits: MessageWriter<CritterHit>,
     mut next: ResMut<NextState<GameState>>,
     mut reason: ResMut<GameOverReason>,
@@ -974,7 +982,14 @@ fn hit_critters(
                 critter_damage_decision(health.0, penalty_cooldown.0, modifier.damage_multiplier());
             if decision.apply {
                 health.0 = decision.health;
-                score.chickens = score.chickens.saturating_sub(HIT_SCORE_PENALTY);
+                if !scoring
+                    .rules
+                    .as_ref()
+                    .is_some_and(|rules| rules.conduct == Conduct::RightOfWay)
+                {
+                    scoring.score.chickens =
+                        scoring.score.chickens.saturating_sub(HIT_SCORE_PENALTY);
+                }
                 penalty_cooldown.0 = HIT_PENALTY_COOLDOWN;
 
                 if decision.lethal {

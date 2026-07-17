@@ -16,7 +16,10 @@ use crate::game::TouchStateSet;
 use crate::game::events::{ChickenHit, CoinCollected};
 use crate::game::resources::{RoundActive, Score};
 use crate::game::state::GameState;
+use crate::game_modes::{ActivePlayClock, ActiveRunRules, Conduct};
+use crate::ledger::{CanonicalEventQueue, PendingCanonicalEvent};
 use crate::modifiers::{ActiveModifier, ModifierKind};
+use crate::right_of_way::{CourtesyAwarded, PackageDelivered, RightOfWayRun};
 use crate::touch::{
     TOUCH_OBJECTIVE_HEIGHT, TOUCH_OBJECTIVE_TOP, TOUCH_OBJECTIVE_WIDTH, TouchControlsActive,
     is_touch_portrait, touch_objective_bounds,
@@ -31,6 +34,8 @@ pub enum ObjectiveKind {
     HitChickens { target: u32 },
     CollectCoins { target: u32 },
     ReachCombo { target: u32 },
+    DeliverPackages { target: u32 },
+    CourtesyAwards { target: u32 },
 }
 
 impl ObjectiveKind {
@@ -40,6 +45,8 @@ impl ObjectiveKind {
             Self::HitChickens { .. } => "Hit chickens",
             Self::CollectCoins { .. } => "Collect coins",
             Self::ReachCombo { .. } => "Reach combo",
+            Self::DeliverPackages { .. } => "Deliver packages",
+            Self::CourtesyAwards { .. } => "Earn courtesy",
         }
     }
 
@@ -48,7 +55,9 @@ impl ObjectiveKind {
         match self {
             Self::HitChickens { target }
             | Self::CollectCoins { target }
-            | Self::ReachCombo { target } => target,
+            | Self::ReachCombo { target }
+            | Self::DeliverPackages { target }
+            | Self::CourtesyAwards { target } => target,
         }
     }
 
@@ -116,11 +125,16 @@ pub struct ObjectiveCompleted {
 #[derive(SystemSet, Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct ObjectiveSelectionSet;
 
+#[derive(SystemSet, Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct ObjectiveFinalizeSet;
+
 pub(crate) fn mission_action(kind: ObjectiveKind) -> String {
     match kind {
         ObjectiveKind::HitChickens { target } => format!("Hit {target} chickens"),
         ObjectiveKind::CollectCoins { target } => format!("Collect {target} coins"),
         ObjectiveKind::ReachCombo { target } => format!("Reach a {target}x combo"),
+        ObjectiveKind::DeliverPackages { target } => format!("Deliver {target} packages"),
+        ObjectiveKind::CourtesyAwards { target } => format!("Earn {target} courtesy awards"),
     }
 }
 
@@ -137,7 +151,18 @@ pub(crate) struct ObjectiveHudRoot;
 #[derive(Component)]
 struct ObjectiveHudText;
 
-const fn objective_kind_for_round(index: u64, modifier: ModifierKind) -> ObjectiveKind {
+const fn objective_kind_for_round(
+    index: u64,
+    modifier: ModifierKind,
+    conduct: Conduct,
+) -> ObjectiveKind {
+    if matches!(conduct, Conduct::RightOfWay) {
+        return match index % 3 {
+            0 => ObjectiveKind::DeliverPackages { target: 3 },
+            1 => ObjectiveKind::CourtesyAwards { target: 3 },
+            _ => ObjectiveKind::CollectCoins { target: 6 },
+        };
+    }
     match index % 3 {
         0 => ObjectiveKind::HitChickens {
             target: if matches!(modifier, ModifierKind::ChickenFrenzy) {
@@ -170,12 +195,13 @@ fn fresh_objective_selection(
     round_active: bool,
     index: u64,
     modifier: ModifierKind,
+    conduct: Conduct,
 ) -> Option<(ActiveObjective, u64)> {
     if round_active {
         None
     } else {
         Some((
-            ActiveObjective::new(objective_kind_for_round(index, modifier)),
+            ActiveObjective::new(objective_kind_for_round(index, modifier, conduct)),
             index
                 .checked_add(1)
                 .expect("objective round index exhausted its u64 range"),
@@ -189,6 +215,8 @@ struct ObjectiveProgressInput {
     chicken_hits: u32,
     coins_collected: u32,
     combo_multiplier: u32,
+    packages_delivered: u32,
+    courtesy_awards: u32,
 }
 
 /// Pure objective transition. The boolean is true only on the completion edge.
@@ -211,6 +239,14 @@ fn apply_progress(
             .saturating_add(input.coins_collected)
             .min(target),
         ObjectiveKind::ReachCombo { .. } => next.progress.max(input.combo_multiplier).min(target),
+        ObjectiveKind::DeliverPackages { .. } => next
+            .progress
+            .saturating_add(input.packages_delivered)
+            .min(target),
+        ObjectiveKind::CourtesyAwards { .. } => next
+            .progress
+            .saturating_add(input.courtesy_awards)
+            .min(target),
     };
     next.completed = next.progress >= target;
     (next, next.completed && !current.completed)
@@ -261,6 +297,10 @@ impl Plugin for ObjectivesPlugin {
                 OnExit(GameState::Playing),
                 despawn_marker::<ObjectiveHudRoot>,
             )
+            .configure_sets(
+                PostUpdate,
+                ObjectiveFinalizeSet.before(crate::game::TerminalFinalizeSet),
+            )
             .add_systems(
                 PostUpdate,
                 // Update owns the chicken/coin producers and may also request
@@ -268,6 +308,7 @@ impl Plugin for ObjectivesPlugin {
                 // bonus before the state transition and its OnEnter snapshot.
                 (tick_objective, award_objective_bonus)
                     .chain()
+                    .in_set(ObjectiveFinalizeSet)
                     .run_if(in_state(GameState::Playing)),
             )
             .add_systems(
@@ -288,12 +329,16 @@ impl Plugin for ObjectivesPlugin {
 fn select_fresh_objective(
     round_active: Res<RoundActive>,
     modifier: Res<ActiveModifier>,
+    rules: Option<Res<ActiveRunRules>>,
     mut objective: ResMut<ActiveObjective>,
     mut index: ResMut<ObjectiveRoundIndex>,
 ) {
-    let Some((selected, next_index)) =
-        fresh_objective_selection(round_active.0, index.0, modifier.0)
-    else {
+    let Some((selected, next_index)) = fresh_objective_selection(
+        round_active.0,
+        index.0,
+        modifier.0,
+        rules.map_or(Conduct::CluckHunt, |rules| rules.conduct),
+    ) else {
         return;
     };
     *objective = selected;
@@ -303,6 +348,8 @@ fn select_fresh_objective(
 fn tick_objective(
     mut chicken_hits: MessageReader<ChickenHit>,
     mut coin_hits: MessageReader<CoinCollected>,
+    mut package_deliveries: MessageReader<PackageDelivered>,
+    mut courtesy_awards: MessageReader<CourtesyAwarded>,
     combo: Res<Combo>,
     mut objective: ResMut<ActiveObjective>,
     mut completions: MessageWriter<ObjectiveCompleted>,
@@ -313,6 +360,8 @@ fn tick_objective(
         chicken_hits: u32::try_from(chicken_hits.read().count()).unwrap_or(u32::MAX),
         coins_collected: u32::try_from(coin_hits.read().count()).unwrap_or(u32::MAX),
         combo_multiplier: combo.multiplier,
+        packages_delivered: u32::try_from(package_deliveries.read().count()).unwrap_or(u32::MAX),
+        courtesy_awards: u32::try_from(courtesy_awards.read().count()).unwrap_or(u32::MAX),
     };
     let (next, newly_completed) = apply_progress(*objective, input);
     if next != *objective {
@@ -327,15 +376,99 @@ fn award_objective_bonus(
     mut completions: MessageReader<ObjectiveCompleted>,
     mut objective: ResMut<ActiveObjective>,
     mut score: ResMut<Score>,
+    rules: Option<Res<ActiveRunRules>>,
+    mut right_of_way: Option<ResMut<RightOfWayRun>>,
+    clock: Option<Res<ActivePlayClock>>,
+    mut queue: Option<ResMut<CanonicalEventQueue>>,
 ) {
     // There is one active objective. If duplicate matching messages ever
     // arrive, applying the pure transition repeatedly still awards only once.
     for completion in completions.read() {
+        let right_of_way_conduct = rules
+            .as_ref()
+            .is_some_and(|rules| rules.conduct == Conduct::RightOfWay);
+        if right_of_way_conduct {
+            if objective.completed && !objective.reward_awarded && completion.kind == objective.kind
+            {
+                let Some(run) = right_of_way.as_mut() else {
+                    continue;
+                };
+                let premium = run.score.premium_bps;
+                let guilt = run.score.guilt_remaining_ms != 0;
+                match run.score.objective() {
+                    Ok(Some(award)) => {
+                        objective.reward_awarded = true;
+                        if let (Some(clock), Some(queue)) = (clock.as_ref(), queue.as_mut()) {
+                            let objective_id = match completion.kind {
+                                ObjectiveKind::DeliverPackages { .. } => {
+                                    roady_score_rules::v3::Objective::DeliverPackages
+                                }
+                                ObjectiveKind::CourtesyAwards { .. } => {
+                                    roady_score_rules::v3::Objective::CourtesyAwards
+                                }
+                                ObjectiveKind::CollectCoins { .. } => {
+                                    roady_score_rules::v3::Objective::CollectCoins
+                                }
+                                _ => continue,
+                            };
+                            queue.push(PendingCanonicalEvent {
+                                active_ms: clock.milliseconds(),
+                                stable_id: 0,
+                                payload: roady_score_rules::v3::canonical::EventPayload::ObjectiveCompletedRightOfWay {
+                                    objective: objective_id,
+                                    target: completion.kind.target(),
+                                    base: OBJECTIVE_BONUS,
+                                    premium_bps: premium,
+                                    guilt,
+                                    credited: award.credited,
+                                    accumulator_before: award.before,
+                                    accumulator_after: award.after,
+                                },
+                            });
+                        }
+                    }
+                    _ => run.failed = true,
+                }
+            }
+            continue;
+        }
+        let before = score.chickens;
         let (next, chicken_score, awarded) =
-            apply_reward(*objective, score.chickens, Some(completion.kind));
+            apply_reward(*objective, before, Some(completion.kind));
         if awarded {
             *objective = next;
             score.chickens = chicken_score;
+            if let (Some(clock), Some(queue)) = (clock.as_ref(), queue.as_mut()) {
+                let objective_id = match completion.kind {
+                    ObjectiveKind::HitChickens { .. } => {
+                        roady_score_rules::v3::Objective::HitChickens
+                    }
+                    ObjectiveKind::CollectCoins { .. } => {
+                        roady_score_rules::v3::Objective::CollectCoins
+                    }
+                    ObjectiveKind::ReachCombo { .. } => {
+                        roady_score_rules::v3::Objective::ReachCombo
+                    }
+                    ObjectiveKind::DeliverPackages { .. } => {
+                        roady_score_rules::v3::Objective::DeliverPackages
+                    }
+                    ObjectiveKind::CourtesyAwards { .. } => {
+                        roady_score_rules::v3::Objective::CourtesyAwards
+                    }
+                };
+                queue.push(PendingCanonicalEvent {
+                    active_ms: clock.milliseconds(),
+                    stable_id: 0,
+                    payload:
+                        roady_score_rules::v3::canonical::EventPayload::ObjectiveCompletedCluck {
+                            objective: objective_id,
+                            target: completion.kind.target(),
+                            base_reward: OBJECTIVE_BONUS,
+                            bucket_before: before,
+                            bucket_after: chicken_score,
+                        },
+                });
+            }
         }
     }
 }
@@ -498,6 +631,8 @@ mod tests {
             chicken_hits: chickens,
             coins_collected: coins,
             combo_multiplier: combo,
+            packages_delivered: 0,
+            courtesy_awards: 0,
         }
     }
 
@@ -595,18 +730,18 @@ mod tests {
     fn first_round_is_hit_ten_and_selection_is_deterministic() {
         let expected = ObjectiveKind::HitChickens { target: 10 };
         assert_eq!(
-            objective_kind_for_round(0, ModifierKind::Standard),
+            objective_kind_for_round(0, ModifierKind::Standard, Conduct::CluckHunt),
             expected
         );
         assert_eq!(
-            fresh_objective_selection(false, 0, ModifierKind::Standard),
+            fresh_objective_selection(false, 0, ModifierKind::Standard, Conduct::CluckHunt),
             Some((ActiveObjective::new(expected), 1))
         );
         for index in 0..100 {
             for modifier in ALL_MODIFIERS {
                 assert_eq!(
-                    objective_kind_for_round(index, modifier),
-                    objective_kind_for_round(index, modifier)
+                    objective_kind_for_round(index, modifier, Conduct::CluckHunt),
+                    objective_kind_for_round(index, modifier, Conduct::CluckHunt)
                 );
             }
         }
@@ -615,7 +750,9 @@ mod tests {
     #[test]
     fn deterministic_cycle_reaches_every_kind() {
         let kinds: Vec<_> = (0..6)
-            .map(|index| objective_kind_for_round(index, ModifierKind::Standard))
+            .map(|index| {
+                objective_kind_for_round(index, ModifierKind::Standard, Conduct::CluckHunt)
+            })
             .collect();
         assert!(matches!(kinds[0], ObjectiveKind::HitChickens { .. }));
         assert!(matches!(kinds[1], ObjectiveKind::CollectCoins { .. }));
@@ -629,7 +766,12 @@ mod tests {
     fn pause_resume_neither_resets_nor_increments_index() {
         for index in [0, 1, 19, u64::MAX] {
             assert_eq!(
-                fresh_objective_selection(true, index, ModifierKind::ChickenFrenzy),
+                fresh_objective_selection(
+                    true,
+                    index,
+                    ModifierKind::ChickenFrenzy,
+                    Conduct::CluckHunt
+                ),
                 None
             );
         }
@@ -643,7 +785,8 @@ mod tests {
         old.reward_awarded = true;
 
         let (fresh, next_index) =
-            fresh_objective_selection(false, 3, ModifierKind::Standard).unwrap();
+            fresh_objective_selection(false, 3, ModifierKind::Standard, Conduct::CluckHunt)
+                .unwrap();
         assert_ne!(fresh, old);
         assert_eq!(fresh.kind, ObjectiveKind::HitChickens { target: 10 });
         assert_eq!(fresh.progress, 0);
@@ -655,27 +798,27 @@ mod tests {
     #[test]
     fn modifier_targets_are_adjusted_only_for_matching_flavors() {
         assert_eq!(
-            objective_kind_for_round(0, ModifierKind::ChickenFrenzy),
+            objective_kind_for_round(0, ModifierKind::ChickenFrenzy, Conduct::CluckHunt),
             ObjectiveKind::HitChickens { target: 20 }
         );
         assert_eq!(
-            objective_kind_for_round(1, ModifierKind::RushHour),
+            objective_kind_for_round(1, ModifierKind::RushHour, Conduct::CluckHunt),
             ObjectiveKind::CollectCoins { target: 8 }
         );
         assert_eq!(
-            objective_kind_for_round(2, ModifierKind::GlassCannon),
+            objective_kind_for_round(2, ModifierKind::GlassCannon, Conduct::CluckHunt),
             ObjectiveKind::ReachCombo { target: 4 }
         );
         assert_eq!(
-            objective_kind_for_round(0, ModifierKind::RushHour),
+            objective_kind_for_round(0, ModifierKind::RushHour, Conduct::CluckHunt),
             ObjectiveKind::HitChickens { target: 10 }
         );
         assert_eq!(
-            objective_kind_for_round(1, ModifierKind::ChickenFrenzy),
+            objective_kind_for_round(1, ModifierKind::ChickenFrenzy, Conduct::CluckHunt),
             ObjectiveKind::CollectCoins { target: 6 }
         );
         assert_eq!(
-            objective_kind_for_round(2, ModifierKind::Standard),
+            objective_kind_for_round(2, ModifierKind::Standard, Conduct::CluckHunt),
             ObjectiveKind::ReachCombo { target: 3 }
         );
     }
