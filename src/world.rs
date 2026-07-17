@@ -51,10 +51,9 @@ use crate::game::events::CoinCollected;
 use crate::game::resources::{Drowning, RoundActive, Score, TimeLeft};
 use crate::game::state::GameState;
 use crate::game_modes::{ActivePlayClock, ActiveRunRules, Conduct};
-use crate::ledger::{CanonicalEventQueue, PendingCanonicalEvent};
 use crate::modifiers::{ActiveModifier, ModifierKind};
 use crate::palette;
-use crate::right_of_way::{RightOfWayRun, award_coin};
+use crate::right_of_way::{PendingRightOfWayActions, RightOfWayRun};
 use crate::shaders::{WaterFamilyPreset, WaterMaterial};
 use crate::textures::{GROUND_VARIANTS, TextureAssets};
 use crate::toy_shading::ImportedWorldVisual;
@@ -74,7 +73,24 @@ const COINS_PER_ROAD_BLOCK: usize = 4;
 /// Tag for coin entities (environment now — spawned inside blocks, recycled
 /// with them, collected on pickup and respawned when the block re-populates).
 #[derive(Component)]
-pub struct Coin;
+pub struct Coin {
+    /// Coordinate-derived ID, stable across ECS allocation and block recycle.
+    stable_id: u64,
+}
+
+fn stable_coin_id(gx: i32, gz: i32, local: Vec2) -> u64 {
+    // Coin placements use authored quarter-unit coordinates. Quantizing before
+    // hashing avoids platform float-byte differences while preserving every
+    // distinct slot in the production layout.
+    let x = (local.x * 4.0).round() as i32 as u32;
+    let z = (local.y * 4.0).round() as i32 as u32;
+    let mut value = ((gx as u32 as u64) << 32) | gz as u32 as u64;
+    value ^= (u64::from(x) << 17) ^ u64::from(z);
+    value ^= value >> 30;
+    value = value.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value ^= value >> 27;
+    value.wrapping_mul(0x94d0_49bb_1331_11eb) ^ (value >> 31)
+}
 
 /// Rendered coin child. Keeping the collectible root on the ground lets its
 /// cached contact card remain grounded while this child spins and bobs.
@@ -3869,7 +3885,9 @@ pub fn populate_block(
             p.spawn((
                 Transform::from_xyz(cx, 0.0, cz),
                 Visibility::default(),
-                Coin,
+                Coin {
+                    stable_id: stable_coin_id(gx, gz, position),
+                },
             ))
             .with_children(|coin| {
                 coin.spawn((
@@ -5515,7 +5533,7 @@ fn spin_coins(mut coins: Query<(&mut Transform, &CoinVisual)>, time: Res<Time>) 
 
 fn collect_coins(
     car: Query<&Transform, (With<Car>, Without<Coin>)>,
-    mut coins: Query<(Entity, &GlobalTransform), (With<Coin>, Without<Car>)>,
+    mut coins: Query<(Entity, &GlobalTransform, &Coin), (With<Coin>, Without<Car>)>,
     mut commands: Commands,
     mut score: ResMut<Score>,
     mut timeleft: ResMut<TimeLeft>,
@@ -5524,8 +5542,8 @@ fn collect_coins(
     mut coin_events: MessageWriter<CoinCollected>,
     rules: Option<Res<ActiveRunRules>>,
     clock: Option<Res<ActivePlayClock>>,
-    mut right_of_way: Option<ResMut<RightOfWayRun>>,
-    mut canonical_queue: Option<ResMut<CanonicalEventQueue>>,
+    right_of_way: Option<Res<RightOfWayRun>>,
+    mut pending_right_of_way: Option<ResMut<PendingRightOfWayActions>>,
 ) {
     // Fresh blocks are spawned during the countdown. Waiting until input is
     // released avoids collecting anything before the round visibly begins.
@@ -5535,7 +5553,7 @@ fn collect_coins(
     let Ok(car_t) = car.single() else {
         return;
     };
-    for (e, coin_t) in &mut coins {
+    for (e, coin_t, coin) in &mut coins {
         // Coins are block-root children -> `Transform` is local; use
         // `GlobalTransform` for the world position or pickup won't line up.
         // Newly spawned children still carry IDENTITY until transform
@@ -5550,29 +5568,11 @@ fn collect_coins(
                 .as_ref()
                 .is_some_and(|rules| rules.conduct == Conduct::RightOfWay)
             {
-                if let Some(run) = right_of_way.as_mut() {
-                    if let Some((award, remaining_before, remaining_after, premium_bps, guilt)) =
-                        award_coin(run, &mut timeleft)
+                if right_of_way.as_ref().is_some_and(|run| !run.failed) {
+                    if let (Some(clock), Some(pending)) =
+                        (clock.as_ref(), pending_right_of_way.as_mut())
                     {
-                        if let (Some(clock), Some(queue)) =
-                            (clock.as_ref(), canonical_queue.as_mut())
-                        {
-                            queue.push(PendingCanonicalEvent {
-                                active_ms: clock.milliseconds(),
-                                stable_id: u64::from(run.score.coins_collected),
-                                payload:
-                                    roady_score_rules::v3::canonical::EventPayload::CoinAward {
-                                        base: award.base,
-                                        premium_bps,
-                                        guilt,
-                                        credited: award.credited,
-                                        accumulator_before: award.before,
-                                        accumulator_after: award.after,
-                                        remaining_before_ms: remaining_before,
-                                        remaining_after_ms: remaining_after,
-                                    },
-                            });
-                        }
+                        pending.coin(clock.milliseconds(), coin.stable_id);
                         coin_events.write(CoinCollected);
                     }
                 }

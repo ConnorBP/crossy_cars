@@ -50,8 +50,7 @@ use crate::game::state::GameState;
 use crate::game::{SpawnSet, TouchStateSet};
 use crate::game_modes::{ActivePlayClock, ActiveRunRules, Conduct};
 use crate::health::Health;
-use crate::ledger::{CanonicalEventQueue, PendingCanonicalEvent};
-use crate::right_of_way::{RightOfWayRun, award_coin};
+use crate::right_of_way::{PendingRightOfWayActions, RightOfWayRun};
 use crate::settings::Settings;
 #[cfg(test)]
 use crate::touch::ScreenBounds;
@@ -154,8 +153,8 @@ struct PickupResetPending(bool);
 struct ConductPickupScoring<'w> {
     rules: Option<Res<'w, ActiveRunRules>>,
     clock: Option<Res<'w, ActivePlayClock>>,
-    run: Option<ResMut<'w, RightOfWayRun>>,
-    queue: Option<ResMut<'w, CanonicalEventQueue>>,
+    run: Option<Res<'w, RightOfWayRun>>,
+    pending: Option<ResMut<'w, PendingRightOfWayActions>>,
 }
 
 impl Default for PickupResetPending {
@@ -606,33 +605,13 @@ fn collect_pickup(
                         .as_ref()
                         .is_some_and(|rules| rules.conduct == Conduct::RightOfWay)
                     {
-                        if let Some(run) = conduct.run.as_mut() {
-                            if let Some((
-                                award,
-                                remaining_before,
-                                remaining_after,
-                                premium_bps,
-                                guilt,
-                            )) = award_coin(run, &mut timeleft)
+                        if conduct.run.as_ref().is_some_and(|run| !run.failed) {
+                            if let (Some(clock), Some(pending)) =
+                                (conduct.clock.as_ref(), conduct.pending.as_mut())
                             {
-                                if let (Some(clock), Some(queue)) =
-                                    (conduct.clock.as_ref(), conduct.queue.as_mut())
-                                {
-                                    queue.push(PendingCanonicalEvent {
-                                        active_ms: clock.milliseconds(),
-                                        stable_id: u64::from(run.score.coins_collected),
-                                        payload: roady_score_rules::v3::canonical::EventPayload::CoinAward {
-                                            base: award.base,
-                                            premium_bps,
-                                            guilt,
-                                            credited: award.credited,
-                                            accumulator_before: award.before,
-                                            accumulator_after: award.after,
-                                            remaining_before_ms: remaining_before,
-                                            remaining_after_ms: remaining_after,
-                                        },
-                                    });
-                                }
+                                // Power-up entities have no protocol identity;
+                                // kind 13 plus this fixed source tag is stable.
+                                pending.coin(clock.milliseconds(), u64::MAX);
                                 coin_events.write(CoinCollected);
                             }
                         }

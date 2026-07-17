@@ -3,16 +3,18 @@ import { constantTimeEquals, ipHash, randomBase64Url, sha256 } from "./security"
 import {
   CLUCK_HUNT_CATEGORY, RIGHT_OF_WAY_CATEGORY, MODE, POLICY_ID,
   PROTOCOL_ID, RULES_ID, MAX_LEDGER_BYTES,
-  evidenceBytes, finalRoot, hexToBytes, bytesToHex, scheduleHash, seedCommitment,
-  scoreHmacInput, startedSessionHeader, terminalBytes, unstartedSessionHeader,
+  evidenceBytes, hexToBytes, bytesToHex, scheduleHash, seedCommitment,
+  scoreHmacInput, startedSessionHeader, unstartedSessionHeader,
   workerProofInput, hmacSha256Base64Url, type ConductTerminal, type SessionHeader,
 } from "./rules-v3";
 import { checkRateLimit, isPlainObject, readBoundedJson, type RateLimitBinding } from "../vendor/cloudflare-game-common/src/index";
+import { replayEvidence } from "./replay-v3";
 
 export interface V3Env {
   DB: D1Database; BUILD: string; ALLOWED_ORIGINS: string; LB_IP_HASH_PEPPER: string;
   LB_ADMIN_TOKEN: string; LB_TURNSTILE_SECRET: string; ROADY_V3_RANKED_ENABLED?: string;
   LB_V3_PROOF_HMAC_KEY?: string; LB_V3_SEED_ENCRYPTION_KEY?: string; LB_V3_SEED_KEY_ID?: string;
+  LB_V3_SEED_ENCRYPTION_KEYS_JSON?: string;
   LB_V3_EVIDENCE_CAPABILITY_KEY?: string; LB_V3_CLIENT_HMAC_KEYS_JSON?: string;
   RATE_LIMIT_READ?: RateLimitBinding; RATE_LIMIT_SESSION?: RateLimitBinding;
   RATE_LIMIT_SUBMIT?: RateLimitBinding; RATE_LIMIT_RANK?: RateLimitBinding;
@@ -30,10 +32,11 @@ const te = new TextEncoder();
 function dev(build: string): boolean { return build === "dev" || build === "test" || build === "local"; }
 function placeholder(v: unknown): boolean { return typeof v !== "string" || !v.trim() || /^(?:REPLACE_|PLACEHOLDER)/i.test(v.trim()); }
 function enabled(env: V3Env): boolean {
-  if (env.ROADY_V3_RANKED_ENABLED?.trim() !== "true") return false;
-  // The environment flag is only an upper bound. Keep this false in every
-  // environment until separately reviewed deployment-parity evidence lands.
-  return PRODUCTION_PARITY_PROVEN;
+  if (env.ROADY_V3_RANKED_ENABLED !== "true") return false;
+  // The environment flag is only an upper bound. Keep production false until
+  // separately reviewed deployment-parity evidence lands. Test/local builds
+  // may exercise the complete protocol without claiming production readiness.
+  return PRODUCTION_PARITY_PROVEN || dev(env.BUILD);
 }
 function exactObject(value: unknown, fields: readonly string[]): value is Record<string, unknown> {
   if (!isPlainObject(value)) return false;
@@ -45,6 +48,7 @@ function conductFor(value: string): "cluck_hunt" | "right_of_way" { return value
 function safeUInt(value: unknown, max = Number.MAX_SAFE_INTEGER): value is number { return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= max; }
 function exactHex(value: unknown): value is string { return typeof value === "string" && /^[0-9a-f]{64}$/.test(value); }
 function exactB64(value: unknown): value is string { if (typeof value !== "string" || !/^[A-Za-z0-9_-]+$/.test(value)) return false; try { return toBase64Url(fromBase64Url(value)) === value; } catch { return false; } }
+function exactHmac(value:unknown):value is string{return exactB64(value)&&fromBase64Url(value).length===32;}
 function utf8(value: unknown, min: number, max: number): value is string { return typeof value === "string" && te.encode(value).length >= min && te.encode(value).length <= max; }
 function reasonOrdinal(value: string): number { return value === "time_up" ? 1 : value === "wrecked" ? 2 : value === "drowned" ? 3 : 0; }
 function platformOrdinal(value: string): number { return value === "web" ? 1 : value === "native" ? 2 : 0; }
@@ -66,40 +70,59 @@ function sessionHeader(row: SessionRow): SessionHeader { return { category: row.
 
 function v3Config(env: V3Env): string | null {
   if (parseAllowedOrigins(env.ALLOWED_ORIGINS).size === 0) return "allowed origins invalid";
-  for (const key of ["LB_IP_HASH_PEPPER","LB_ADMIN_TOKEN","LB_TURNSTILE_SECRET","LB_V3_PROOF_HMAC_KEY","LB_V3_SEED_ENCRYPTION_KEY","LB_V3_SEED_KEY_ID","LB_V3_EVIDENCE_CAPABILITY_KEY","LB_V3_CLIENT_HMAC_KEYS_JSON"] as const) {
+  for (const key of ["LB_IP_HASH_PEPPER","LB_ADMIN_TOKEN","LB_TURNSTILE_SECRET","LB_V3_PROOF_HMAC_KEY","LB_V3_SEED_KEY_ID","LB_V3_EVIDENCE_CAPABILITY_KEY","LB_V3_CLIENT_HMAC_KEYS_JSON"] as const) {
     if (placeholder(env[key])) return `${key} missing`;
   }
+  if (placeholder(env.LB_V3_SEED_ENCRYPTION_KEY) && placeholder(env.LB_V3_SEED_ENCRYPTION_KEYS_JSON)) return "seed encryption key registry missing";
   try {
     const keys = JSON.parse(env.LB_V3_CLIENT_HMAC_KEYS_JSON!) as unknown;
     if (!isPlainObject(keys) || Object.keys(keys).length < 1 || Object.entries(keys).some(([id, value]) => !/^v3\.client\.[A-Za-z0-9._-]+$/.test(id) || placeholder(value))) return "client key registry invalid";
   } catch { return "client key registry invalid"; }
-  try { if (seedKeyBytes(env).length !== 32) return "seed encryption key must decode to 32 bytes"; } catch { return "seed encryption key is invalid"; }
+  try {
+    if (env.LB_V3_SEED_ENCRYPTION_KEYS_JSON) {
+      const registry=JSON.parse(env.LB_V3_SEED_ENCRYPTION_KEYS_JSON) as unknown;
+      if(!isPlainObject(registry)||Object.keys(registry).length<1||Object.entries(registry).some(([id,value])=>!/^v3\.seed\.[A-Za-z0-9._-]+$/.test(id)||typeof value!=="string"||fromBase64Url(value).length!==32)||typeof registry[env.LB_V3_SEED_KEY_ID!]!=="string") return "seed encryption key registry invalid";
+    }
+    if (seedKeyBytes(env).length !== 32) return "seed encryption key must decode to 32 bytes";
+  } catch { return "seed encryption key is invalid"; }
   if (env.LB_TURNSTILE_SECRET === TEST_TURNSTILE_SECRET && !dev(env.BUILD)) return "test Turnstile secret in production";
   return null;
 }
-function seedKeyBytes(env: V3Env): Uint8Array { return fromBase64Url(env.LB_V3_SEED_ENCRYPTION_KEY!); }
+function seedKeyBytes(env: V3Env, keyId = env.LB_V3_SEED_KEY_ID): Uint8Array {
+  if (env.LB_V3_SEED_ENCRYPTION_KEYS_JSON) {
+    const registry = JSON.parse(env.LB_V3_SEED_ENCRYPTION_KEYS_JSON) as Record<string, unknown>;
+    const encoded = keyId === undefined ? undefined : registry[keyId];
+    if (typeof encoded !== "string") throw new Error("unknown seed key id");
+    return fromBase64Url(encoded);
+  }
+  if (keyId !== env.LB_V3_SEED_KEY_ID) throw new Error("unknown seed key id");
+  return fromBase64Url(env.LB_V3_SEED_ENCRYPTION_KEY!);
+}
 async function encryptSeed(seed: Uint8Array, env: V3Env, aad: string): Promise<{ iv: Uint8Array; ciphertext: Uint8Array }> {
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const key = await crypto.subtle.importKey("raw", seedKeyBytes(env), "AES-GCM", false, ["encrypt"]);
   return { iv, ciphertext: new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv, additionalData: te.encode(aad), tagLength: 128 }, key, seed)) };
 }
-async function verifySeedMaterial(row: SessionRow, env: V3Env): Promise<boolean> {
-  if (!row.seed_iv || !row.seed_ciphertext || row.seed_key_id !== env.LB_V3_SEED_KEY_ID) return false;
+async function decryptAndVerifySeed(row: SessionRow, env: V3Env): Promise<Uint8Array | null> {
+  if (!row.seed_iv || !row.seed_ciphertext || !row.seed_key_id) return null;
   try {
-    const key = await crypto.subtle.importKey("raw", seedKeyBytes(env), "AES-GCM", false, ["decrypt"]);
+    const keyBytes = seedKeyBytes(env, row.seed_key_id);
+    if (keyBytes.length !== 32) return null;
+    const key = await crypto.subtle.importKey("raw", keyBytes, "AES-GCM", false, ["decrypt"]);
     const aad = `${row.session_id}|${row.category_key}|${row.seed_commitment}`;
     const seed = new Uint8Array(await crypto.subtle.decrypt({ name:"AES-GCM", iv:new Uint8Array(row.seed_iv), additionalData:te.encode(aad), tagLength:128 }, key, row.seed_ciphertext));
-    if (seed.length !== 32) return false;
-    return bytesToHex(await seedCommitment(seed)) === row.seed_commitment && bytesToHex(await scheduleHash(seed,row.category_key)) === row.schedule_hash;
-  } catch { return false; }
+    if (seed.length !== 32) return null;
+    return bytesToHex(await seedCommitment(seed)) === row.seed_commitment && bytesToHex(await scheduleHash(seed,row.category_key)) === row.schedule_hash ? seed : null;
+  } catch { return null; }
 }
+async function verifySeedMaterial(row: SessionRow, env: V3Env): Promise<boolean> { return (await decryptAndVerifySeed(row,env)) !== null; }
 async function verifyTurnstile(token: string, ip: string, env: V3Env): Promise<boolean> {
   if (env.LB_TURNSTILE_SECRET === TEST_TURNSTILE_SECRET) return dev(env.BUILD);
   const form = new FormData(); form.set("secret", env.LB_TURNSTILE_SECRET); form.set("response", token); form.set("remoteip", ip);
   try {
     const result = await fetch("https://challenges.cloudflare.com/turnstile/v0/siteverify", { method: "POST", body: form });
     const data = await result.json() as { success?: boolean; action?: string; hostname?: string };
-    const hosts = env.ALLOWED_ORIGINS.split(",").map((x) => { try { return new URL(x).hostname; } catch { return ""; } });
+    const hosts=Array.from(parseAllowedOrigins(env.ALLOWED_ORIGINS),(origin)=>new URL(origin).hostname);
     return data.success === true && data.action === "roady_score_session" && typeof data.hostname === "string" && hosts.includes(data.hostname);
   } catch { return false; }
 }
@@ -108,7 +131,10 @@ export async function handleV3(request: Request, env: V3Env, ctx: ExecutionConte
   const url = new URL(request.url); const path = url.pathname; const method = request.method;
   if (!(path === "/v3" || path.startsWith("/v3/"))) return null;
   if (path === "/v3/capabilities" && method === "GET") return capabilities(request, env, ctx, cors, requestId);
+  if (path === "/v3/capabilities") return err("not_found","No route for that method",404,requestId,cors);
   if (path === "/v3") return err("not_found", "No route for that path", 404, requestId, cors);
+  const knownPath=path==="/v3/session"||path==="/v3/scores"||path==="/v3/evidence"||path==="/v3/leaderboard"||path==="/v3/me/rank"||path==="/v3/admin/scores/restore"||/^\/v3\/session\/[^/]+\/start$/.test(path)||/^\/v3\/admin\/scores\/\d+(?:\/hide)?$/.test(path);
+  if(!knownPath)return err("not_found","No route for that path",404,requestId,cors);
   const cfg = v3Config(env);
   if (cfg) return err("config_error", "Service misconfigured", 503, requestId, cors);
   if (path === "/v3/session" && method === "POST") return createSession(request, env, cors, requestId);
@@ -124,6 +150,16 @@ export async function handleV3(request: Request, env: V3Env, ctx: ExecutionConte
   return err("not_found", "No route for that path", 404, requestId, cors);
 }
 
+async function v3StorageReady(env:V3Env):Promise<boolean>{
+  try{
+    const rows=await env.DB.prepare(`SELECT category_key,protocol_version,protocol_id,rules_version,rules_id,policy_version,policy_id,mode,conduct,display_name,active FROM score_categories_v3 ORDER BY category_key`).all<Record<string,unknown>>();
+    const expected=[
+      {category_key:CLUCK_HUNT_CATEGORY,protocol_version:3,protocol_id:PROTOCOL_ID,rules_version:3,rules_id:RULES_ID,policy_version:1,policy_id:POLICY_ID,mode:MODE,conduct:"cluck_hunt",display_name:"Cluck Hunt",active:1},
+      {category_key:RIGHT_OF_WAY_CATEGORY,protocol_version:3,protocol_id:PROTOCOL_ID,rules_version:3,rules_id:RULES_ID,policy_version:1,policy_id:POLICY_ID,mode:MODE,conduct:"right_of_way",display_name:"Right of Way",active:1},
+    ];
+    return JSON.stringify(rows.results)===JSON.stringify(expected);
+  }catch{return false;}
+}
 async function capabilities(request: Request, env: V3Env, ctx: ExecutionContext, cors: Cors, id: string): Promise<Response> {
   const url = new URL(request.url);
   if (url.search !== "" || (request.headers.get("Content-Length") !== null && request.headers.get("Content-Length") !== "0") || request.headers.has("Transfer-Encoding")) {
@@ -133,12 +169,19 @@ async function capabilities(request: Request, env: V3Env, ctx: ExecutionContext,
   // A missing migration/config/artifact must force false rather than make the
   // capability route unavailable. The checked-in parity latch already keeps
   // this false; retain the independent computation for future review.
-  const advertised = enabled(env) && v3Config(env) === null;
+  const advertised = enabled(env) && v3Config(env) === null && env.DB !== undefined && await v3StorageReady(env);
   const cacheUrl = `https://roady-leaderboard.cache/v3|capabilities|${encodeURIComponent(env.BUILD || "unknown")}|${advertised}`;
-  const cached = await caches.default.match(cacheUrl); if (cached) return applyCors(cached, cors);
+  // Release verification sends standard no-cache directives so two probes can
+  // independently execute the storage/config latch without changing the exact
+  // route or response contract. Normal public requests retain edge caching.
+  const bypassCache = /(?:^|,)\s*(?:no-cache|no-store|max-age=0)\s*(?:,|$)/i.test(request.headers.get("Cache-Control") ?? "");
+  if (!bypassCache) {
+    const cached = await caches.default.match(cacheUrl); if (cached) return applyCors(cached, cors);
+  }
   const body = { ranked: { enabled: advertised, categories: [...CATEGORIES] }, protocolVersion: 3, protocolId: PROTOCOL_ID, rulesVersion: 3, rulesId: RULES_ID, policyVersion: 1, policyId: POLICY_ID, mode: MODE };
   const response = json(body, 200, null, { "Cache-Control": CACHE_CAP });
-  ctx.waitUntil(caches.default.put(cacheUrl, response.clone())); return applyCors(response, cors);
+  if (!bypassCache) ctx.waitUntil(caches.default.put(cacheUrl, response.clone()));
+  return applyCors(response, cors);
 }
 
 async function createSession(request: Request, env: V3Env, cors: Cors, id: string): Promise<Response> {
@@ -162,7 +205,7 @@ async function createSession(request: Request, env: V3Env, cors: Cors, id: strin
 interface SessionRow { session_id:string; category_key:typeof CATEGORIES[number]; challenge:string; proof:string; seed_iv?:ArrayBuffer; seed_ciphertext?:ArrayBuffer; seed_key_id?:string; seed_commitment:string; schedule_hash:string; issued_at:number; start_by_expiry:number|null; started_at:number|null; started:number; used:number; turnstile_verified:number; }
 async function startSession(request: Request, pathId: string, env: V3Env, cors: Cors, id: string): Promise<Response> {
   const ip = clientIp(request); if (!(await limit(env.RATE_LIMIT_SUBMIT, `v3:start:${ip}`, "submit", true))) return err("rate_limited", "Too many requests", 429, id, cors);
-  const body = await bounded(request, 16_384); if (!exactObject(body, ["sessionId","proof"]) || !utf8(body.sessionId,1,255) || !exactB64(body.proof)) return err("invalid_body", "Malformed, oversized, or unknown fields", 422, id, cors);
+  const body = await bounded(request, 16_384); if (!exactObject(body, ["sessionId","proof"]) || !utf8(body.sessionId,1,255) || !exactHmac(body.proof)) return err("invalid_body", "Malformed, oversized, or unknown fields", 422, id, cors);
   if (body.sessionId !== pathId) return err("session_mismatch", "URL and body session differ", 409, id, cors);
   const row = await env.DB.prepare(`SELECT session_id,category_key,challenge,proof,seed_iv,seed_ciphertext,seed_key_id,seed_commitment,schedule_hash,issued_at,start_by_expiry,started_at,started,used,turnstile_verified FROM sessions_v3 WHERE session_id=?`).bind(pathId).first<SessionRow>();
   if (!row) return err("invalid_session", "Unknown session", 404, id, cors);
@@ -186,7 +229,7 @@ function parseScore(body: unknown): { ok:true; value:ParsedScore } | { ok:false;
   if (!tuple(body)) return {ok:false,code:"unknown_version_tuple",message:"Unknown v3 tuple"};
   const isCluck = body.categoryKey === CLUCK_HUNT_CATEGORY;
   if (!exactObject(body, isCluck ? CLUCK_SCORE : ROW_SCORE)) return {ok:false,code:"invalid_body",message:"Unknown or missing score fields"};
-  if (!utf8(body.sessionId,1,255) || !exactB64(body.proof) || typeof body.name !== "string" || !/^[A-Z0-9]{3,5}$/.test(body.name) ||
+  if (!utf8(body.sessionId,1,255) || !exactHmac(body.proof) || typeof body.name !== "string" || !/^[A-Z0-9]{3,5}$/.test(body.name) ||
       !safeUInt(body.terminalTotal,0xffff_ffff) || typeof body.objectiveCompleted !== "boolean" || !safeUInt(body.roundDurationMs) ||
       !safeUInt(body.timeLeftMs,99_000) || !["time_up","wrecked","drowned"].includes(body.gameOverReason as string) ||
       !utf8(body.build,1,64) || !["web","native"].includes(body.platform as string) || !exactHex(body.finalRoot) || !exactHex(body.scheduleHash) ||
@@ -210,7 +253,7 @@ async function submitScore(request: Request, env: V3Env, cors:Cors, id:string): 
   const ip=clientIp(request); if (!(await limit(env.RATE_LIMIT_SUBMIT,`v3:score:${ip}`,"submit",true))) return err("rate_limited","Too many requests",429,id,cors);
   const raw=await bounded(request,16_384); const parsed=parseScore(raw); if(!parsed.ok) return err(parsed.code,parsed.message,422,id,cors); const b=parsed.value.body;
   const signature=request.headers.get("X-Roady-Client-Signature"); if(!signature) return err("missing_signature","Client signature required",401,id,cors);
-  if(!exactB64(signature)) return err("invalid_signature","Malformed client signature",401,id,cors);
+  if(!exactHmac(signature)) return err("invalid_signature","Malformed client signature",401,id,cors);
   const key=clientKeys(env)[b.signatureKeyId as string]; if(!key) return err("unknown_signature_key","Signature key is not accepted",401,id,cors);
   const row=await env.DB.prepare(`SELECT session_id,category_key,challenge,proof,seed_iv,seed_ciphertext,seed_key_id,seed_commitment,schedule_hash,issued_at,start_by_expiry,started_at,started,used,turnstile_verified FROM sessions_v3 WHERE session_id=?`).bind(b.sessionId).first<SessionRow>();
   if(!row) return err("invalid_session","Unknown session",404,id,cors);
@@ -222,16 +265,17 @@ async function submitScore(request: Request, env: V3Env, cors:Cors, id:string): 
   if(!(await verifySeedMaterial(row,env))) return err("invalid_session","Stored seed material does not match commitments",403,id,cors);
   const expectedSig=await hmacSha256Base64Url(key,scoreHmacInput({category:b.categoryKey as string,sessionId:b.sessionId as string,finalRoot:hexToBytes(b.finalRoot as string),scheduleHash:hexToBytes(row.schedule_hash),seedCommitment:hexToBytes(row.seed_commitment),terminal:parsed.value.terminal}));
   if(!constantTimeEquals(te.encode(signature),te.encode(expectedSig))) return err("invalid_signature","Client signature mismatch",401,id,cors);
-  const claim=await env.DB.prepare(`UPDATE sessions_v3 SET used=1 WHERE session_id=? AND started=1 AND used=0`).bind(b.sessionId).run();
-  if(claim.meta?.changes!==1) return err("replay","Session already used",409,id,cors);
   const submittedAt=Date.now(), expires=submittedAt+86_400_000;
   // A random placeholder satisfies the pending-row CHECK until the returned
   // score ID can be bound into the real capability. It is never returned.
   const provisionalCapabilityHash=await digestHex(crypto.getRandomValues(new Uint8Array(32)));
   let scoreId:number;
   try {
-    const insert=await env.DB.prepare(`INSERT INTO scores_v3 (name,category_key,protocol_version,protocol_id,rules_version,rules_id,policy_version,policy_id,mode,conduct,terminal_total,chickens,coins,signed_accumulator,premium_bps,packages_delivered,courtesy_count,animal_hits,objective_completed,max_combo,max_delivery_chain,round_duration_ms,time_left_ms,game_over_reason,build,platform,session_id,submitted_at,ip_hash,status,moderation_note,submission_source,restoration_key,final_root,schedule_hash,seed_commitment,event_count,signature_key_id,evidence_capability_hash,evidence_expires_at) VALUES (?,?,3,?,3,?,1,?,\'rotation\',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',NULL,'verified',NULL,?,?,?,?,?,?,?)`)
-      .bind(b.name,b.categoryKey,PROTOCOL_ID,RULES_ID,POLICY_ID,conductFor(b.categoryKey as string),b.terminalTotal,b.chickens??null,b.coins??null,parsed.value.accumulator,b.premiumBps??null,b.packagesDelivered??null,b.courtesyCount??null,b.animalHits??null,b.objectiveCompleted?1:0,b.maxCombo??null,b.maxDeliveryChain??null,b.roundDurationMs,b.timeLeftMs,b.gameOverReason,b.build,b.platform,b.sessionId,submittedAt,await ipHash(ip,env.LB_IP_HASH_PEPPER),b.finalRoot,b.scheduleHash,row.seed_commitment,b.eventCount,b.signatureKeyId,provisionalCapabilityHash,expires).run();
+    const insertStatement=env.DB.prepare(`INSERT INTO scores_v3 (name,category_key,protocol_version,protocol_id,rules_version,rules_id,policy_version,policy_id,mode,conduct,terminal_total,chickens,coins,signed_accumulator,premium_bps,packages_delivered,courtesy_count,animal_hits,objective_completed,max_combo,max_delivery_chain,round_duration_ms,time_left_ms,game_over_reason,build,platform,session_id,submitted_at,ip_hash,status,moderation_note,submission_source,restoration_key,final_root,schedule_hash,seed_commitment,event_count,signature_key_id,evidence_capability_hash,evidence_expires_at) VALUES (?,?,3,?,3,?,1,?,\'rotation\',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',NULL,'verified',NULL,?,?,?,?,?,?,?)`)
+      .bind(b.name,b.categoryKey,PROTOCOL_ID,RULES_ID,POLICY_ID,conductFor(b.categoryKey as string),b.terminalTotal,b.chickens??null,b.coins??null,parsed.value.accumulator,b.premiumBps??null,b.packagesDelivered??null,b.courtesyCount??null,b.animalHits??null,b.objectiveCompleted?1:0,b.maxCombo??null,b.maxDeliveryChain??null,b.roundDurationMs,b.timeLeftMs,b.gameOverReason,b.build,b.platform,b.sessionId,submittedAt,await ipHash(ip,env.LB_IP_HASH_PEPPER),b.finalRoot,b.scheduleHash,row.seed_commitment,b.eventCount,b.signatureKeyId,provisionalCapabilityHash,expires);
+    const claim=await env.DB.prepare(`UPDATE sessions_v3 SET used=1 WHERE session_id=? AND started=1 AND used=0`).bind(b.sessionId).run();
+    if(claim.meta?.changes!==1) return err("replay","Session already used",409,id,cors);
+    const insert=await insertStatement.run();
     scoreId=Number(insert.meta?.last_row_id); if(!Number.isSafeInteger(scoreId)||scoreId<1) throw new Error("missing id");
     const cap=await capability(env,scoreId,b.sessionId as string,b.finalRoot as string,expires), capHash=await digestHex(te.encode(cap));
     const upd=await env.DB.prepare(`UPDATE scores_v3 SET evidence_capability_hash=? WHERE id=? AND status='pending' AND evidence_capability_hash=?`).bind(capHash,scoreId,provisionalCapabilityHash).run(); if(upd.meta?.changes!==1) throw new Error("capability update failed");
@@ -241,27 +285,6 @@ async function submitScore(request: Request, env: V3Env, cors:Cors, id:string): 
 
 interface EvidenceScore { id:number; session_id:string; category_key:string; final_root:string; schedule_hash:string; seed_commitment:string; event_count:number; evidence_capability_hash:string; evidence_expires_at:number; status:string; terminal_total:number; chickens:number|null; coins:number|null; signed_accumulator:number|null; premium_bps:number|null; packages_delivered:number|null; courtesy_count:number|null; animal_hits:number|null; objective_completed:number; max_combo:number|null; max_delivery_chain:number|null; round_duration_ms:number; time_left_ms:number; game_over_reason:string; build:string; platform:string; submitted_at:number; }
 interface ExistingEvidence { final_root:string; evidence_hash:string; ledger_bytes:ArrayBuffer; replay_result:string; quarantine_reason:string|null; }
-class Reader { constructor(readonly bytes:Uint8Array,public at=0){} need(n:number){if(this.at+n>this.bytes.length)throw new Error("truncated");} u8(){this.need(1);return this.bytes[this.at++]!;} u32(){this.need(4);let n=0;for(let i=0;i<4;i++)n=n*256+this.bytes[this.at++]!;return n;} u64(){this.need(8);let n=0n;for(let i=0;i<8;i++)n=n*256n+BigInt(this.bytes[this.at++]!);return n;} take(n:number){this.need(n);const x=this.bytes.slice(this.at,this.at+n);this.at+=n;return x;} lp1(expected?:string){const x=this.take(this.u8());if(x.length===0)throw new Error("empty lp1");const s=new TextDecoder("utf-8",{fatal:true,ignoreBOM:true}).decode(x);if(expected!==undefined&&s!==expected)throw new Error("domain");return s;} }
-function recordEnd(reader:Reader, kind:number): void {
-  const fixed=(n:number)=>reader.take(n);
-  switch(kind){case 1:fixed(22);break;case 2:fixed(31);break;case 3:fixed(16);break;case 4:{const conduct=reader.bytes[reader.at];fixed(conduct===0?17:34);break;}case 5:fixed(20);break;case 6:fixed(19);break;case 7:{const conduct=reader.u8();reader.u8();fixed(conduct===0?30:49);reader.lp1();reader.u8();break;}case 8:fixed(2);break;case 9:fixed(54);break;case 10:fixed(33);break;case 11:fixed(37);break;case 12:fixed(29);break;case 13:fixed(45);break;case 14:fixed(17);break;default:throw new Error("unknown event");}
-}
-async function replay(row:EvidenceScore, session:SessionRow, ledger:Uint8Array): Promise<{match:boolean;reason:string;terminal:Uint8Array;root:string}> {
-  if(ledger.length<1||ledger.length>MAX_LEDGER_BYTES) return {match:false,reason:"ledger_size",terminal:new Uint8Array(),root:""};
-  let previous=await sha256(startedSessionHeader(sessionHeader(session),BigInt(session.started_at!))); const r=new Reader(ledger); let terminal=new Uint8Array(), priorMs=-1n, priorOrder=-1;
-  try {
-    for(let seq=0;seq<row.event_count;seq++){
-      const begin=r.at; r.lp1("roady.v3.event"); if(r.u32()!==seq)throw new Error("sequence"); const ms=r.u64(); const kind=r.u8();
-      if(ms<priorMs)throw new Error("event_order"); const order=kind===7?255:kind; if(ms===priorMs&&order<priorOrder)throw new Error("same_ms_order"); priorMs=ms;priorOrder=order;
-      recordEnd(r,kind); const record=r.bytes.slice(begin,r.at); if(record.length>192)throw new Error("record_size"); const storedHash=r.take(32); const calculated=await sha256(new Uint8Array([...previous,...record])); if(!constantTimeEquals(storedHash,calculated))throw new Error("chain"); previous=storedHash;
-      if(kind===7){if(seq!==row.event_count-1)throw new Error("terminal_not_last"); terminal=record.slice(27);}
-    }
-    if(r.at!==ledger.length)throw new Error("trailing_bytes"); if(!terminal.length)throw new Error("missing_terminal");
-    const expected=terminalForRow(row); if(!constantTimeEquals(terminal,terminalBytes(expected)))throw new Error("terminal_aggregate");
-    const root=bytesToHex(await finalRoot(await sha256(startedSessionHeader(sessionHeader(session),BigInt(session.started_at!))),previous,expected));
-    if(root!==row.final_root)throw new Error("root"); return {match:true,reason:"match",terminal,root};
-  } catch(e){return {match:false,reason:String(e instanceof Error?e.message:e),terminal,root:""};}
-}
 function terminalForRow(r:EvidenceScore):ConductTerminal { const base={reason:reasonOrdinal(r.game_over_reason),total:BigInt(r.terminal_total),objectiveCompleted:r.objective_completed===1,durationMs:BigInt(r.round_duration_ms),remainingMs:BigInt(r.time_left_ms),build:r.build,platform:platformOrdinal(r.platform)}; return r.category_key===CLUCK_HUNT_CATEGORY?{...base,conduct:"cluck_hunt",chickens:BigInt(r.chickens!),coins:BigInt(r.coins!),maxCombo:r.max_combo!}:{...base,conduct:"right_of_way",accumulator:BigInt(r.signed_accumulator!),premiumBps:BigInt(r.premium_bps!),packagesDelivered:BigInt(r.packages_delivered!),courtesyCount:BigInt(r.courtesy_count!),animalHits:BigInt(r.animal_hits!),maxDeliveryChain:BigInt(r.max_delivery_chain!)}; }
 async function rankFor(env:V3Env,row:{id:number;category_key:string;terminal_total:number;submitted_at:number}):Promise<number>{const a=await env.DB.prepare(`SELECT COUNT(*) ahead FROM scores_v3 WHERE category_key=? AND status='live' AND (terminal_total>? OR (terminal_total=? AND submitted_at<?) OR (terminal_total=? AND submitted_at=? AND id<?))`).bind(row.category_key,row.terminal_total,row.terminal_total,row.submitted_at,row.terminal_total,row.submitted_at,row.id).first<{ahead:number}>();return Number(a?.ahead??0)+1;}
 
@@ -275,7 +298,7 @@ async function uploadEvidence(request:Request,env:V3Env,cors:Cors,id:string):Pro
  const existing=await env.DB.prepare(`SELECT final_root,evidence_hash,ledger_bytes,replay_result,quarantine_reason FROM score_evidence_v3 WHERE score_id=?`).bind(row.id).first<ExistingEvidence>();
  if(existing){const same=existing.final_root===body.finalRoot&&existing.evidence_hash===body.evidenceHash&&constantTimeEquals(new Uint8Array(existing.ledger_bytes),ledger);if(!same)return err("evidence_conflict","Evidence capability was already consumed by different bytes",409,id,cors);const live=existing.replay_result==="match";return json({accepted:live,idempotent:true,status:live?"live":"quarantined",rank:live?await rankFor(env,row):null},200,cors,NO_STORE);}
  if(Date.now()>row.evidence_expires_at)return err("expired_capability","Evidence capability expired",409,id,cors);
- let result:{match:boolean;reason:string};if(body.finalRoot!==row.final_root)result={match:false,reason:"submitted_root"};else if(body.evidenceHash!==hash)result={match:false,reason:"evidence_hash"};else {const session=await env.DB.prepare(`SELECT session_id,category_key,challenge,proof,seed_iv,seed_ciphertext,seed_key_id,seed_commitment,schedule_hash,issued_at,start_by_expiry,started_at,started,used,turnstile_verified FROM sessions_v3 WHERE session_id=?`).bind(row.session_id).first<SessionRow>();result=!session||session.started!==1?{match:false,reason:"session_binding"}:await replay(row,session,ledger);}
+ let result:{match:boolean;reason:string};if(body.finalRoot!==row.final_root)result={match:false,reason:"submitted_root"};else if(body.evidenceHash!==hash)result={match:false,reason:"evidence_hash"};else {const session=await env.DB.prepare(`SELECT session_id,category_key,challenge,proof,seed_iv,seed_ciphertext,seed_key_id,seed_commitment,schedule_hash,issued_at,start_by_expiry,started_at,started,used,turnstile_verified FROM sessions_v3 WHERE session_id=?`).bind(row.session_id).first<SessionRow>();if(!session||session.started!==1)result={match:false,reason:"session_binding"};else {const seed=await decryptAndVerifySeed(session,env);result=!seed?{match:false,reason:"seed_binding"}:await replayEvidence(row,session,sessionHeader(session),ledger,seed,()=>terminalForRow(row));}}
  try{await env.DB.batch([env.DB.prepare(`INSERT INTO score_evidence_v3(score_id,session_id,final_root,evidence_hash,ledger_bytes,replay_result,quarantine_reason,uploaded_at) VALUES(?,?,?,?,?,?,?,?)`).bind(row.id,row.session_id,body.finalRoot,body.evidenceHash,ledger,result.match?"match":"mismatch",result.match?null:result.reason,Date.now()),env.DB.prepare(`UPDATE scores_v3 SET status=?,moderation_note=? WHERE id=? AND status='pending'`).bind(result.match?"live":"quarantined",result.match?null:`evidence:${result.reason}`,row.id)]);}catch{return err("evidence_conflict","Evidence was concurrently consumed",409,id,cors);}
  if(!result.match)return err("evidence_conflict","Evidence did not match the immutable score",409,id,cors);return json({accepted:true,idempotent:false,status:"live",rank:await rankFor(env,row)},201,cors,NO_STORE);
 }
@@ -288,7 +311,7 @@ async function myRank(request:Request,env:V3Env,cors:Cors,id:string):Promise<Res
 }
 
 function admin(request:Request,env:V3Env):boolean{const got=request.headers.get("Authorization")??"",expected=`Bearer ${env.LB_ADMIN_TOKEN}`;return !placeholder(env.LB_ADMIN_TOKEN)&&got.length===expected.length&&constantTimeEquals(te.encode(got),te.encode(expected));}
-async function moderate(request:Request,scoreId:number,status:"hidden"|"deleted",env:V3Env,cors:Cors,id:string):Promise<Response>{if(!admin(request,env))return err("unauthorized","Invalid admin token",401,id,cors);const action=status==="hidden"?"hide":"delete",at=Date.now();try{await env.DB.batch([env.DB.prepare(`UPDATE scores_v3 SET status=?,moderation_note=? WHERE id=? AND status='live'`).bind(status,`${status} by admin`,scoreId),env.DB.prepare(`INSERT INTO moderation_log_v3(action,target_score_id,admin,at,note) SELECT ?,id,'admin',?,? FROM scores_v3 WHERE id=? AND status=?`).bind(action,at,`${status} by admin`,scoreId,status)]);const exists=await env.DB.prepare(`SELECT id FROM scores_v3 WHERE id=? AND status=?`).bind(scoreId,status).first();if(!exists)return err("not_found","No live v3 score with that id",404,id,cors);return json({ok:true,id:scoreId,status},200,cors,NO_STORE);}catch{return err("moderation_failed","Moderation failed safely",500,id,cors);}}
+async function moderate(request:Request,scoreId:number,status:"hidden"|"deleted",env:V3Env,cors:Cors,id:string):Promise<Response>{if(!admin(request,env))return err("unauthorized","Invalid admin token",401,id,cors);const action=status==="hidden"?"hide":"delete",at=Date.now();try{const result=await env.DB.batch([env.DB.prepare(`UPDATE scores_v3 SET status=?,moderation_note=? WHERE id=? AND status='live'`).bind(status,`${status} by admin`,scoreId),env.DB.prepare(`INSERT INTO moderation_log_v3(action,target_score_id,admin,at,note) SELECT ?,id,'admin',?,? FROM scores_v3 WHERE id=? AND status=?`).bind(action,at,`${status} by admin`,scoreId,status)]);if((result[0] as D1Result).meta?.changes!==1)return err("not_found","No live v3 score with that id",404,id,cors);return json({ok:true,id:scoreId,status},200,cors,NO_STORE);}catch{return err("moderation_failed","Moderation failed safely",500,id,cors);}}
 
 async function restore(request:Request,env:V3Env,cors:Cors,id:string):Promise<Response>{
  if(!admin(request,env))return err("unauthorized","Invalid admin token",401,id,cors);const body=await bounded(request,4096);if(!exactObject(body,["restorationKey","evidenceHash","known","synthetic","reason"])||!utf8(body.restorationKey,1,128)||!/^[A-Za-z0-9._:-]+$/.test(body.restorationKey)||!exactHex(body.evidenceHash)||!utf8(body.reason,1,256)||!isPlainObject(body.known)||!isPlainObject(body.synthetic))return err("invalid_body","Invalid restoration body",422,id,cors);

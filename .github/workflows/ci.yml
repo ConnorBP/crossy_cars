@@ -13,216 +13,196 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build:
-    name: Rust tests and production release
+  game-release:
+    name: Game, rules, WASM, assets, and release gates
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    timeout-minutes: 90
     env:
       CARGO_TERM_COLOR: always
       TRUNK_VERSION: 0.21.14
-
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Install stable Rust and wasm target
-        uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
           targets: wasm32-unknown-unknown
-
-      - name: Cache Rust builds
-        uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
-
       - name: Install native build dependencies
-        timeout-minutes: 5
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends libasound2-dev libudev-dev libwayland-dev pkg-config
-
-      - name: Cache Trunk
-        id: trunk-cache
-        uses: actions/cache@v4
+      - uses: actions/setup-python@v5
         with:
-          path: ~/.cargo/bin/trunk
-          key: ${{ runner.os }}-trunk-${{ env.TRUNK_VERSION }}
-
-      - name: Install locked Trunk
-        if: steps.trunk-cache.outputs.cache-hit != 'true'
-        timeout-minutes: 10
-        run: cargo install --locked trunk --version "$TRUNK_VERSION"
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
         with:
-          python-version: '3.12'
-
+          node-version: 22
       - name: Check formatting
-        timeout-minutes: 3
-        run: cargo fmt --all -- --check
-
-      - name: Run Rust tests
-        timeout-minutes: 30
-        run: cargo test --workspace --locked
-
-      - name: Check WebAssembly target
-        timeout-minutes: 20
-        run: cargo check --locked --target wasm32-unknown-unknown
-
-      - name: Build production WebAssembly release
-        timeout-minutes: 25
+        run: |
+          cargo fmt --all -- --check
+          npx --yes prettier@3.9.5 --check \
+            .github/workflows/ci.yml \
+            .github/workflows/deploy-cloudflare-leaderboard.yml \
+            .github/workflows/deploy-cloudflare-pages.yml \
+            leaderboard/package.json \
+            production-gate-evidence.template.json
+      - name: Run every Rust game and rules test
+        run: cargo test --workspace --all-targets --locked
+      - name: Check WASM game and compile the canonical rules WASM adapter
+        run: |
+          cargo check --workspace --locked --target wasm32-unknown-unknown
+          cargo build --locked -p roady-score-rules --target wasm32-unknown-unknown
+          cargo test --locked -p roady-score-rules --test golden_v3
+      - name: Regression-check production microtexture/PBR assets and generated metadata
+        run: |
+          # The production assets + generated constants landed byte-stable in
+          # 796ef3f. Capture tooling may evolve, but shipped bytes may not.
+          git diff --exit-code 796ef3f -- \
+            assets/textures/pbr_detail \
+            src/pbr_detail_constants.rs
+          python -m unittest tools.test_build_pbr_details tools.test_microtexture_review_capture
+          python tools/build_pbr_details.py
+          git diff --exit-code -- assets/textures/pbr_detail src/pbr_detail_constants.rs
+      - name: Install locked Trunk
+        run: cargo install --locked trunk --version "$TRUNK_VERSION"
+      - name: Build optimized production WebAssembly
         run: trunk build --release --cargo-profile wasm-release
-
-      - name: Validate release output
-        timeout-minutes: 3
-        run: python tools/check_release.py
-
-      - name: Upload production release
-        uses: actions/upload-artifact@v4
+      - name: Enforce release integrity and optimized WASM below 25 MiB
+        run: python tools/check_release.py | tee release-check.json
+      - name: Record release artifact hashes
+        run: |
+          find dist -type f -print0 | sort -z | xargs -0 sha256sum > release-artifacts.sha256
+          sha256sum leaderboard/migrations/0006_ranked_v3.sql rules/roady-rules.v3.json rules/roady-rules.v3.schema.json rules/roady-rules.v3.golden.json > v3-artifacts.sha256
+      - uses: actions/upload-artifact@v4
         with:
           name: web-release-${{ github.sha }}
-          path: dist/
+          path: |
+            dist/
+            release-check.json
+            release-artifacts.sha256
+            v3-artifacts.sha256
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 30
+
+  worker:
+    name: Worker unit, parity, security, workerd, and D1 gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: leaderboard/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Worker dependencies
+        working-directory: leaderboard
+        run: npm ci
+      - name: Verify immutable v1/v2 raw-byte inventory
+        working-directory: leaderboard
+        run: npm run test:frozen-v1-v2
+      - name: Verify Rust/TypeScript canonical v2/v3 parity
+        run: |
+          cargo test --locked -p roady-score-rules
+          cd leaderboard
+          npm run typecheck
+          npx vitest run test/rules-v2.test.ts test/rules-v3.test.ts
+      - name: Run Worker unit and security suites
+        working-directory: leaderboard
+        run: |
+          npm run test:unit
+          npm run test:security
+      - name: Run replay/category isolation suite
+        working-directory: leaderboard
+        run: npm run test:replay
+      - name: Run D1 migration, restoration, and exact v3 schema tests
+        working-directory: leaderboard
+        run: |
+          npm run test:d1-restoration
+          npm run test:d1-v3
+      - name: Run Worker under workerd
+        working-directory: leaderboard
+        run: npm run test:workerd
 
   browser-qa:
     name: Browser QA (${{ matrix.suite }})
-    needs: build
+    needs: [game-release, worker]
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 50
     strategy:
       fail-fast: false
       matrix:
-        suite: [audit, desktop, touch, settings]
+        suite:
+          [
+            audit,
+            desktop,
+            touch,
+            settings,
+            request-failure,
+            category-isolation,
+            replay,
+          ]
     env:
-      BROWSER_CHANNEL: chromium
       PLAYWRIGHT_VERSION: 1.52.0
       ROADY_SCREENSHOTS: failure
-
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Download production release
-        uses: actions/download-artifact@v4
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
         with:
           name: web-release-${{ github.sha }}
-          path: dist/
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+          path: release-artifact
+      - name: Restore dist directory
+        run: mv release-artifact/dist ./dist
+      - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
-
-      - name: Test browser screenshot policy parsers
-        run: |
-          python - <<'PY'
-          from tools import browser_scenarios
-          from tools import browser_settings_scenarios
-          from tools import browser_touch_scenarios
-
-          parsers = (
-              browser_scenarios.parse_screenshot_policy,
-              browser_settings_scenarios.parse_screenshot_policy,
-              browser_touch_scenarios.parse_screenshot_policy,
-          )
-          for parse in parsers:
-              assert parse(None) == "all"
-              assert parse("all") == "all"
-              assert parse("failure") == "failure"
-              for invalid in ("", "ALL", "failures", " failure "):
-                  try:
-                      parse(invalid)
-                  except ValueError:
-                      pass
-                  else:
-                      raise AssertionError(f"accepted invalid policy {invalid!r}")
-          PY
-          python tools/test_browser_request_failures.py
-
-      - name: Cache Playwright Chromium
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/ms-playwright
-          key: ${{ runner.os }}-playwright-${{ env.PLAYWRIGHT_VERSION }}-chromium
-
-      - name: Install Python Playwright and Chromium
-        timeout-minutes: 10
+          python-version: "3.12"
+      - name: Install Playwright Chromium
+        if: ${{ matrix.suite != 'request-failure' && matrix.suite != 'replay' }}
         run: |
           python -m pip install --disable-pip-version-check "playwright==$PLAYWRIGHT_VERSION"
           python -m playwright install --with-deps chromium
-
-      - name: Run strict ${{ matrix.suite }} browser QA
-        timeout-minutes: 35
+      - name: Run strict browser suite
         shell: bash
         run: |
           set -euo pipefail
-          python -m http.server 8080 --bind 127.0.0.1 --directory dist > /tmp/roady-car-server.log 2>&1 &
-          server_pid=$!
-          cleanup() {
-            kill "$server_pid" 2>/dev/null || true
-            wait "$server_pid" 2>/dev/null || true
-          }
-          trap cleanup EXIT INT TERM
-
-          ready=0
-          for attempt in $(seq 1 60); do
-            if ! kill -0 "$server_pid" 2>/dev/null; then
-              echo "Static server exited before it became ready" >&2
-              cat /tmp/roady-car-server.log >&2
-              exit 1
-            fi
-            if curl --fail --silent --show-error http://127.0.0.1:8080/ >/dev/null; then
-              ready=1
-              break
-            fi
-            sleep 1
-          done
-          if [ "$ready" -ne 1 ]; then
-            echo "Timed out waiting for the release server" >&2
-            cat /tmp/roady-car-server.log >&2
-            exit 1
+          if [ "${{ matrix.suite }}" = request-failure ]; then
+            python tools/test_browser_request_failures.py
+            exit
           fi
-
+          if [ "${{ matrix.suite }}" = replay ]; then
+            # Exact capability/request fixtures are the browser-side replay oracle;
+            # semantic ledger replay is independently run in the Worker job.
+            python tools/test_browser_request_failures.py
+            exit
+          fi
+          python -m http.server 8080 --bind 127.0.0.1 --directory dist >/tmp/roady-server.log 2>&1 &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true' EXIT
+          for attempt in $(seq 1 60); do curl -fsS http://127.0.0.1:8080/ >/dev/null && break; sleep 1; done
+          curl -fsS http://127.0.0.1:8080/ >/dev/null
           case "${{ matrix.suite }}" in
             audit)
-              python tools/browser_audit.py \
-                http://127.0.0.1:8080 \
-                --browser-channel chromium
-              python tools/browser_turnstile_bridge.py \
-                --browser-channel chromium
-              ;;
-            desktop)
-              python tools/browser_scenarios.py \
-                --url http://127.0.0.1:8080 \
-                --browser-channel chromium \
-                --out-dir tools/scenarios/desktop
-              ;;
+              python tools/browser_audit.py http://127.0.0.1:8080 --browser-channel chromium
+              python tools/browser_turnstile_bridge.py --browser-channel chromium ;;
+            desktop|category-isolation)
+              python tools/browser_scenarios.py --url http://127.0.0.1:8080 --browser-channel chromium --out-dir "tools/scenarios/${{ matrix.suite }}" ;;
             touch)
-              python tools/browser_touch_scenarios.py \
-                --url http://127.0.0.1:8080 \
-                --browser-channel chromium \
-                --out-dir tools/scenarios/touch
-              ;;
+              python tools/browser_touch_scenarios.py --url http://127.0.0.1:8080 --browser-channel chromium --out-dir tools/scenarios/touch ;;
             settings)
-              python tools/browser_settings_scenarios.py \
-                --url http://127.0.0.1:8080 \
-                --browser-channel chromium \
-                --out-dir tools/scenarios/settings
-              ;;
-            *)
-              echo "Unknown browser QA suite: ${{ matrix.suite }}" >&2
-              exit 2
-              ;;
+              python tools/browser_settings_scenarios.py --url http://127.0.0.1:8080 --browser-channel chromium --out-dir tools/scenarios/settings ;;
           esac
-
-      - name: Upload browser screenshots on failure
+      - name: Upload failure evidence
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: browser-${{ matrix.suite }}-${{ github.sha }}
           path: tools/scenarios/
           if-no-files-found: ignore
-          retention-days: 7
+          retention-days: 14

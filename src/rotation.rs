@@ -9,7 +9,7 @@ use crate::game::{RoundClockSet, SpawnSet};
 use crate::game_modes::{ActivePlayClock, ActiveRunRules, Conduct, GameModeSetupSet};
 use crate::ledger::{CanonicalEventQueue, PendingCanonicalEvent};
 use crate::modifiers::{ActiveModifier, effect_modifier};
-use crate::right_of_way::RightOfWayRun;
+use crate::right_of_way::{PendingRightOfWayActions, RightOfWayRun};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum RotationPhase {
@@ -35,6 +35,7 @@ pub struct RotationState {
     pub events: Option<[ScheduledEvent; 2]>,
     pub phase: RotationPhase,
     pub awarded_waves: u32,
+    pub last_emitted_ms: u64,
 }
 
 impl Default for RotationState {
@@ -44,6 +45,7 @@ impl Default for RotationState {
             events: None,
             phase: RotationPhase::Grace,
             awarded_waves: 0,
+            last_emitted_ms: 0,
         }
     }
 }
@@ -226,6 +228,57 @@ pub fn deterministic_retirement_order(
         .then_with(|| a.entity_bits.cmp(&b.entity_bits))
 }
 
+fn emit_segment_edges(
+    previous_ms: u64,
+    now_ms: u64,
+    schedule: &[RotationWindow; v3::SCHEDULE_SEGMENTS],
+    events: Option<[ScheduledEvent; 2]>,
+    queue: &mut CanonicalEventQueue,
+) {
+    if now_ms < previous_ms {
+        return;
+    }
+    for window in schedule {
+        for (at, active) in [
+            (window.active_end_ms, false),
+            (window.active_start_ms, true),
+        ] {
+            if at > previous_ms && at <= now_ms {
+                queue.push(PendingCanonicalEvent {
+                    active_ms: at,
+                    stable_id: u64::from(window.effect as u8),
+                    payload: v3::canonical::EventPayload::SegmentChanged {
+                        segment_kind: 0,
+                        effect_or_event: window.effect as u8,
+                        active,
+                        start_ms: window.active_start_ms,
+                        end_ms: window.active_end_ms,
+                    },
+                });
+            }
+        }
+    }
+    if let Some(events) = events {
+        for (index, &(start_ms, end_ms)) in v3::EVENT_WINDOWS.iter().enumerate() {
+            for (at, active) in [(end_ms, false), (start_ms, true)] {
+                if at > previous_ms && at <= now_ms {
+                    queue.push(PendingCanonicalEvent {
+                        active_ms: at,
+                        stable_id: index as u64,
+                        payload: v3::canonical::EventPayload::SegmentChanged {
+                            segment_kind: 1,
+                            effect_or_event: events[index] as u8,
+                            active,
+                            start_ms,
+                            end_ms,
+                        },
+                    });
+                }
+            }
+        }
+    }
+}
+
 pub struct RotationPlugin;
 impl Plugin for RotationPlugin {
     fn build(&self, app: &mut App) {
@@ -256,7 +309,7 @@ fn setup_rotation(
     *rotation = RotationState::default();
     *frenzy = FrenzyState::default();
     if let Some(receipt) = rules.ranked_receipt() {
-        let windows = v3::rotation_schedule(&receipt.seed);
+        let windows = receipt.schedule;
         rotation.events = Some(v3::scheduled_events(&receipt.seed, &windows));
         rotation.windows = Some(windows);
         frenzy.opportunities = v3::frenzy_opportunities(&receipt.seed, v3::FRENZY_PITY_MS + 12_001);
@@ -270,12 +323,23 @@ fn tick_rotation(
     mut modifier: ResMut<ActiveModifier>,
     rules: Res<ActiveRunRules>,
     mut score: ResMut<Score>,
-    mut right_of_way: Option<ResMut<RightOfWayRun>>,
-    mut queue: Option<ResMut<CanonicalEventQueue>>,
+    right_of_way: Option<Res<RightOfWayRun>>,
+    mut pending_right_of_way: Option<ResMut<PendingRightOfWayActions>>,
+    mut canonical_queue: Option<ResMut<CanonicalEventQueue>>,
 ) {
     let now = clock.milliseconds();
-    if let Some(schedule) = rotation.windows.as_ref() {
-        rotation.phase = phase_at(schedule, now);
+    if let Some(schedule) = rotation.windows {
+        if let Some(queue) = canonical_queue.as_mut() {
+            emit_segment_edges(
+                rotation.last_emitted_ms,
+                now,
+                &schedule,
+                rotation.events,
+                queue,
+            );
+        }
+        rotation.last_emitted_ms = now;
+        rotation.phase = phase_at(&schedule, now);
         modifier.0 = rotation
             .effect_at(now)
             .map(effect_modifier)
@@ -288,33 +352,13 @@ fn tick_rotation(
                         score.chickens = v3::cluck_wave_award(score.chickens, true);
                     }
                     Conduct::RightOfWay => {
-                        let Some(run) = right_of_way.as_mut() else {
+                        if right_of_way.as_ref().is_none_or(|run| run.failed) {
+                            break;
+                        }
+                        let Some(pending) = pending_right_of_way.as_mut() else {
                             break;
                         };
-                        let premium_bps = run.score.premium_bps;
-                        let guilt = run.score.guilt_remaining_ms != 0;
-                        match run.score.wave(true) {
-                            Ok(Some(award)) => {
-                                if let Some(queue) = queue.as_mut() {
-                                    queue.push(PendingCanonicalEvent {
-                                        active_ms: now,
-                                        stable_id: u64::from(rotation.awarded_waves),
-                                        payload: v3::canonical::EventPayload::WaveAward {
-                                            base: award.base,
-                                            premium_bps,
-                                            guilt,
-                                            credited: award.credited,
-                                            accumulator_before: award.before,
-                                            accumulator_after: award.after,
-                                        },
-                                    });
-                                }
-                            }
-                            _ => {
-                                run.failed = true;
-                                break;
-                            }
-                        }
+                        pending.wave(now, rotation.awarded_waves);
                     }
                 }
                 rotation.awarded_waves += 1;
@@ -447,6 +491,29 @@ mod tests {
         };
         assert!(!frenzy.collect(12_100));
         assert_eq!(frenzy.phase, FrenzyRuntimePhase::Expired);
+    }
+
+    #[test]
+    fn segment_edges_emit_every_crossed_boundary_once_and_in_order() {
+        let schedule = v3::rotation_schedule(&seed());
+        let events = v3::scheduled_events(&seed(), &schedule);
+        let mut queue = CanonicalEventQueue::default();
+        emit_segment_edges(10_999, 29_000, &schedule, Some(events), &mut queue);
+        queue.0.sort_by(crate::ledger::canonical_event_order);
+        let points: Vec<_> = queue
+            .0
+            .iter()
+            .map(|event| (event.active_ms, event.payload.kind()))
+            .collect();
+        assert_eq!(points.len(), 4); // rotation start/end + E0 start/end
+        assert_eq!(points[0].0, 11_000);
+        assert_eq!(points[1].0, 15_000);
+        assert_eq!(points[2].0, 23_000);
+        assert_eq!(points[3].0, 29_000);
+
+        let mut none = CanonicalEventQueue::default();
+        emit_segment_edges(29_000, 29_000, &schedule, Some(events), &mut none);
+        assert!(none.0.is_empty());
     }
 
     #[test]

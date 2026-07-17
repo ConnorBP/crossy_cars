@@ -82,20 +82,27 @@ curl 'http://localhost:8787/v1/leaderboard.svg?condition=0&limit=10'
 ## Tests
 
 ```bash
-npm test                 # vitest run — unit, route, and replay-ordering tests
-npm run test:watch       # watch mode
-npm run typecheck        # tsc --noEmit
+npm run typecheck          # tsc --noEmit
+npm run test:frozen-v1-v2  # immutable raw-Git-byte inventory
+npm run test:unit          # all Vitest unit/route tests
+npm run test:security      # strict config, crypto, route and replay defenses
+npm run test:replay        # canonical parity and semantic evidence replay
+npm run test:d1-restoration
+npm run test:d1-v3         # empty/populated additive migration + exact registry
+npm run test:workerd       # bundled Worker in the real workerd runtime
+npm run test:ci            # every Worker gate above, in release order
 ```
 
-The tests are pure unit tests (canonical byte construction, HMAC sign/verify
+The Vitest tier contains pure unit tests (canonical byte construction, HMAC sign/verify
 round-trips, name normalization, score validation invariants, plausibility
 caps & moderation flagging, constant-time comparison, IP hashing) plus the
 replay-sensitive one-time session claim exercised against an in-memory D1 fake
-(`test/helpers.ts` `FakeD1`). They run in the default Node environment using
-Node's global Web Crypto API; no Cloudflare bindings or Miniflare runtime are
-required. An optional integration tier using
-`@cloudflare/vitest-pool-workers` with a real Miniflare D1 can be layered on
-later.
+(`test/helpers.ts` `FakeD1`). They run in the default Node environment using Node's global Web Crypto API.
+The required `test:workerd` tier additionally starts Wrangler's local workerd,
+applies every migration to local D1, and checks legacy health/board behavior,
+the exact disabled v3 capability tuple/cache header, and disabled issuance.
+`test:d1-v3` independently proves populated v1/v2 query bytes survive 0006 and
+checks the exact v3 registry, tables, foreign keys, and indexes.
 
 ## Deploy
 
@@ -281,11 +288,14 @@ recoverable nuisance friction and accepted key IDs should overlap during a
 controlled rotation.
 
 `ROADY_V3_RANKED_ENABLED` is a non-secret upper-bound switch. Missing, malformed,
-or anything except exact lowercase `true` is disabled. Keep it `false` while
-applying and checking migrations, artifacts, workerd replay, smoke tests, and
-two uncached production probes. Disabling stops new sessions but intentionally
-does not invalidate already-started scores/evidence. Never enable production
-by changing the source default or bypassing the code-level parity latch.
+or anything except exact lowercase `true` is disabled. The committed
+`wrangler.toml` value remains `false`. The deployment always deploys/probes that
+disabled state first. A later manual dispatch may request exact lowercase
+`true`, but refuses unless the named CI run tested the same full commit SHA,
+artifact and migration hashes match, Worker/workerd/D1 gates rerun, the remote
+registry is exact, two uncached disabled probes pass, and the reviewed
+code-level parity latch is true. Disabling stops new sessions but intentionally
+does not invalidate already-started score/evidence service.
 
 V3 endpoint summary: capabilities; session issuance/start; one-time pending
 score submission; evidence upload/replay; category leaderboard; personal rank;
@@ -319,11 +329,12 @@ unknown fields and use the addendum's 16 KiB/512 KiB bounds.
 6. **`ALLOWED_ORIGINS` must list your production origin.** The default
    (`https://car.segfault.site,https://roady-car.pages.dev,http://localhost:8080`) is a starting point;
    update it to the real production site origin so CORS allows submissions.
-7. **V3 secrets, migration parity, and production gate are intentionally unresolved.**
-   Provision the five v3 secrets above, apply migrations 0005 then 0006, run
-   local/remote D1 and workerd replay checks, and collect the addendum section 9
-   evidence. Ranked v3 must remain disabled until a separate review changes the
-   code-level parity latch.
+7. **V3 production credentials and evidence are environment-specific.**
+   Provision all five v3 secrets above, apply migrations 0005 then 0006, and
+   retain the workflow's machine-readable evidence artifacts. Missing auth or
+   a failed command leaves both capability and issuance disabled; it is never
+   waived. Ranked v3 remains disabled until a separately reviewed commit changes
+   the code-level parity latch and that same commit passes the guarded rollout.
 8. **Rate limit bindings use the `unsafe.bindings` form.** Confirm your
    Wrangler version / account supports anonymous rate-limit namespaces, or
    switch to named namespaces. Session and submit bindings fail closed when

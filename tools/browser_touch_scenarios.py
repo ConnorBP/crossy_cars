@@ -25,6 +25,7 @@ try:  # Direct script execution puts tools/ on sys.path.
         discard_pre_cleanup_screenshot,
         ignorable_request_failure,
         promote_pre_cleanup_screenshot,
+        is_v3_write,
     )
 except ImportError:  # Package-style imports used by helper self-tests.
     from .browser_scenarios import (
@@ -32,6 +33,7 @@ except ImportError:  # Package-style imports used by helper self-tests.
         discard_pre_cleanup_screenshot,
         ignorable_request_failure,
         promote_pre_cleanup_screenshot,
+        is_v3_write,
     )
 
 
@@ -193,6 +195,13 @@ def main() -> int:
                     {"url": request.url, "failure": request.failure}
                 ),
             )
+            v3_write_requests: list[dict[str, str]] = []
+            page.on(
+                "request",
+                lambda request: v3_write_requests.append({"method": request.method, "url": request.url})
+                if is_v3_write(request.method, request.url)
+                else None,
+            )
             page.on(
                 "response",
                 lambda response: summary["http_errors"].append(
@@ -313,6 +322,17 @@ def main() -> int:
             shot("03c_portrait_resumed.png")
             page.set_viewport_size({"width": 844, "height": 390})
             page.wait_for_timeout(500)
+            page.set_viewport_size({"width": 960, "height": 480})
+            page.wait_for_timeout(350)
+            short_960 = canvas.evaluate(
+                "e => { const r=e.getBoundingClientRect(); return "
+                "{width:r.width,height:r.height}; }"
+            )
+            if abs(short_960["width"] - 960) > 1 or abs(short_960["height"] - 480) > 1:
+                raise AssertionError(f"canvas did not fit 960x480 viewport: {short_960}")
+            shot("03d_short_960x480.png")
+            page.set_viewport_size({"width": 844, "height": 390})
+            page.wait_for_timeout(350)
             rect = canvas.evaluate(
                 "e => { const r=e.getBoundingClientRect(); return "
                 "{left:r.left,top:r.top,width:r.width,height:r.height}; }"
@@ -379,6 +399,9 @@ def main() -> int:
                 "menu proof: DRIVE touch must start Playing, not leave Paused/Menu",
             )
             page.wait_for_timeout(300)
+            if v3_write_requests:
+                raise AssertionError(f"Casual touch flow emitted v3 writes: {v3_write_requests}")
+            summary["v3_write_requests"] = v3_write_requests
 
             assert_no_browser_errors()
         except Exception:

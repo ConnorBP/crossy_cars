@@ -33,6 +33,7 @@ use crate::combos::{Combo, ComboUpdateSet};
 use crate::game::resources::{GameOverReason, RoundActive, Score, TimeLeft};
 use crate::game::state::GameState;
 use crate::game::{KeyboardStateSet, RestartRequested, SpawnSet, TouchStateSet, settings_closed};
+use crate::game_modes::ActiveRunRules;
 use crate::modifiers::ActiveModifier;
 use crate::objectives::ActiveObjective;
 use crate::palette;
@@ -1679,6 +1680,7 @@ fn on_gameover_enter(
     peak_combo: Res<PeakCombo>,
     elapsed: Res<RoundElapsedMs>,
     settings: Res<Settings>,
+    active_v3_product: Option<Res<ActiveRunRules>>,
     mut submission: ResMut<LeaderboardSubmission>,
 ) {
     let total = score.chickens + score.coins;
@@ -1703,8 +1705,17 @@ fn on_gameover_enter(
     submission.submit_epoch = submission.submit_epoch.wrapping_add(1).max(1);
 
     clear_submit_result();
-    // Drowning is explicitly local/unranked. Do not build, sign, or send a
-    // terminal payload, even when remembered-name auto-submit is enabled.
+    // Every explicit v3 Ranked/Casual x conduct product is owned exclusively
+    // by `competitive_v3`.  The frozen v1 auto-submit path remains available
+    // to legacy harnesses where ActiveRunRules is absent, but must never
+    // capture one of the four new products.
+    if active_v3_product.is_some() {
+        submission.state = SubmissionState::Unavailable;
+        spawn_gameover_ui(&mut commands);
+        return;
+    }
+    // Drowning is explicitly local/unranked in legacy v1. Do not build, sign,
+    // or send a terminal payload, even with remembered-name auto-submit.
     if submission.snapshot.game_over_reason.is_none() {
         submission.state = SubmissionState::Unavailable;
         spawn_gameover_ui(&mut commands);

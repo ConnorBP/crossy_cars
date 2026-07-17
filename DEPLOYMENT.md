@@ -8,12 +8,13 @@ GitHub Actions workflow, Cloudflare token, and rollout cadence:
 | Static game site (`dist/`) | Cloudflare **Pages** | [`deploy-cloudflare-pages.yml`](.github/workflows/deploy-cloudflare-pages.yml) | Pages: Edit |
 | Leaderboard API | Cloudflare **Worker + D1** | [`deploy-cloudflare-leaderboard.yml`](.github/workflows/deploy-cloudflare-leaderboard.yml) | Workers Scripts: Edit, D1: Edit, Account Settings: Read |
 
-The two workflows are deliberately separate so each token is least-privilege
-and the leaderboard backend can be rolled forward or rolled back without
-rebuilding the WASM site. Both run only on pushes to `master` (the Pages
-workflow on every push, the leaderboard workflow only when `leaderboard/**`
-or its own workflow file changes) and via manual **Run workflow** dispatch.
-Pull requests never deploy and never see deployment secrets.
+The workflows retain separate least-privilege tokens, but release order is now
+strict: successful CI -> disabled-first Worker/D1 deployment -> Pages. A manual
+Pages run must name a successful Worker run for the exact tested commit SHA and
+its machine-readable evidence artifact. The later v3 enable rollout is a
+separate guarded Worker dispatch. Pull requests never deploy or receive secrets.
+See [PRODUCTION_VERIFICATION.md](PRODUCTION_VERIFICATION.md) for the operational
+runbook and `production-gate-evidence.template.json` for the evidence record.
 
 The leaderboard backend is specified in [LEADERBOARD_ARCHITECTURE.md](LEADERBOARD_ARCHITECTURE.md)
 and implemented under [`leaderboard/`](leaderboard). This document covers the
@@ -95,7 +96,7 @@ Token** and grant exactly:
 
 This token is **separate** from the Pages token. Do not reuse a Pages-only
 token; it lacks Workers/D1 Edit and the workflow will fail at the migrate/deploy
-step. Store it as GitHub secret `CLOUDFLARE_API_TOKEN`.
+step. Store it as GitHub secret `CLOUDFLARE_WORKER_API_TOKEN`.
 
 ### A.3 GitHub variables (non-secret)
 
@@ -114,13 +115,20 @@ workflow never echoes secret values; it pipes them over stdin to
 
 | Secret | Used for | How to generate |
 | --- | --- | --- |
-| `CLOUDFLARE_API_TOKEN` | Authenticating Wrangler in CI | Cloudflare API token (§A.2) |
+| `CLOUDFLARE_WORKER_API_TOKEN` | Authenticating Worker/D1 Wrangler operations in CI | Cloudflare API token (§A.2) |
 | `CLOUDFLARE_ACCOUNT_ID` | Cloudflare account id | Dashboard account overview |
 | `LB_SESSION_HMAC_KEY` | Worker-issued session-proof HMAC key (≥32 random bytes, base64) | `openssl rand -base64 32` |
 | `LB_IP_HASH_PEPPER` | Pepper mixed with client IP before SHA-256 hashing (≥32 random bytes, base64) | `openssl rand -base64 32` |
 | `LB_ADMIN_TOKEN` | Bearer token for moderation endpoints | `openssl rand -hex 32` |
 | `LB_TURNSTILE_SECRET` | Cloudflare Turnstile secret key for the widget | Turnstile dashboard |
-| `ROADY_LEADERBOARD_CLIENT_HMAC_KEY` | Nuisance client submission HMAC key (≥32 random bytes). Also injected into the production WASM build by the Pages workflow. Installed into the Worker as `LB_CLIENT_HMAC_KEY`; the two **must be identical**. | `openssl rand -base64 32` |
+| `ROADY_LEADERBOARD_CLIENT_HMAC_KEY` | Nuisance legacy client submission HMAC key; installed as `LB_CLIENT_HMAC_KEY` and embedded by Pages. | `openssl rand -base64 32` |
+| `LB_V3_PROOF_HMAC_KEY` | Independent v3 Worker proof HMAC key. | `openssl rand -base64 32` |
+| `LB_V3_SEED_ENCRYPTION_KEY` | Exact 32-byte AES-256-GCM key, unpadded base64url. | `openssl rand -base64 32 | tr '+/' '-_' | tr -d '='` |
+| `LB_V3_SEED_KEY_ID` | Active encrypted-seed registry ID. | `v3.seed.prod.1` |
+| `LB_V3_EVIDENCE_CAPABILITY_KEY` | Independent evidence-capability HMAC key. | `openssl rand -base64 32` |
+| `LB_V3_CLIENT_HMAC_KEYS_JSON` | Accepted client key registry; supports overlap rotation. | `{"v3.client.1":"..."}` |
+| `ROADY_V3_CLIENT_HMAC_KEY` | Pages copy of the `v3.client.1` value. | same random value as registry entry |
+| `ROADY_V3_CLIENT_HMAC_KEY_ID` | Pages key ID; current client requires exact `v3.client.1`. | `v3.client.1` |
 
 `ROADY_LEADERBOARD_CLIENT_HMAC_KEY` is the single source of truth for the
 client/Worker shared key: the leaderboard workflow installs it under the
@@ -144,30 +152,21 @@ above are repository-scoped.
 
 ### A.6 What the workflow does, in order
 
-1. **Install, typecheck, test** — `npm ci`, `npm run typecheck` (`tsc --noEmit`),
-   `npm test` (`vitest run`) inside `leaderboard/`. A failing typecheck or test
-   aborts before any Cloudflare call.
-2. **Verify prerequisites** — checks that `CLOUDFLARE_D1_DATABASE_ID` is set and
-   not the placeholder, that `LEADERBOARD_BASE_URL` is set, and that every
-   required secret is non-empty. If anything is missing it prints an `::error::`
-   block listing exactly what to create and exits 1. Secret values are never
-   printed.
-3. **Inject D1 id** — `sed` substitutes the placeholder in the CI copy of
-   `leaderboard/wrangler.toml` with `$CLOUDFLARE_D1_DATABASE_ID`. The committed
-   file is untouched.
-4. **Apply D1 migrations** — `wrangler d1 migrations apply roady_leaderboard --remote`.
-   Idempotent: Wrangler tracks applied migrations in a `d1_migrations` table.
-5. **Deploy Worker** — `wrangler deploy` creates the Worker on first run and
-   updates it thereafter, including the D1 binding and the rate-limit bindings
-   declared under `[[unsafe.bindings]]`.
-6. **Install secrets** — pipes each secret over stdin to `wrangler secret put`.
-   Re-runs are idempotent and keep the Worker in sync with rotated GitHub
-   secrets.
-7. **Smoke test** — `curl GET /healthz` (expects `{"ok":true,...}`) and
-   `curl GET /v1/leaderboard?limit=1` (expects an `entries` array). Both must
-   return HTTP 200 or the workflow fails with diagnostics. Session/score
-   endpoints are not exercised because they require a browser-issued Turnstile
-   token and client HMAC signature.
+1. Verifies the named successful CI run belongs to the exact full `master` SHA.
+2. Reruns immutable inventory, TypeScript, Worker unit/security/replay, workerd,
+   D1 restoration, and additive v3 migration tests.
+3. Downloads that CI run's release artifact and checks all source/artifact hashes
+   plus `tools/check_release.py`'s strict optimized-WASM `<25 MiB` limit.
+4. Requires every legacy and five v3 credential without printing values.
+5. Applies ordered additive migrations, then queries remote `d1_migrations`, the
+   exact two-row v3 registry, six-table schema, foreign keys, and indexes.
+6. Deploys the tested SHA with the committed/default flag `false`, installs all
+   runtime secrets, and deploys once more so bindings are active.
+7. Runs two independently uncached exact disabled capability probes, denied
+   issuance, and legacy health/board probes.
+8. Writes machine-readable evidence. A manual exact-lowercase `true` request
+   proceeds only if every previous step passes and the same commit's separately
+   reviewed code parity latch is true; otherwise production stays disabled.
 
 ### A.7 Running the workflow
 
@@ -250,24 +249,21 @@ Token**:
 - **Permissions:** `Account` / `Cloudflare Pages` / `Edit`
 - **Account Resources:** include the account that owns the Pages project
 
-This token is separate from the leaderboard token. Store it as
-`CLOUDFLARE_API_TOKEN` — **note**: GitHub secrets are namespaced per workflow
-file, but a repository secret named `CLOUDFLARE_API_TOKEN` is shared. If you
-need different tokens for Pages and the leaderboard, use environment-scoped
-secrets (one per `environment`) or distinct secret names and reference the
-correct one in each workflow. The shipped workflows both reference
-`secrets.CLOUDFLARE_API_TOKEN`, so either use a single token with the union of
-both permission sets, or fork the secret into environment-scoped values.
+This token is separate from the leaderboard token. The shipped workflows use
+`CLOUDFLARE_WORKER_API_TOKEN` for Worker/D1 and
+`CLOUDFLARE_PAGES_API_TOKEN` for Pages so each stays least-privilege.
 
 ### B.3 Pages GitHub secrets/variables
 
 Secrets:
 
-- `CLOUDFLARE_API_TOKEN` — Pages: Edit token (see scoping note above)
+- `CLOUDFLARE_PAGES_API_TOKEN` — Pages: Edit token
 - `CLOUDFLARE_ACCOUNT_ID` — owning Cloudflare account id
-- `ROADY_LEADERBOARD_CLIENT_HMAC_KEY` — random ≥32-byte nuisance client signing
-  key injected into production WASM; the same value is installed into the
-  leaderboard Worker as `LB_CLIENT_HMAC_KEY` by the leaderboard workflow
+- `ROADY_LEADERBOARD_CLIENT_HMAC_KEY` — legacy nuisance key matching Worker
+  `LB_CLIENT_HMAC_KEY`
+- `ROADY_V3_CLIENT_HMAC_KEY` — value matching the `v3.client.1` entry in
+  `LB_V3_CLIENT_HMAC_KEYS_JSON`
+- `ROADY_V3_CLIENT_HMAC_KEY_ID` — exact current ID `v3.client.1`
 
 Variables:
 
@@ -280,9 +276,11 @@ an unavailable/read-only state rather than attempting a broken submission.
 
 ### B.4 Deploy the site
 
-Push to `master`, or open **Actions → Deploy to Cloudflare Pages → Run
-workflow**. The workflow builds and validates `dist/`, uploads it as an
-artifact, then runs:
+A successful disabled-first Worker workflow triggers Pages. For manual recovery,
+open **Actions → Deploy to Cloudflare Pages → Run workflow** and provide the
+exact tested SHA and successful Worker run ID; the workflow refuses any SHA,
+conclusion, or evidence mismatch. It then builds and validates `dist/`, re-probes
+the Worker immediately before upload, and runs:
 
 ```sh
 npx wrangler@4 pages deploy dist --project-name "$PROJECT_NAME" --branch main

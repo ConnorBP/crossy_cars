@@ -32,7 +32,7 @@ CREATE TABLE sessions_v3 (
   proof TEXT NOT NULL,
   seed_iv BLOB NOT NULL CHECK(length(seed_iv)=12),
   seed_ciphertext BLOB NOT NULL CHECK(length(seed_ciphertext)=48),
-  seed_key_id TEXT NOT NULL CHECK(length(seed_key_id) BETWEEN 1 AND 64),
+  seed_key_id TEXT NOT NULL CHECK(length(seed_key_id) BETWEEN 1 AND 64 AND seed_key_id GLOB 'v3.seed.*'),
   seed_commitment TEXT NOT NULL CHECK(length(seed_commitment)=64 AND seed_commitment GLOB '[0-9a-f]*'),
   schedule_hash TEXT NOT NULL CHECK(length(schedule_hash)=64 AND schedule_hash GLOB '[0-9a-f]*'),
   issued_at INTEGER NOT NULL CHECK(issued_at>=0), start_by_expiry INTEGER, started_at INTEGER,
@@ -62,9 +62,11 @@ CREATE TABLE scores_v3 (
   session_id TEXT NOT NULL UNIQUE, submitted_at INTEGER NOT NULL CHECK(submitted_at>=0), ip_hash TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','live','quarantined','unranked_missing_evidence','hidden','deleted')),
   moderation_note TEXT, submission_source TEXT NOT NULL CHECK(submission_source IN ('verified','admin_restore')), restoration_key TEXT,
-  final_root TEXT NOT NULL CHECK(length(final_root)=64), schedule_hash TEXT NOT NULL CHECK(length(schedule_hash)=64),
-  seed_commitment TEXT NOT NULL CHECK(length(seed_commitment)=64), event_count INTEGER NOT NULL CHECK(event_count BETWEEN 1 AND 4096),
-  signature_key_id TEXT NOT NULL CHECK(length(signature_key_id) BETWEEN 1 AND 64),
+  final_root TEXT NOT NULL CHECK(length(final_root)=64 AND final_root NOT GLOB '*[^0-9a-f]*'),
+  schedule_hash TEXT NOT NULL CHECK(length(schedule_hash)=64 AND schedule_hash NOT GLOB '*[^0-9a-f]*'),
+  seed_commitment TEXT NOT NULL CHECK(length(seed_commitment)=64 AND seed_commitment NOT GLOB '*[^0-9a-f]*'),
+  event_count INTEGER NOT NULL CHECK(event_count BETWEEN 1 AND 4096),
+  signature_key_id TEXT NOT NULL CHECK(length(signature_key_id) BETWEEN 1 AND 64 AND (signature_key_id GLOB 'v3.client.*' OR signature_key_id='admin_restore')),
   evidence_capability_hash TEXT UNIQUE CHECK(evidence_capability_hash IS NULL OR length(evidence_capability_hash)=64), evidence_expires_at INTEGER,
   CHECK((submission_source='verified' AND status='pending' AND evidence_capability_hash IS NOT NULL AND evidence_expires_at=submitted_at+86400000 AND restoration_key IS NULL) OR
         (submission_source='admin_restore' AND status='live' AND evidence_capability_hash IS NULL AND evidence_expires_at IS NULL AND restoration_key IS NOT NULL) OR
@@ -82,7 +84,8 @@ CREATE TABLE scores_v3 (
 
 CREATE TABLE score_evidence_v3 (
  id INTEGER PRIMARY KEY AUTOINCREMENT, score_id INTEGER NOT NULL UNIQUE, session_id TEXT NOT NULL,
- final_root TEXT NOT NULL CHECK(length(final_root)=64), evidence_hash TEXT NOT NULL CHECK(length(evidence_hash)=64),
+ final_root TEXT NOT NULL CHECK(length(final_root)=64 AND final_root NOT GLOB '*[^0-9a-f]*'),
+ evidence_hash TEXT NOT NULL CHECK(length(evidence_hash)=64 AND evidence_hash NOT GLOB '*[^0-9a-f]*'),
  ledger_bytes BLOB NOT NULL CHECK(length(ledger_bytes) BETWEEN 1 AND 262144),
  replay_result TEXT NOT NULL CHECK(replay_result IN ('match','mismatch')), quarantine_reason TEXT, uploaded_at INTEGER NOT NULL,
  CHECK((replay_result='match' AND quarantine_reason IS NULL) OR (replay_result='mismatch' AND quarantine_reason IS NOT NULL)),

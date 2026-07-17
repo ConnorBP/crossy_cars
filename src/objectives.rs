@@ -153,7 +153,7 @@ struct ObjectiveHudText;
 
 const fn objective_kind_for_round(
     index: u64,
-    modifier: ModifierKind,
+    _modifier: ModifierKind,
     conduct: Conduct,
 ) -> ObjectiveKind {
     if matches!(conduct, Conduct::RightOfWay) {
@@ -164,29 +164,9 @@ const fn objective_kind_for_round(
         };
     }
     match index % 3 {
-        0 => ObjectiveKind::HitChickens {
-            target: if matches!(modifier, ModifierKind::ChickenFrenzy) {
-                20
-            } else {
-                10
-            },
-        },
-        1 => ObjectiveKind::CollectCoins {
-            target: if matches!(modifier, ModifierKind::RushHour) {
-                8
-            } else {
-                6
-            },
-        },
-        _ => ObjectiveKind::ReachCombo {
-            // Glass Cannon is the combo-focused condition, so its objective
-            // asks for the next meaningful multiplier tier.
-            target: if matches!(modifier, ModifierKind::GlassCannon) {
-                4
-            } else {
-                3
-            },
-        },
+        0 => ObjectiveKind::HitChickens { target: 10 },
+        1 => ObjectiveKind::CollectCoins { target: 6 },
+        _ => ObjectiveKind::ReachCombo { target: 3 },
     }
 }
 
@@ -765,6 +745,52 @@ mod tests {
     }
 
     #[test]
+    fn right_of_way_cycle_is_exact_and_ignores_manual_condition() {
+        let expected = [
+            ObjectiveKind::DeliverPackages { target: 3 },
+            ObjectiveKind::CourtesyAwards { target: 3 },
+            ObjectiveKind::CollectCoins { target: 6 },
+        ];
+        for modifier in ALL_MODIFIERS {
+            for index in 0..9 {
+                assert_eq!(
+                    objective_kind_for_round(index, modifier, Conduct::RightOfWay),
+                    expected[index as usize % expected.len()]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn right_of_way_progress_counts_only_credited_conduct_messages() {
+        let start = ActiveObjective::new(ObjectiveKind::DeliverPackages { target: 3 });
+        let (done, edge) = apply_progress(
+            start,
+            ObjectiveProgressInput {
+                packages_delivered: 3,
+                chicken_hits: u32::MAX,
+                coins_collected: u32::MAX,
+                courtesy_awards: u32::MAX,
+                combo_multiplier: u32::MAX,
+            },
+        );
+        assert!(edge && done.completed);
+        let courtesy = ActiveObjective::new(ObjectiveKind::CourtesyAwards { target: 3 });
+        let (unchanged, edge) = apply_progress(
+            courtesy,
+            ObjectiveProgressInput {
+                packages_delivered: 99,
+                chicken_hits: 99,
+                coins_collected: 99,
+                courtesy_awards: 0,
+                combo_multiplier: 5,
+            },
+        );
+        assert_eq!(unchanged.progress, 0);
+        assert!(!edge);
+    }
+
+    #[test]
     fn pause_resume_neither_resets_nor_increments_index() {
         for index in [0, 1, 19, u64::MAX] {
             assert_eq!(
@@ -798,31 +824,21 @@ mod tests {
     }
 
     #[test]
-    fn modifier_targets_are_adjusted_only_for_matching_flavors() {
-        assert_eq!(
-            objective_kind_for_round(0, ModifierKind::ChickenFrenzy, Conduct::CluckHunt),
-            ObjectiveKind::HitChickens { target: 20 }
-        );
-        assert_eq!(
-            objective_kind_for_round(1, ModifierKind::RushHour, Conduct::CluckHunt),
-            ObjectiveKind::CollectCoins { target: 8 }
-        );
-        assert_eq!(
-            objective_kind_for_round(2, ModifierKind::GlassCannon, Conduct::CluckHunt),
-            ObjectiveKind::ReachCombo { target: 4 }
-        );
-        assert_eq!(
-            objective_kind_for_round(0, ModifierKind::RushHour, Conduct::CluckHunt),
-            ObjectiveKind::HitChickens { target: 10 }
-        );
-        assert_eq!(
-            objective_kind_for_round(1, ModifierKind::ChickenFrenzy, Conduct::CluckHunt),
-            ObjectiveKind::CollectCoins { target: 6 }
-        );
-        assert_eq!(
-            objective_kind_for_round(2, ModifierKind::Standard, Conduct::CluckHunt),
-            ObjectiveKind::ReachCombo { target: 3 }
-        );
+    fn objective_targets_are_neutral_under_every_condition() {
+        for modifier in ALL_MODIFIERS {
+            assert_eq!(
+                objective_kind_for_round(0, modifier, Conduct::CluckHunt),
+                ObjectiveKind::HitChickens { target: 10 }
+            );
+            assert_eq!(
+                objective_kind_for_round(1, modifier, Conduct::CluckHunt),
+                ObjectiveKind::CollectCoins { target: 6 }
+            );
+            assert_eq!(
+                objective_kind_for_round(2, modifier, Conduct::CluckHunt),
+                ObjectiveKind::ReachCombo { target: 3 }
+            );
+        }
     }
 
     #[test]

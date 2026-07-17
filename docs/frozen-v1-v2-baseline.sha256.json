@@ -1,0 +1,204 @@
+{
+  "baselineCommit": "ddf6745c76f6eb450378e8acc74c489ef1b56b04",
+  "generator": "leaderboard/scripts/generate-frozen-v1-v2.mjs@1 raw git-show bytes; 0005 frozen at implementation HEAD 692e9c7ddebed17b22db14cf68832be63db9cb7e",
+  "files": [
+    {
+      "path": "crates/roady-score-rules/tests/golden.rs",
+      "size": 4576,
+      "blob": "81cb5874934c3e37e20b6cba690ea6600c5608c9",
+      "sha256": "eaf1b7fc9be5d9feda958ac52a7ed4db3a1b2c152f3332978d5f0d4ac580e217"
+    },
+    {
+      "path": "crates/roady-score-rules/tests/golden_v2.rs",
+      "size": 4635,
+      "blob": "8e6acd41a443cd1e20593cf27ceb0410bfab594a",
+      "sha256": "fa0f4a95264894fbaba9aa23c263f81d4d9ef6aa3feff669b8ba56bfee9d40b8"
+    },
+    {
+      "path": "docs/data/leaderboard-v1/2026-07-16T12-47-07Z/README.md",
+      "size": 966,
+      "blob": "5655db7ad5ec99b7d9a367809e18cd484687e657",
+      "sha256": "2b16de9da885755d8f9108d4f8dbd9ea1fe954e113809f841434fe7eb2113d05"
+    },
+    {
+      "path": "docs/data/leaderboard-v1/2026-07-16T12-47-07Z/condition-0-combined.json",
+      "size": 7337,
+      "blob": "f2ba121604499e00a6073fba1c7701bc5756c0fd",
+      "sha256": "c587471564eefa69436ede080affdcddad68f6b4050c237f2230a1ee3a732102"
+    },
+    {
+      "path": "docs/data/leaderboard-v1/2026-07-16T12-47-07Z/condition-0-offset-000000.json",
+      "size": 4438,
+      "blob": "e1cbdcba7c8eb99278812ebfe8084373102f1bdf",
+      "sha256": "245db28c88075c5c0a9f76df5b97b4f69c91728bfd190698b576074a3e023e1f"
+    },
+    {
+      "path": "docs/data/leaderboard-v1/2026-07-16T12-47-07Z/condition-1-combined.json",
+      "size": 5909,
+      "blob": "c244cbe733837c532666254b9affb64102bf983b",
+      "sha256": "e3ee2b4a2e008c55dfb6ef64dce087c60f3e8b448b696da7e7879fa2c911c5c6"
+    },
+    {
+      "path": "docs/data/leaderboard-v1/2026-07-16T12-47-07Z/condition-1-offset-000000.json",
+      "size": 3560,
+      "blob": "d2e43b0948033dba78765b2a786f7b8d64ab35c5",
+      "sha256": "c4109d442d7cd9eb7f415a94763a8bc127d8f0be3c9e58e24a59f4218ad63605"
+    },
+    {
+      "path": "docs/data/leaderboard-v1/2026-07-16T12-47-07Z/condition-2-combined.json",
+      "size": 7494,
+      "blob": "869000ae86ff33c6b1ee0a9f9a073dfc9c289a6f",
+      "sha256": "309e4f1e75186cafca016708dc35c96e2ddd660261b56279289511e8e9c64497"
+    },
+    {
+      "path": "docs/data/leaderboard-v1/2026-07-16T12-47-07Z/condition-2-offset-000000.json",
+      "size": 4545,
+      "blob": "31bfb8c7aa957b19a1b83de48021aa12f7fdda0d",
+      "sha256": "e13b8ab10f2a09db0d8cb70277255adf64413bbf52fb6356e6e0c9148239e6f9"
+    },
+    {
+      "path": "docs/data/leaderboard-v1/2026-07-16T12-47-07Z/condition-3-combined.json",
+      "size": 3955,
+      "blob": "5adbfbc8a91deb6d20bbcaf504cef060b0922be6",
+      "sha256": "6587d4be1d21af4b2e5d310759ba947f3af8a947dd2d3dcac54bbed65ded62d2"
+    },
+    {
+      "path": "docs/data/leaderboard-v1/2026-07-16T12-47-07Z/condition-3-offset-000000.json",
+      "size": 2356,
+      "blob": "1f708f30baaea1caba50029523d30059bd1a3f1b",
+      "sha256": "2167a83940d4a754b508e7e696f7f58ac57bf74f4297a5082b353696093ab37f"
+    },
+    {
+      "path": "docs/data/leaderboard-v1/2026-07-16T12-47-07Z/condition-4-combined.json",
+      "size": 2791,
+      "blob": "74455406b7f62396270d6d4fcf2f303b71ce6274",
+      "sha256": "53687fcfa4a41681dd0a84170c9ac5be293266847e832142887ef9b40eb3ede9"
+    },
+    {
+      "path": "docs/data/leaderboard-v1/2026-07-16T12-47-07Z/condition-4-offset-000000.json",
+      "size": 1642,
+      "blob": "b133948ad9e5363595918ac4551d770ebad97872",
+      "sha256": "11e2908f9f8089709ed746ac86138dd145eefd8b718c94a683198a36a35b2dfa"
+    },
+    {
+      "path": "docs/data/leaderboard-v1/2026-07-16T12-47-07Z/global-combined.json",
+      "size": 26819,
+      "blob": "aa9736afdc6a0468bc9af694778f0f2d39d382fe",
+      "sha256": "d867b0df837cfc194b7fd1b0a36ad1cef483a714f32549953840faa2486f1ff2"
+    },
+    {
+      "path": "docs/data/leaderboard-v1/2026-07-16T12-47-07Z/global-offset-000000.json",
+      "size": 8102,
+      "blob": "2f6a7b94c1320ee89d33e521fc588a695fcd4c96",
+      "sha256": "2c827bf71b208a4eeee3943f4cffe27154082e0f0ce4427f5e5dc16b645da9ac"
+    },
+    {
+      "path": "docs/data/leaderboard-v1/2026-07-16T12-47-07Z/global-offset-000100.json",
+      "size": 8111,
+      "blob": "5bc5a798dc5942448116d3675b9e6c8b45170bcb",
+      "sha256": "fd3021fc14b898d6def1430cfc7cc3a926e708a8a0b94a7ff6c4f3faf761fbc7"
+    },
+    {
+      "path": "docs/data/leaderboard-v1/2026-07-16T12-47-07Z/global-offset-000200.json",
+      "size": 380,
+      "blob": "3653bba7aead8e802b28807349f04fb43fe8bcb9",
+      "sha256": "04961763a451a066892eca0943319ca1a80064f93939f31c3437ea838ddbbfe5"
+    },
+    {
+      "path": "docs/data/leaderboard-v1/2026-07-16T12-47-07Z/manifest.json",
+      "size": 5831,
+      "blob": "71d3f06fd41d51ec6a7b576648754895e54b298b",
+      "sha256": "874c47cdb87c8a6f396c1e888e8dc0464b17ad6e2ad9e4f64f888b6f4558fa7a"
+    },
+    {
+      "path": "leaderboard/migrations/0001_init.sql",
+      "size": 1717,
+      "blob": "dd0775a2f272433ba3446b9908e8fab400eb4e75",
+      "sha256": "f360c762d7f6cfbb199a79cd393741631a07f07942d7b472352781c6a8236b49"
+    },
+    {
+      "path": "leaderboard/migrations/0002_indexes.sql",
+      "size": 498,
+      "blob": "1ce9f05225fb805d548b66889b9411ceb1373ce8",
+      "sha256": "f1ca8e3e52ddc569b4190dfb6017a446fadd2cea090cba9d4811ddc6be57b910"
+    },
+    {
+      "path": "leaderboard/migrations/0003_deterministic_ranking_indexes.sql",
+      "size": 440,
+      "blob": "b930b71aac20136cf57d599692ef7f85373db5ae",
+      "sha256": "886ecdf2d483e1f1f6098ddfdbbeccb7f2a417d6c94106735067c465f958227a"
+    },
+    {
+      "path": "leaderboard/migrations/0004_admin_restorations.sql",
+      "size": 1156,
+      "blob": "be012b681799d15f8c0f198ae121eba0c40270f0",
+      "sha256": "7191964b64a84a6618f77b67e8345e3d51ef0d0b5c4b9e2015ba53861cecbb65"
+    },
+    {
+      "path": "leaderboard/migrations/0005_ranked_v2.sql",
+      "size": 6258,
+      "blob": "2d14cfcc991df3cad8fe914cf7839119166cb640",
+      "sha256": "2fcf69d4acee87102f4d64363a25d1dc74f40b8670614e7c58b7fa0d15e76407"
+    },
+    {
+      "path": "leaderboard/test/helpers.ts",
+      "size": 21724,
+      "blob": "b0cf2ec2abcedf12614639e72b55b0ff0b37f73a",
+      "sha256": "d7ed9db068d9c4267fff9d198036d0127ae4a8d93ea442b6254687c40a73db82"
+    },
+    {
+      "path": "leaderboard/test/index.test.ts",
+      "size": 27288,
+      "blob": "4ad2d83f88737a64f2ab1b79f38af6b1030a4ebc",
+      "sha256": "39c7a165132cbf14761aa040390747a472d0e568a979c2658b3181650ececdee"
+    },
+    {
+      "path": "leaderboard/test/routes.test.ts",
+      "size": 59419,
+      "blob": "306a6f844ae95d2bf712027703c5691912aa3ac5",
+      "sha256": "caf4fa1692a8aaeacb30185cad7b25602251f9539758f4df9f09081f7feaf525"
+    },
+    {
+      "path": "leaderboard/test/rules-v2.test.ts",
+      "size": 17989,
+      "blob": "df22c40d1df448013784dbebb0a851a92cf2bd33",
+      "sha256": "e775d15a70479ae764937e9915a810602f1e47cce36776d69e832691befaa643"
+    },
+    {
+      "path": "leaderboard/test/svg.test.ts",
+      "size": 1203,
+      "blob": "05428141b49880703e949c417b04703ed2e9c00e",
+      "sha256": "58b9d74e67e8fcb90ac9d423d60bf8f3e25b15caf98137e3d4393cdb6ee90abd"
+    },
+    {
+      "path": "rules/roady-rules.v1.json",
+      "size": 2538,
+      "blob": "6efa338b4860da5a06bfa9b45f89a21dc27bdcb7",
+      "sha256": "8a2ca8ce1676622922fbf1d1280e6fcc00840cbd09d7db4b25b25cfea20e8c04"
+    },
+    {
+      "path": "rules/roady-rules.v1.schema.json",
+      "size": 5475,
+      "blob": "46083f63f85cf8b4bcf72b5cfbf0efa9cc03d2ac",
+      "sha256": "aa4f8d174f44982ac7c55266d31edf839fbf0d9995f64a2ee045eeaddc56a39f"
+    },
+    {
+      "path": "rules/roady-rules.v2.golden.json",
+      "size": 139328,
+      "blob": "8f5079e123f7168396d2c2f74e8d812cab3596d0",
+      "sha256": "e672c6bd6d32f205da3b8d4fdd6c65723e9de0ad4f8a0013efd201f8a24f7e8a"
+    },
+    {
+      "path": "rules/roady-rules.v2.json",
+      "size": 7278,
+      "blob": "8c9dfd1ea9c73f88382225f3891d8f05eaf767cc",
+      "sha256": "13b1380857bfc8e6fa1f8177a15a29c3dba89d25fe45ec6c7506b9c12584dd10"
+    },
+    {
+      "path": "rules/roady-rules.v2.schema.json",
+      "size": 8141,
+      "blob": "61c88367b4408cbddc761bfc0596e84cd47cb969",
+      "sha256": "b62ae10eccc5cb45fe85f8cd2b4533a73a0998915569962d69c5e17dfc6788c1"
+    }
+  ]
+}

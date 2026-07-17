@@ -11,6 +11,7 @@ import json
 import os
 import re
 import sys
+from urllib.parse import urlsplit
 
 DEFAULT_URL = "http://localhost:8080"
 DEFAULT_BROWSER_CHANNEL = "chrome"
@@ -50,6 +51,7 @@ def main() -> int:
     browser_channel = resolve_browser_channel(args.browser_channel)
     logs: list[tuple[str, str]] = []
     page_errors: list[str] = []
+    v3_write_requests: list[str] = []
     crashed = False
     crash_reason = ""
 
@@ -86,6 +88,12 @@ def main() -> int:
 
             page.on("console", lambda msg: logs.append((msg.type, msg.text)))
             page.on("pageerror", lambda err: page_errors.append(str(err)))
+            page.on(
+                "request",
+                lambda request: v3_write_requests.append(request.url)
+                if request.method == "POST" and urlsplit(request.url).path.startswith("/v3/")
+                else None,
+            )
 
             page.goto(args.url, wait_until="load", timeout=30000)
             page.wait_for_timeout(6000)  # boot: GPU init, first frames, asset load
@@ -94,6 +102,8 @@ def main() -> int:
             if not crashed:
                 # Start gameplay (Enter) + drive in multiple directions to
                 # exercise the 2D grid recycling in ALL four directions.
+                # Capability is fail-closed in ordinary audit builds, so the
+                # contractual fallback Enter starts Casual Cluck Hunt.
                 page.keyboard.press("Enter")
                 page.wait_for_timeout(4000)  # let the 3-2-1-GO countdown finish
                 # forward, turn left, forward, turn right, forward, reverse,
@@ -114,6 +124,9 @@ def main() -> int:
                     page.keyboard.up(k)
                     page.wait_for_timeout(100)
                 page.wait_for_timeout(2500)
+                if v3_write_requests:
+                    crashed = True
+                    crash_reason = f"Casual audit emitted v3 writes: {v3_write_requests[:3]}"
                 scan()
 
             # Close while Playwright's event loop is still alive. Closing in
@@ -160,6 +173,7 @@ def main() -> int:
         "errorSamples": [s[:200] for s in dedup(errors)[:6]],
         "warnSamples": [s[:160] for s in dedup(warns)[:4]],
         "pageErrors": [s[:200] for s in dedup(page_errors)[:4]],
+        "v3WriteRequests": v3_write_requests,
     }
     print(json.dumps(report, indent=2))
     return 1 if crashed else 0

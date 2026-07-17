@@ -3,14 +3,22 @@
 //! by their existing plugins; this module owns presentation and selection.
 
 use bevy::{
-    input::touch::Touches, prelude::*, render::render_resource::AsBindGroup, shader::ShaderRef,
+    ecs::system::SystemParam,
+    input::{
+        gamepad::{Gamepad, GamepadButton},
+        touch::Touches,
+    },
+    prelude::*,
+    render::render_resource::AsBindGroup,
+    shader::ShaderRef,
     window::PrimaryWindow,
 };
 
+use crate::competitive_v3::RankedV3Client;
 use crate::game::{RestartRequested, settings_closed, state::GameState};
-use crate::game_modes::{Conduct, SelectedGameMode};
+use crate::game_modes::{Competition, Conduct, ManualCondition, SelectedGameMode};
 use crate::modifiers::{ModifierKind, SelectedModifier};
-use crate::persist::{BestScore, ConditionBests, Medal, medal_for};
+use crate::persist::{Medal, ProductBests, medal_for, product_medal};
 use crate::settings::Settings;
 
 const CONDITIONS: [ModifierKind; 5] = [
@@ -119,6 +127,60 @@ struct MenuMetrics {
 }
 #[derive(Resource, Default)]
 struct MenuBuiltAt(f32);
+
+#[derive(SystemParam)]
+struct MenuRecords<'w> {
+    products: Res<'w, ProductBests>,
+}
+#[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
+struct ProductFocus {
+    index: usize,
+    capability_admitted: bool,
+}
+
+impl Default for ProductFocus {
+    fn default() -> Self {
+        Self {
+            // Fail-closed contractual fallback: Casual Cluck Hunt.
+            index: 2,
+            capability_admitted: false,
+        }
+    }
+}
+
+impl ProductFocus {
+    const PRODUCTS: [(Competition, Conduct); 4] = [
+        (Competition::Ranked, Conduct::CluckHunt),
+        (Competition::Ranked, Conduct::RightOfWay),
+        (Competition::Casual, Conduct::CluckHunt),
+        (Competition::Casual, Conduct::RightOfWay),
+    ];
+
+    fn product(self) -> (Competition, Conduct) {
+        Self::PRODUCTS[self.index]
+    }
+
+    fn set_default_for_gate(&mut self, admitted: bool) {
+        if self.capability_admitted != admitted {
+            self.capability_admitted = admitted;
+            // Exact enabled tuple defaults to Ranked Cluck Hunt. Every other
+            // capability state falls back to Casual Cluck Hunt.
+            self.index = if admitted { 0 } else { 2 };
+        }
+    }
+
+    fn move_focus(&mut self, delta: i32, ranked_enabled: bool) {
+        let mut index = self.index as i32;
+        for _ in 0..Self::PRODUCTS.len() {
+            index = (index + delta).rem_euclid(Self::PRODUCTS.len() as i32);
+            if ranked_enabled || index >= 2 {
+                self.index = index as usize;
+                return;
+            }
+        }
+    }
+}
+
 #[derive(Resource, Default)]
 struct TipState {
     index: usize,
@@ -152,7 +214,7 @@ enum MenuAction {
     Previous,
     Next,
     Select(usize),
-    Drive,
+    Product(Competition, Conduct),
 }
 
 pub struct MenuPlugin;
@@ -167,6 +229,7 @@ impl Plugin for MenuPlugin {
         .init_resource::<MenuLayout>()
         .init_resource::<MenuMetrics>()
         .init_resource::<MenuBuiltAt>()
+        .init_resource::<ProductFocus>()
         .init_resource::<TipState>()
         .init_resource::<SwipeStartSelection>()
         .add_systems(OnEnter(GameState::Menu), spawn_menu)
@@ -174,6 +237,7 @@ impl Plugin for MenuPlugin {
         .add_systems(
             Update,
             (
+                sync_product_default,
                 rebuild_responsive_menu,
                 menu_keyboard,
                 menu_swipe,
@@ -244,35 +308,105 @@ fn cycle_selection(selected: &mut SelectedModifier, delta: i32) {
     selected.0 = CONDITIONS[(current + delta).rem_euclid(CONDITIONS.len() as i32) as usize];
 }
 
+fn sync_product_default(ranked: Res<RankedV3Client>, mut focus: ResMut<ProductFocus>) {
+    // Use the admission resource's exact capability bit as well as Ready;
+    // Starting/Started may retain admission but cannot be selected twice.
+    focus.set_default_for_gate(ranked.capability_admitted() && ranked.ranked_available());
+}
+
+fn activate_product(
+    competition: Competition,
+    conduct: Conduct,
+    selected: &SelectedModifier,
+    mode: &mut SelectedGameMode,
+    ranked: &mut RankedV3Client,
+    restart: &mut RestartRequested,
+    next: &mut NextState<GameState>,
+) {
+    match competition {
+        Competition::Casual => {
+            mode.competition = Competition::Casual;
+            mode.conduct = conduct;
+            mode.manual_condition = ManualCondition::from(selected.0);
+            restart.0 = false;
+            next.set(GameState::Playing);
+        }
+        Competition::Ranked => {
+            if ranked.request_ranked_start(conduct) {
+                mode.competition = Competition::Ranked;
+                mode.conduct = conduct;
+                // Ranked never retains a manual selection as admission state.
+                mode.manual_condition = ManualCondition::Standard;
+                restart.0 = false;
+            }
+        }
+    }
+}
+
 fn menu_keyboard(
     keys: Res<ButtonInput<KeyCode>>,
+    gamepads: Query<&Gamepad>,
     mut selected: ResMut<SelectedModifier>,
+    mut focus: ResMut<ProductFocus>,
     mut mode: ResMut<SelectedGameMode>,
+    mut ranked: ResMut<RankedV3Client>,
     mut restart: ResMut<RestartRequested>,
     mut next: ResMut<NextState<GameState>>,
 ) {
-    if keys.any_just_pressed([KeyCode::ArrowLeft, KeyCode::KeyA]) {
-        cycle_selection(&mut selected, -1);
+    let gp_left = gamepads.iter().any(|gamepad| {
+        gamepad.just_pressed(GamepadButton::DPadLeft) || gamepad.just_pressed(GamepadButton::West)
+    });
+    let gp_right = gamepads.iter().any(|gamepad| {
+        gamepad.just_pressed(GamepadButton::DPadRight) || gamepad.just_pressed(GamepadButton::East)
+    });
+    let gp_up = gamepads
+        .iter()
+        .any(|gamepad| gamepad.just_pressed(GamepadButton::DPadUp));
+    let gp_down = gamepads
+        .iter()
+        .any(|gamepad| gamepad.just_pressed(GamepadButton::DPadDown));
+    let gp_activate = gamepads.iter().any(|gamepad| {
+        gamepad.just_pressed(GamepadButton::South) || gamepad.just_pressed(GamepadButton::Start)
+    });
+
+    // Product focus is a deterministic row-major order. Disabled Ranked cells
+    // are skipped by keyboard and gamepad traversal, not merely ignored later.
+    let reverse_tab = keys.just_pressed(KeyCode::Tab)
+        && keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
+    if (keys.just_pressed(KeyCode::Tab) && !reverse_tab) || gp_right || gp_down {
+        focus.move_focus(1, ranked.ranked_available());
     }
-    if keys.any_just_pressed([KeyCode::ArrowRight, KeyCode::KeyD]) {
-        cycle_selection(&mut selected, 1);
+    if reverse_tab || keys.just_pressed(KeyCode::Backspace) || gp_left || gp_up {
+        focus.move_focus(-1, ranked.ranked_available());
     }
-    // Compact keyboard conduct selector until the four-cell capability-gated
-    // menu lands. Casual remains the default and performs no network work.
-    if keys.just_pressed(KeyCode::KeyC) {
-        mode.conduct = match mode.conduct {
-            Conduct::CluckHunt => Conduct::RightOfWay,
-            Conduct::RightOfWay => Conduct::CluckHunt,
-        };
+
+    // Manual condition mutation is Casual-only. A Ranked-focused cell exposes
+    // the forced rotation and consumes no carousel/change input.
+    if focus.product().0 == Competition::Casual {
+        if keys.any_just_pressed([KeyCode::ArrowLeft, KeyCode::KeyA]) {
+            cycle_selection(&mut selected, -1);
+        }
+        if keys.any_just_pressed([KeyCode::ArrowRight, KeyCode::KeyD]) {
+            cycle_selection(&mut selected, 1);
+        }
     }
-    if keys.any_just_pressed([KeyCode::Enter, KeyCode::Space]) {
-        restart.0 = false;
-        next.set(GameState::Playing);
+    if keys.any_just_pressed([KeyCode::Enter, KeyCode::Space]) || gp_activate {
+        let (competition, conduct) = focus.product();
+        activate_product(
+            competition,
+            conduct,
+            &selected,
+            &mut mode,
+            &mut ranked,
+            &mut restart,
+            &mut next,
+        );
     }
 }
 
 fn menu_swipe(
     touches: Res<Touches>,
+    focus: Res<ProductFocus>,
     mut selected: ResMut<SelectedModifier>,
     mut start_selection: ResMut<SwipeStartSelection>,
 ) {
@@ -281,7 +415,11 @@ fn menu_swipe(
     }
     for touch in touches.iter_just_released() {
         let delta = touch.position() - touch.start_position();
-        if delta.x.abs() > 48.0 && delta.x.abs() > delta.y.abs() * 1.4 {
+        // Carousel swipes are mutable only while a Casual cell owns focus.
+        if focus.product().0 == Competition::Casual
+            && delta.x.abs() > 48.0
+            && delta.x.abs() > delta.y.abs() * 1.4
+        {
             selected.0 = start_selection.0.unwrap_or(selected.0);
             cycle_selection(&mut selected, if delta.x < 0.0 { 1 } else { -1 });
         }
@@ -292,6 +430,9 @@ fn menu_swipe(
 fn menu_buttons(
     interactions: Query<(&Interaction, &MenuAction), Changed<Interaction>>,
     mut selected: ResMut<SelectedModifier>,
+    mut focus: ResMut<ProductFocus>,
+    mut mode: ResMut<SelectedGameMode>,
+    mut ranked: ResMut<RankedV3Client>,
     mut restart: ResMut<RestartRequested>,
     mut next: ResMut<NextState<GameState>>,
 ) {
@@ -300,13 +441,42 @@ fn menu_buttons(
             continue;
         }
         match *action {
-            MenuAction::Previous => cycle_selection(&mut selected, -1),
-            MenuAction::Next => cycle_selection(&mut selected, 1),
-            MenuAction::Select(index) => selected.0 = CONDITIONS[index],
-            MenuAction::Drive => {
-                restart.0 = false;
-                next.set(GameState::Playing);
+            MenuAction::Previous if focus.product().0 == Competition::Casual => {
+                cycle_selection(&mut selected, -1)
             }
+            MenuAction::Next if focus.product().0 == Competition::Casual => {
+                cycle_selection(&mut selected, 1)
+            }
+            MenuAction::Select(index) if focus.product().0 == Competition::Casual => {
+                selected.0 = CONDITIONS[index]
+            }
+            MenuAction::Product(competition, conduct) => {
+                if competition == Competition::Ranked && !ranked.ranked_available() {
+                    continue;
+                }
+                let target = ProductFocus::PRODUCTS
+                    .iter()
+                    .position(|product| *product == (competition, conduct))
+                    .expect("known product");
+                if target != focus.index {
+                    // First tap/click moves explicit focus and reveals the
+                    // Casual controls (or Ranked forced-rotation copy). A
+                    // second activation starts it, preventing touch-through
+                    // and resize/debounce surprises.
+                    focus.index = target;
+                    continue;
+                }
+                activate_product(
+                    competition,
+                    conduct,
+                    &selected,
+                    &mut mode,
+                    &mut ranked,
+                    &mut restart,
+                    &mut next,
+                );
+            }
+            _ => {}
         }
     }
 }
@@ -320,10 +490,11 @@ fn despawn_menu(mut commands: Commands, roots: Query<Entity, With<ResponsiveMenu
 fn spawn_menu(
     mut commands: Commands,
     windows: Query<&Window, With<PrimaryWindow>>,
-    best: Res<BestScore>,
-    condition_bests: Res<ConditionBests>,
+    records: MenuRecords,
     settings: Res<Settings>,
     selected: Res<SelectedModifier>,
+    focus: Res<ProductFocus>,
+    ranked: Res<RankedV3Client>,
     time: Res<Time>,
     mut layout: ResMut<MenuLayout>,
     mut metrics: ResMut<MenuMetrics>,
@@ -343,10 +514,11 @@ fn spawn_menu(
         &mut commands,
         *layout,
         width,
-        best.0,
-        &condition_bests,
+        &records.products,
         &settings,
         selected.0,
+        *focus,
+        &ranked,
         &mut metrics,
         &mut stripe_materials,
         &mut glow_materials,
@@ -360,10 +532,11 @@ fn rebuild_responsive_menu(
     mut commands: Commands,
     roots: Query<Entity, With<ResponsiveMenuRoot>>,
     windows: Query<&Window, With<PrimaryWindow>>,
-    best: Res<BestScore>,
-    condition_bests: Res<ConditionBests>,
+    records: MenuRecords,
     settings: Res<Settings>,
     selected: Res<SelectedModifier>,
+    focus: Res<ProductFocus>,
+    ranked: Res<RankedV3Client>,
     time: Res<Time>,
     mut layout: ResMut<MenuLayout>,
     mut metrics: ResMut<MenuMetrics>,
@@ -377,9 +550,10 @@ fn rebuild_responsive_menu(
     let next_layout = MenuLayout::classify(window.width(), window.height());
     let needs_rebuild = roots.is_empty()
         || *layout != next_layout
-        || best.is_changed()
-        || condition_bests.is_changed()
-        || settings.is_changed();
+        || records.products.is_changed()
+        || settings.is_changed()
+        || focus.is_changed()
+        || ranked.is_changed();
     if !needs_rebuild {
         return;
     }
@@ -392,10 +566,11 @@ fn rebuild_responsive_menu(
         &mut commands,
         next_layout,
         window.width(),
-        best.0,
-        &condition_bests,
+        &records.products,
         &settings,
         selected.0,
+        *focus,
+        &ranked,
         &mut metrics,
         &mut stripe_materials,
         &mut glow_materials,
@@ -452,10 +627,11 @@ fn build_menu(
     commands: &mut Commands,
     layout: MenuLayout,
     window_width: f32,
-    global_best: u32,
-    condition_bests: &ConditionBests,
+    product_bests: &ProductBests,
     settings: &Settings,
     selected: ModifierKind,
+    focus: ProductFocus,
+    ranked: &RankedV3Client,
     metrics: &mut MenuMetrics,
     stripe_materials: &mut Assets<HazardStripeMaterial>,
     glow_materials: &mut Assets<GlowButtonMaterial>,
@@ -488,10 +664,27 @@ fn build_menu(
         gap,
     };
     let reduced = f32::from(settings.reduced_motion);
-    let earned: usize = CONDITIONS
-        .iter()
-        .map(|kind| medal_points(medal_for(*kind, condition_bests.by_kind[kind.index()])))
-        .sum();
+    let (focused_competition, focused_conduct) = focus.product();
+    let earned: usize = if focused_competition == Competition::Casual {
+        CONDITIONS
+            .iter()
+            .map(|kind| {
+                medal_points(product_medal(
+                    Competition::Casual,
+                    focused_conduct,
+                    *kind,
+                    product_bests.get(Competition::Casual, focused_conduct, *kind),
+                ))
+            })
+            .sum()
+    } else {
+        medal_points(product_medal(
+            Competition::Ranked,
+            focused_conduct,
+            selected,
+            product_bests.get(Competition::Ranked, focused_conduct, selected),
+        ))
+    };
 
     commands.spawn((
         ResponsiveMenuRoot,
@@ -534,8 +727,21 @@ fn build_menu(
                 ..default()
             })
             .with_children(|bar| {
-                chip(bar, format!("BEST {global_best}"), short);
-                chip(bar, format!("MEDALS {earned}/15"), short);
+                let focused_best =
+                    product_bests.get(focused_competition, focused_conduct, selected);
+                chip(bar, format!("PRODUCT BEST {focused_best}"), short);
+                chip(
+                    bar,
+                    format!(
+                        "MEDALS {earned}/{}",
+                        if focused_competition == Competition::Ranked {
+                            3
+                        } else {
+                            15
+                        }
+                    ),
+                    short,
+                );
             });
 
             let title_size = if short {
@@ -616,6 +822,11 @@ fn build_menu(
             });
 
             root.spawn(Node {
+                display: if focus.product().0 == Competition::Casual {
+                    Display::Flex
+                } else {
+                    Display::None
+                },
                 flex_direction: FlexDirection::Column,
                 align_items: AlignItems::Center,
                 row_gap: px(if short { 3.0 } else { 8.0 }),
@@ -658,7 +869,11 @@ fn build_menu(
                                     row,
                                     index,
                                     kind,
-                                    condition_bests.by_kind[kind.index()],
+                                    product_bests.get(
+                                        Competition::Casual,
+                                        focused_conduct,
+                                        kind,
+                                    ),
                                     card_width,
                                     card_height,
                                     layout,
@@ -697,6 +912,7 @@ fn build_menu(
             });
 
             let selected_color = selected.color();
+            let manual_visible = focus.product().0 == Competition::Casual;
             root.spawn(Node {
                 flex_direction: FlexDirection::Column,
                 align_items: AlignItems::Center,
@@ -704,50 +920,159 @@ fn build_menu(
                 ..default()
             })
             .with_children(|bottom| {
+                bottom.spawn((
+                    Text::new(if manual_visible {
+                        format!(
+                            "CASUAL CONDITION · {} · MUTABLE",
+                            selected.display_name().to_uppercase()
+                        )
+                    } else {
+                        "RANKED CONDITION · FORCED 16-SEGMENT ROTATION · NO MANUAL RECEIPT"
+                            .to_string()
+                    }),
+                    font(if short { 8.0 } else { 10.0 }),
+                    TextColor(if manual_visible {
+                        selected_color
+                    } else {
+                        yellow()
+                    }),
+                ));
+                // Four explicit products: row-major focus is Ranked CH/ROW,
+                // then Casual CH/ROW. Manual controls affect Casual only.
                 bottom
-                    .spawn((
-                        Button,
-                        MenuAction::Drive,
-                        GlowAnimation::default(),
-                        Node {
-                            width: px(if short {
-                                260.0
-                            } else if portrait {
-                                window_width * 0.80
+                    .spawn(Node {
+                        width: px(if short {
+                            500.0
+                        } else if portrait {
+                            (window_width * 0.90).min(430.0)
+                        } else {
+                            620.0
+                        }),
+                        display: Display::Grid,
+                        grid_template_columns: RepeatedGridTrack::flex(2, 1.0),
+                        grid_template_rows: RepeatedGridTrack::auto(2),
+                        column_gap: px(if short { 6.0 } else { 10.0 }),
+                        row_gap: px(if short { 4.0 } else { 8.0 }),
+                        ..default()
+                    })
+                    .with_children(|grid| {
+                        for (product_index, (competition, conduct, label)) in [
+                            (
+                                Competition::Ranked,
+                                Conduct::CluckHunt,
+                                "RANKED · CLUCK HUNT",
+                            ),
+                            (
+                                Competition::Ranked,
+                                Conduct::RightOfWay,
+                                "RANKED · RIGHT OF WAY",
+                            ),
+                            (
+                                Competition::Casual,
+                                Conduct::CluckHunt,
+                                "CASUAL · CLUCK HUNT",
+                            ),
+                            (
+                                Competition::Casual,
+                                Conduct::RightOfWay,
+                                "CASUAL · RIGHT OF WAY",
+                            ),
+                        ]
+                        .into_iter()
+                        .enumerate()
+                        {
+                            let enabled =
+                                competition == Competition::Casual || ranked.ranked_available();
+                            let focused = focus.index == product_index;
+                            let color = if enabled { selected_color } else { dim() };
+                            let condition = if competition == Competition::Ranked {
+                                "FORCED ROTATION".to_string()
                             } else {
-                                330.0
-                            }),
-                            height: px(if short { 58.0 } else { 92.0 }),
-                            border_radius: BorderRadius::all(px(18.0)),
-                            align_items: AlignItems::Center,
-                            justify_content: JustifyContent::Center,
-                            flex_direction: FlexDirection::Column,
-                            ..default()
-                        },
-                        MaterialNode(glow_materials.add(GlowButtonMaterial {
-                            color_fill: to_vec4(selected_color),
-                            color_glow: to_vec4(selected_color),
-                            params: Vec4::new(0.0, 0.55, 0.34, 0.0),
-                            params2: Vec4::new(reduced, 0.0, 0.0, 0.0),
-                        })),
-                    ))
-                    .with_children(|button| {
-                        button.spawn((
-                            Text::new("DRIVE"),
-                            font(if short { 27.0 } else { 38.0 }),
-                            TextColor(ink()),
-                        ));
-                        button.spawn((
-                            DriveHint,
-                            Text::new(format!(
-                                "{} - {}",
-                                selected.display_name().to_uppercase(),
-                                if portrait { "TAP" } else { "ENTER / SPACE" }
-                            )),
-                            font(if short { 9.0 } else { 11.0 }),
-                            TextColor(ink().with_alpha(0.68)),
-                        ));
+                                selected.display_name().to_uppercase()
+                            };
+                            let best = product_bests.get(competition, conduct, selected);
+                            let medal = product_medal(competition, conduct, selected, best);
+                            let mut cell_entity = grid.spawn((
+                                GlowAnimation::default(),
+                                Node {
+                                    min_width: px(0.0),
+                                    height: px(if short { 31.0 } else { 46.0 }),
+                                    border: UiRect::all(px(if focused { 3.0 } else { 1.0 })),
+                                    border_radius: BorderRadius::all(px(10.0)),
+                                    align_items: AlignItems::Center,
+                                    justify_content: JustifyContent::Center,
+                                    flex_direction: FlexDirection::Column,
+                                    ..default()
+                                },
+                                BorderColor::all(if focused {
+                                    yellow()
+                                } else {
+                                    color.with_alpha(0.45)
+                                }),
+                                MaterialNode(glow_materials.add(GlowButtonMaterial {
+                                    color_fill: to_vec4(color),
+                                    color_glow: to_vec4(color),
+                                    params: Vec4::new(
+                                        0.0,
+                                        if enabled { 0.45 } else { 0.0 },
+                                        0.25,
+                                        0.0,
+                                    ),
+                                    params2: Vec4::new(reduced, 0.0, 0.0, 0.0),
+                                })),
+                            ));
+                            if enabled {
+                                cell_entity
+                                    .insert((Button, MenuAction::Product(competition, conduct)));
+                            } else {
+                                // A disabled cell has no Button, action, or hit
+                                // target. Mouse and touch cannot even dispatch a
+                                // selection attempt to it.
+                                cell_entity.insert(Pickable::IGNORE);
+                            }
+                            cell_entity.with_children(|cell| {
+                                cell.spawn((
+                                    Text::new(if enabled {
+                                        format!("{} {label}", if focused { ">" } else { "" })
+                                    } else {
+                                        format!("[LOCKED] {label}")
+                                    }),
+                                    font(if short { 8.0 } else { 11.0 }),
+                                    TextColor(if enabled { ink() } else { text() }),
+                                ));
+                                if !short {
+                                    cell.spawn((
+                                        Text::new(format!(
+                                            "{condition} · BEST {best} · {}",
+                                            medal.label().to_uppercase()
+                                        )),
+                                        font(8.0),
+                                        TextColor(if enabled {
+                                            ink().with_alpha(0.72)
+                                        } else {
+                                            text()
+                                        }),
+                                    ));
+                                }
+                            });
+                        }
                     });
+                bottom.spawn((
+                    Text::new(if ranked.ranked_available() {
+                        "RANKED ADMITTED · EXACT v3 TUPLE + ORDERED CATEGORIES VERIFIED".to_string()
+                    } else {
+                        format!(
+                            "RANKED DISABLED · {} · CHOOSE A CASUAL CELL",
+                            ranked.message
+                        )
+                    }),
+                    font(if short { 8.0 } else { 10.0 }),
+                    TextColor(if ranked.ranked_available() {
+                        yellow()
+                    } else {
+                        dim()
+                    }),
+                ));
                 if !short {
                     bottom.spawn((
                         TipText,
@@ -979,11 +1304,13 @@ fn animate_menu_materials(
     time: Res<Time>,
     settings: Res<Settings>,
     selected: Res<SelectedModifier>,
+    ranked: Res<RankedV3Client>,
     stripes: Query<&MaterialNode<HazardStripeMaterial>>,
     vignettes: Query<&MaterialNode<VignetteMaterial>>,
     mut glows: Query<(
         &MaterialNode<GlowButtonMaterial>,
         &Interaction,
+        &MenuAction,
         &mut GlowAnimation,
     )>,
     mut stripe_materials: ResMut<Assets<HazardStripeMaterial>>,
@@ -1009,16 +1336,23 @@ fn animate_menu_materials(
             material.params.w = f32::from(settings.reduced_motion);
         }
     }
-    for (handle, interaction, mut animation) in &mut glows {
-        let target = match *interaction {
-            Interaction::Pressed => 1.0,
-            Interaction::Hovered => 0.55,
-            Interaction::None => 0.0,
+    for (handle, interaction, action, mut animation) in &mut glows {
+        let enabled = !matches!(action, MenuAction::Product(Competition::Ranked, _))
+            || ranked.ranked_available();
+        let target = if !enabled {
+            0.0
+        } else {
+            match *interaction {
+                Interaction::Pressed => 1.0,
+                Interaction::Hovered => 0.55,
+                Interaction::None => 0.0,
+            }
         };
         animation.0 += (target - animation.0) * k;
         if let Some(mut material) = glow_materials.get_mut(handle) {
-            material.color_fill = to_vec4(selected.0.color());
-            material.color_glow = to_vec4(selected.0.color());
+            let color = if enabled { selected.0.color() } else { dim() };
+            material.color_fill = to_vec4(color);
+            material.color_glow = to_vec4(color);
             material.params.x = now;
             material.params.w = animation.0;
             material.params2.x = f32::from(settings.reduced_motion);
@@ -1029,6 +1363,22 @@ fn animate_menu_materials(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn product_focus_defaults_and_skips_disabled_ranked_cells() {
+        let mut focus = ProductFocus::default();
+        assert_eq!(focus.product(), (Competition::Casual, Conduct::CluckHunt));
+        focus.move_focus(1, false);
+        assert_eq!(focus.product(), (Competition::Casual, Conduct::RightOfWay));
+        focus.move_focus(1, false);
+        assert_eq!(focus.product(), (Competition::Casual, Conduct::CluckHunt));
+        focus.set_default_for_gate(true);
+        assert_eq!(focus.product(), (Competition::Ranked, Conduct::CluckHunt));
+        focus.move_focus(1, true);
+        assert_eq!(focus.product(), (Competition::Ranked, Conduct::RightOfWay));
+        focus.set_default_for_gate(false);
+        assert_eq!(focus.product(), (Competition::Casual, Conduct::CluckHunt));
+    }
 
     #[test]
     fn responsive_layout_covers_portrait_short_landscape_and_wide() {

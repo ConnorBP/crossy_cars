@@ -72,6 +72,7 @@ export interface Env extends V3Env {
   ROADY_V3_RANKED_ENABLED?: string;
   LB_V3_PROOF_HMAC_KEY?: string;
   LB_V3_SEED_ENCRYPTION_KEY?: string;
+  LB_V3_SEED_ENCRYPTION_KEYS_JSON?: string;
   LB_V3_SEED_KEY_ID?: string;
   LB_V3_EVIDENCE_CAPABILITY_KEY?: string;
   LB_V3_CLIENT_HMAC_KEYS_JSON?: string;

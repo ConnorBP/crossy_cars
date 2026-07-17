@@ -117,7 +117,12 @@ pub struct WorkerRankedReceipt {
     pub session_id: String,
     pub challenge: String,
     pub seed: [u8; 32],
+    pub schedule: [v3::RotationWindow; v3::SCHEDULE_SEGMENTS],
+    pub conduct: Conduct,
     pub category: String,
+    pub issued_at_ms: u64,
+    pub started_at_ms: u64,
+    pub started_proof: String,
     pub started_header: Vec<u8>,
     pub schedule_hash: [u8; 32],
     pub seed_commitment: [u8; 32],
@@ -126,9 +131,11 @@ pub struct WorkerRankedReceipt {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ReceiptError {
     WrongCategory,
+    WrongConduct,
     SeedCommitment,
     ScheduleCommitment,
-    EmptyStartedHeader,
+    ScheduleMismatch,
+    InvalidStartedMaterial,
 }
 
 impl WorkerRankedReceipt {
@@ -137,11 +144,37 @@ impl WorkerRankedReceipt {
         if self.category != conduct.category() {
             return Err(ReceiptError::WrongCategory);
         }
-        if self.started_header.is_empty() {
-            return Err(ReceiptError::EmptyStartedHeader);
+        if self.conduct != conduct {
+            return Err(ReceiptError::WrongConduct);
+        }
+        if self.started_at_ms == 0
+            || self.started_header.is_empty()
+            || self.started_proof.len() != 43
+            || self.session_id.is_empty()
+            || self.session_id.len() > 255
+            || self.challenge.is_empty()
+            || self.challenge.len() > 255
+        {
+            return Err(ReceiptError::InvalidStartedMaterial);
+        }
+        let header = v3::canonical::SessionHeader {
+            category: &self.category,
+            session_id: &self.session_id,
+            challenge: &self.challenge,
+            seed_commitment: &self.seed_commitment,
+            schedule_hash: &self.schedule_hash,
+            issued_at_ms: self.issued_at_ms,
+        };
+        if v3::canonical::started_session_header(&header, self.started_at_ms).as_deref()
+            != Ok(self.started_header.as_slice())
+        {
+            return Err(ReceiptError::InvalidStartedMaterial);
         }
         if v3::seed_commitment(&self.seed) != self.seed_commitment {
             return Err(ReceiptError::SeedCommitment);
+        }
+        if v3::rotation_schedule(&self.seed) != self.schedule {
+            return Err(ReceiptError::ScheduleMismatch);
         }
         if v3::schedule_commitment(&self.seed, &self.category) != self.schedule_hash {
             return Err(ReceiptError::ScheduleCommitment);
@@ -263,6 +296,7 @@ fn obtain_fresh_run_rules(
     mut active: ResMut<ActiveRunRules>,
     mut clock: ResMut<ActivePlayClock>,
     mut error: ResMut<RunAdmissionError>,
+    mut next: ResMut<NextState<GameState>>,
 ) {
     if round_active.0 {
         return;
@@ -281,7 +315,8 @@ fn obtain_fresh_run_rules(
         }
         Competition::Ranked => {
             let Some(receipt) = injected.0.take() else {
-                error.0 = Some(ReceiptError::EmptyStartedHeader);
+                error.0 = Some(ReceiptError::InvalidStartedMaterial);
+                next.set(GameState::Menu);
                 return;
             };
             match receipt.validate(selected.conduct) {
@@ -292,7 +327,10 @@ fn obtain_fresh_run_rules(
                         condition: RunCondition::Ranked(receipt),
                     };
                 }
-                Err(receipt_error) => error.0 = Some(receipt_error),
+                Err(receipt_error) => {
+                    error.0 = Some(receipt_error);
+                    next.set(GameState::Menu);
+                }
             }
         }
     }
@@ -352,8 +390,24 @@ mod tests {
             session_id: "S".into(),
             challenge: "C".into(),
             seed: [1; 32],
+            schedule: v3::rotation_schedule(&[1; 32]),
+            conduct: Conduct::CluckHunt,
             category: v3::CLUCK_HUNT_CATEGORY.into(),
-            started_header: vec![1],
+            issued_at_ms: 1,
+            started_at_ms: 1,
+            started_proof: "A".repeat(43),
+            started_header: v3::canonical::started_session_header(
+                &v3::canonical::SessionHeader {
+                    category: v3::CLUCK_HUNT_CATEGORY,
+                    session_id: "S",
+                    challenge: "C",
+                    seed_commitment: &[0; 32],
+                    schedule_hash: &[0; 32],
+                    issued_at_ms: 1,
+                },
+                1,
+            )
+            .unwrap(),
             schedule_hash: [0; 32],
             seed_commitment: [0; 32],
         };

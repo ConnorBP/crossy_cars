@@ -4,12 +4,13 @@ use crate::car::Car;
 use crate::game::resources::{GameOverReason, Score, TimeLeft};
 use crate::game::state::GameState;
 use crate::game::{SpawnSet, TouchStateSet};
-use crate::game_modes::{ActiveRunRules, Conduct};
+use crate::game_modes::{ActiveRunRules, Competition, Conduct};
 use crate::modifiers::{ActiveModifier, ModifierKind};
 use crate::objectives::ActiveObjective;
 use crate::palette;
 use crate::persist::{
-    BestAtRoundStart, ConditionBests, ConditionBestsAtRoundStart, Medal, medal_for,
+    BestAtRoundStart, ConditionBests, ConditionBestsAtRoundStart, Medal, ProductBestAtRoundStart,
+    medal_for, product_medal,
 };
 use crate::right_of_way::RightOfWayRun;
 use crate::settings::Settings;
@@ -843,9 +844,13 @@ fn spawn_hud(
             .is_some_and(|rules| rules.conduct == Conduct::RightOfWay)
         {
             if let Some(run) = right_of_way.as_ref() {
-                right_of_way_hud_copy(run)
+                right_of_way_hud_copy(run, touch.0)
             } else {
-                "PKG 0/3 | PREM 100% | GUILT 0.0s".into()
+                if touch.0 {
+                    "P0/3 100% G0.0\nD0 C0 H0 X0".into()
+                } else {
+                    "CARRY 0/3 | PREMIUM 100.00% | GUILT 0.0s\nDELIVERED 0 | COURTESY 0 | HITS 0 | CHAIN 0".into()
+                }
             }
         } else {
             String::new()
@@ -858,6 +863,7 @@ fn spawn_hud(
             },
             TextColor(Color::srgb(0.30, 1.0, 0.55)),
             Node {
+                margin: UiRect::top(px(if touch.0 { 1.0 } else { 5.0 })),
                 display: if rules
                     .as_ref()
                     .is_some_and(|rules| rules.conduct == Conduct::RightOfWay)
@@ -1153,9 +1159,22 @@ fn spawn_gameover(
     best_at_start: Res<BestAtRoundStart>,
     active_modifier: Res<ActiveModifier>,
     conditions_at_start: Res<ConditionBestsAtRoundStart>,
+    product_best_at_start: Res<ProductBestAtRoundStart>,
+    rules: Option<Res<ActiveRunRules>>,
+    right_of_way: Option<Res<crate::right_of_way::RightOfWayRun>>,
     objective: Res<ActiveObjective>,
 ) {
-    let total = score.chickens + score.coins;
+    let total = if rules
+        .as_deref()
+        .is_some_and(|rules| rules.conduct == Conduct::RightOfWay)
+    {
+        right_of_way
+            .as_deref()
+            .and_then(|run| run.score.terminal_total().ok())
+            .unwrap_or(0)
+    } else {
+        score.chickens.saturating_add(score.coins)
+    };
     let new_best = is_new_best(total, best_at_start.0);
     let best_summary = if new_best {
         "NEW BEST".to_string()
@@ -1164,9 +1183,43 @@ fn spawn_gameover(
     };
 
     let kind = active_modifier.0;
-    let condition_result =
-        terminal_condition_result(kind, conditions_at_start.by_kind[kind.index()], total);
-    let condition_summary = condition_summary(kind, condition_result.displayed_best);
+    let (condition_result, condition_summary) = if let Some(rules) = rules.as_deref() {
+        let displayed_best = product_best_at_start.best.max(total);
+        let previous_medal = product_medal(
+            rules.competition,
+            rules.conduct,
+            kind,
+            product_best_at_start.best,
+        );
+        let medal = product_medal(rules.competition, rules.conduct, kind, displayed_best);
+        (
+            TerminalConditionResult {
+                displayed_best,
+                new_best: total > product_best_at_start.best,
+                medal,
+                medal_upgrade: is_medal_upgrade(previous_medal, medal),
+            },
+            format!(
+                "{} {} BEST: {} | {}",
+                if rules.competition == Competition::Ranked {
+                    "Ranked"
+                } else {
+                    "Casual"
+                },
+                match rules.conduct {
+                    Conduct::CluckHunt => "Cluck Hunt",
+                    Conduct::RightOfWay => "Right of Way",
+                },
+                displayed_best,
+                medal.label()
+            ),
+        )
+    } else {
+        let result =
+            terminal_condition_result(kind, conditions_at_start.by_kind[kind.index()], total);
+        let summary = condition_summary(kind, result.displayed_best);
+        (result, summary)
+    };
     let (viewport_width, viewport_height) = primary_window
         .single()
         .map(|window| (window.width(), window.height()))
@@ -1464,9 +1517,25 @@ fn update_gear_text(car: Query<&Car>, mut query: Query<&mut TextSpan, With<GearT
     }
 }
 
-fn update_score_text(score: Res<Score>, mut query: Query<&mut TextSpan, With<ScoreText>>) {
+fn update_score_text(
+    score: Res<Score>,
+    rules: Option<Res<ActiveRunRules>>,
+    right_of_way: Option<Res<RightOfWayRun>>,
+    mut query: Query<&mut TextSpan, With<ScoreText>>,
+) {
+    let total = if rules
+        .as_ref()
+        .is_some_and(|rules| rules.conduct == Conduct::RightOfWay)
+    {
+        right_of_way
+            .as_ref()
+            .map_or(0, |run| run.score.accumulator.max(0))
+            .to_string()
+    } else {
+        score.chickens.saturating_add(score.coins).to_string()
+    };
     for mut span in &mut query {
-        **span = format!("{}", score.chickens + score.coins);
+        **span = total.clone();
     }
 }
 
@@ -1482,25 +1551,45 @@ fn update_coins_text(score: Res<Score>, mut query: Query<&mut TextSpan, With<Coi
     }
 }
 
-fn right_of_way_hud_copy(run: &RightOfWayRun) -> String {
-    format!(
-        "PKG {}/{} | PREM {}.{:02}% | GUILT {}.{:01}s | SCORE {}",
-        run.score.carried_packages,
-        roady_score_rules::v3::PACKAGE_CAPACITY,
-        run.score.premium_bps / 100,
-        run.score.premium_bps % 100,
-        run.score.guilt_remaining_ms / 1_000,
-        (run.score.guilt_remaining_ms % 1_000) / 100,
-        run.score.accumulator.max(0),
-    )
+fn right_of_way_hud_copy(run: &RightOfWayRun, compact: bool) -> String {
+    let guilt_tenths = run.score.guilt_remaining_ms.div_ceil(100);
+    if compact {
+        format!(
+            "P{}/{} {}% G{}.{:01}\nD{} C{} H{} X{}",
+            run.score.carried_packages,
+            roady_score_rules::v3::PACKAGE_CAPACITY,
+            run.score.premium_bps / 100,
+            guilt_tenths / 10,
+            guilt_tenths % 10,
+            run.score.packages_delivered,
+            run.score.courtesy_count,
+            run.score.animal_hits,
+            run.score.delivery_chain,
+        )
+    } else {
+        format!(
+            "CARRY {}/{} | PREMIUM {}.{:02}% | GUILT {}.{:01}s\nDELIVERED {} | COURTESY {} | HITS {} | CHAIN {}",
+            run.score.carried_packages,
+            roady_score_rules::v3::PACKAGE_CAPACITY,
+            run.score.premium_bps / 100,
+            run.score.premium_bps % 100,
+            guilt_tenths / 10,
+            guilt_tenths % 10,
+            run.score.packages_delivered,
+            run.score.courtesy_count,
+            run.score.animal_hits,
+            run.score.delivery_chain,
+        )
+    }
 }
 
 fn update_conduct_text(
     run: Option<Res<RightOfWayRun>>,
+    touch: Res<TouchControlsActive>,
     mut query: Query<&mut Text, With<ConductText>>,
 ) {
     let Some(run) = run else { return };
-    let copy = right_of_way_hud_copy(&run);
+    let copy = right_of_way_hud_copy(&run, touch.0);
     for mut text in &mut query {
         **text = copy.clone();
     }
@@ -1556,8 +1645,9 @@ mod tests {
         condition_summary, gameover_core_bounds, gameover_layout, gameover_title, is_medal_upgrade,
         is_mobile_viewport, is_new_best, maximal_gameover_content_height,
         maximal_gameover_state_fits, medal_gallery_state, medal_points, menu_content_fits,
-        pause_content_bounds, spawn_hud, terminal_condition_result, timer_motion_flags,
-        timer_style, update_cockpit_layout, update_score_text, update_timer_layout,
+        pause_content_bounds, right_of_way_hud_copy, spawn_hud, terminal_condition_result,
+        timer_motion_flags, timer_style, update_cockpit_layout, update_score_text,
+        update_timer_layout,
     };
     use crate::game::resources::{GameOverReason, Score};
     use crate::modifiers::{ActiveModifier, ModifierKind};
@@ -1588,6 +1678,51 @@ mod tests {
         let spans: Vec<_> = score_spans.iter(world).collect();
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].as_str(), "12");
+    }
+
+    #[test]
+    fn right_of_way_hud_is_complete_and_compact_at_audited_sizes() {
+        let mut run = crate::right_of_way::RightOfWayRun::default();
+        run.score.accumulator = -5;
+        run.score.carried_packages = 3;
+        run.score.packages_delivered = 12;
+        run.score.courtesy_count = 9;
+        run.score.animal_hits = 2;
+        run.score.delivery_chain = 4;
+        run.score.premium_bps = 8_100;
+        run.score.guilt_remaining_ms = 4_001;
+        let desktop = right_of_way_hud_copy(&run, false);
+        let touch = right_of_way_hud_copy(&run, true);
+        for token in [
+            "CARRY",
+            "PREMIUM",
+            "GUILT",
+            "DELIVERED",
+            "COURTESY",
+            "HITS",
+            "CHAIN",
+        ] {
+            assert!(desktop.contains(token));
+        }
+        assert!(desktop.lines().all(|line| line.len() <= 76));
+        assert_eq!(touch.lines().count(), 2);
+        assert!(touch.lines().all(|line| line.len() <= 24));
+        assert!(desktop.is_ascii() && touch.is_ascii());
+        // The cockpit geometry itself is shared and already audited at these
+        // representative desktop, portrait-touch and short-landscape sizes.
+        for viewport in [
+            Vec2::new(1440.0, 900.0),
+            Vec2::new(390.0, 844.0),
+            Vec2::new(844.0, 390.0),
+        ] {
+            let node = super::cockpit_root_node(viewport.x < 1000.0, Some(viewport));
+            if let Val::Px(width) = node.width {
+                assert!(width <= viewport.x);
+            }
+            if let Val::Px(height) = node.height {
+                assert!(height <= viewport.y);
+            }
+        }
     }
 
     #[test]

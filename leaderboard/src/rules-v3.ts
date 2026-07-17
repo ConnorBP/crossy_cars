@@ -330,6 +330,15 @@ export function frenzyRelocationCandidates(seed: Uint8Array): readonly (readonly
   });
 }
 
+export function comboMultiplier(count: bigint): bigint {
+  checked(count, 0n, U32_MAX, "combo count");
+  if (count <= 4n) return 1n;
+  if (count <= 9n) return 2n;
+  if (count <= 14n) return 3n;
+  if (count <= 19n) return 4n;
+  return 5n;
+}
+
 export function completedWaves(activeMs: bigint): bigint {
   if (activeMs < 36_000n) return 0n;
   const waves = 1n + (activeMs - 36_000n) / CADENCE_MS;

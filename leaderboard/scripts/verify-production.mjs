@@ -1,0 +1,61 @@
+#!/usr/bin/env node
+/** Exact, uncached production probes used by disabled deploys and guarded rollout. */
+import assert from "node:assert/strict";
+
+const expectedEnabled = process.argv.includes("--enabled");
+const baseArg = process.argv.find((value) => value.startsWith("http://") || value.startsWith("https://"));
+const base = (baseArg || process.env.LEADERBOARD_BASE_URL || "").replace(/\/$/, "");
+if (!base) throw new Error("missing LEADERBOARD_BASE_URL or URL argument");
+const expectedSha = process.env.EXPECTED_COMMIT_SHA;
+const expected = {
+  ranked: { enabled: expectedEnabled, categories: ["rotation.v2.cluck_hunt", "rotation.v2.right_of_way"] },
+  protocolVersion: 3,
+  protocolId: "roady-protocol.v3",
+  rulesVersion: 3,
+  rulesId: "roady-rules.v3",
+  policyVersion: 1,
+  policyId: "roady-ranked-policy.v3.1",
+  mode: "rotation",
+};
+const get = async (path) => fetch(`${base}${path}`, {
+  cache: "no-store",
+  headers: {
+    "Cache-Control": "no-cache, no-store, max-age=0",
+    Pragma: "no-cache",
+    "X-Roady-Release-Probe": `${Date.now()}-${crypto.randomUUID()}`,
+  },
+});
+
+const health = await get("/healthz");
+assert.equal(health.status, 200, "legacy health probe failed");
+const healthBody = await health.json();
+assert.equal(healthBody.ok, true);
+if (expectedSha) assert.equal(healthBody.build, expectedSha, "deployed Worker commit SHA mismatch");
+const board = await get("/v1/leaderboard?limit=1");
+assert.equal(board.status, 200, "legacy board probe failed");
+assert.ok(Array.isArray((await board.json()).entries), "legacy board entries missing");
+for (let probe = 1; probe <= 2; probe += 1) {
+  // The capability contract rejects query strings. Use a unique request header
+  // plus no-cache directives so both requests reach production uncached.
+  const response = await fetch(`${base}/v3/capabilities`, {
+    cache: "no-store",
+    headers: {
+      "Cache-Control": "no-cache, no-store, max-age=0",
+      Pragma: "no-cache",
+      "X-Roady-Release-Probe": `${Date.now()}-${probe}-${crypto.randomUUID()}`,
+    },
+  });
+  assert.equal(response.status, 200, `capability probe ${probe} failed`);
+  assert.equal(response.headers.get("cache-control"), "public, max-age=60, s-maxage=300, stale-while-revalidate=600");
+  assert.deepEqual(await response.json(), expected, `capability probe ${probe} tuple mismatch`);
+}
+if (!expectedEnabled) {
+  const issuance = await fetch(`${base}/v3/session`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+    body: JSON.stringify({ mode: "rotation", categoryKey: "rotation.v2.cluck_hunt", turnstileToken: "release-disabled-probe" }),
+  });
+  assert.equal(issuance.status, 503, "disabled production unexpectedly issued a session");
+  assert.equal((await issuance.json()).error.code, "ranked_disabled");
+}
+console.log(`production probe passed: SHA/legacy/exact v3 capability (${expectedEnabled ? "enabled" : "disabled"}), two uncached observations`);

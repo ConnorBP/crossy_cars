@@ -302,7 +302,7 @@ fn tick_timeleft(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn finalize_pending_terminal(
-    next: Res<NextState<GameState>>,
+    mut next: ResMut<NextState<GameState>>,
     rules: Option<Res<ActiveRunRules>>,
     clock: Option<Res<ActivePlayClock>>,
     reason: Res<GameOverReason>,
@@ -335,7 +335,10 @@ pub(crate) fn finalize_pending_terminal(
         right_of_way.as_deref(),
         &mut ledger,
     ) {
+        // Protocol arithmetic/size failure invalidates the run. Never enter a
+        // GameOver state whose immutable snapshot lacks a canonical Terminal.
         ledger.failure = Some(error);
+        next.set(GameState::Menu);
     }
 }
 
@@ -372,6 +375,7 @@ fn pause_to_playing(
 
 fn gameover_input(
     keys: Res<ButtonInput<KeyCode>>,
+    rules: Option<Res<ActiveRunRules>>,
     mut restart: ResMut<RestartRequested>,
     mut next: ResMut<NextState<GameState>>,
 ) {
@@ -379,7 +383,13 @@ fn gameover_input(
         || keys.just_pressed(KeyCode::Space)
         || keys.just_pressed(KeyCode::KeyR)
     {
-        StateAction::Playing
+        // A Ranked restart must discard the consumed receipt and return to
+        // the menu boundary for a fresh capability/session/start chain.
+        if rules.as_deref().is_some_and(ActiveRunRules::is_ranked) {
+            StateAction::Menu
+        } else {
+            StateAction::Playing
+        }
     } else if keys.just_pressed(KeyCode::Escape) || keys.just_pressed(KeyCode::KeyQ) {
         StateAction::Menu
     } else {

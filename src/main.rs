@@ -3,6 +3,7 @@ mod camera;
 mod car;
 mod chickens;
 mod combos;
+mod competitive_v3;
 mod countdown;
 mod critters;
 mod difficulty;
@@ -46,6 +47,7 @@ use camera::{
 use car::{CarPlugin, CarReviewPlugin, PondReviewCarPlugin};
 use chickens::ChickensPlugin;
 use combos::CombosPlugin;
+use competitive_v3::CompetitiveV3Plugin;
 use countdown::CountdownPlugin;
 use critters::CrittersPlugin;
 use difficulty::DifficultyPlugin;
@@ -318,9 +320,11 @@ fn main() {
             CrittersPlugin,
             DifficultyPlugin,
         ))
-        // Cloudflare leaderboard web client; degrades to read-only/unavailable
-        // on native or when LEADERBOARD_API_URL is not set at build time.
+        // Frozen legacy v1 reads/submission remain isolated in this plugin.
         .add_plugins(LeaderboardPlugin)
+        // Additive exact-tuple v3 Ranked browser client. It consumes the
+        // game-owned receipt/ledger interfaces and never routes Casual runs.
+        .add_plugins(CompetitiveV3Plugin)
         .run();
 }
 

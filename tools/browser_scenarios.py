@@ -44,6 +44,60 @@ MUTED_SCHEMA = "v2:100:1:0:"
 # persistence instead of being reset by the init script.
 QA_SESSION_MARKER = "__roady_car_browser_qa_initialized"
 SCREENSHOT_POLICIES = {"all", "failure"}
+V3_RANKED_NAMESPACES = (
+    "roady.v3.best.ranked.rotation.v2.cluck_hunt",
+    "roady.v3.best.ranked.rotation.v2.right_of_way",
+)
+V3_CASUAL_NAMESPACES = tuple(
+    f"roady.v3.best.casual.{conduct}.{condition}"
+    for conduct in ("cluck_hunt", "right_of_way")
+    for condition in range(5)
+)
+V3_NAMESPACES = V3_RANKED_NAMESPACES + V3_CASUAL_NAMESPACES
+
+
+def is_v3_write(method: str, url: str) -> bool:
+    """Identify protocol writes; Casual menu/gameplay must produce none."""
+    try:
+        return method == "POST" and urlsplit(url).path.startswith("/v3/")
+    except ValueError:
+        return False
+
+
+def fixture_capability_admitted(body: str) -> bool:
+    """Strict fixture oracle matching the Rust c2 admission tuple."""
+    try:
+        value = json.loads(body)
+    except (TypeError, json.JSONDecodeError):
+        return False
+    if not isinstance(value, dict) or set(value) != {
+        "ranked", "protocolVersion", "protocolId", "rulesVersion", "rulesId",
+        "policyVersion", "policyId", "mode",
+    }:
+        return False
+    ranked = value.get("ranked")
+    return (
+        isinstance(ranked, dict)
+        and set(ranked) == {"enabled", "categories"}
+        and ranked.get("enabled") is True
+        and ranked.get("categories") == [
+            "rotation.v2.cluck_hunt", "rotation.v2.right_of_way"
+        ]
+        and value.get("protocolVersion") == 3
+        and value.get("protocolId") == "roady-protocol.v3"
+        and value.get("rulesVersion") == 3
+        and value.get("rulesId") == "roady-rules.v3"
+        and value.get("policyVersion") == 1
+        and value.get("policyId") == "roady-ranked-policy.v3.1"
+        and value.get("mode") == "rotation"
+    )
+
+
+def storage_values(page: Any, keys: tuple[str, ...]) -> dict[str, str | None]:
+    return page.evaluate(
+        "keys => Object.fromEntries(keys.map(key => [key, localStorage.getItem(key)]))",
+        list(keys),
+    )
 
 
 TURNSTILE_SCRIPT_PATH = re.compile(r"^/turnstile/v0/(?:b/[0-9a-f]+/)?api\.js$")
@@ -416,6 +470,10 @@ def run_scenario(args: argparse.Namespace, summary: dict[str, Any]) -> None:
                             if (sessionStorage.getItem({json.dumps(QA_SESSION_MARKER)}) !== '1') {{
                                 localStorage.removeItem({json.dumps(SETTINGS_STORAGE_KEY)});
                                 localStorage.removeItem({json.dumps(LEGACY_MUTE_STORAGE_KEY)});
+                                const namespaces = {json.dumps(V3_NAMESPACES)};
+                                namespaces.forEach((key, index) => localStorage.setItem(key, String(7000 + index)));
+                                localStorage.setItem('car_game_best', 'v1:9001:1:2:3:4:5');
+                                localStorage.setItem('roady.v2.best.rotation.v1', '9002');
                                 sessionStorage.setItem({json.dumps(QA_SESSION_MARKER)}, '1');
                             }}
                         }} catch (_) {{}}
@@ -427,6 +485,7 @@ def run_scenario(args: argparse.Namespace, summary: dict[str, Any]) -> None:
             page.set_default_timeout(60_000)
             page.set_default_navigation_timeout(BOOT_TIMEOUT_MS)
             scenario_started = time.monotonic()
+            v3_write_requests: list[dict[str, str]] = summary.setdefault("v3_write_requests", [])
 
             def timestamp() -> int:
                 return elapsed_ms(scenario_started)
@@ -480,6 +539,14 @@ def run_scenario(args: argparse.Namespace, summary: dict[str, Any]) -> None:
             page.on("pageerror", on_page_error)
             page.on("requestfailed", on_request_failed)
             page.on("response", on_response)
+            page.on(
+                "request",
+                lambda request: v3_write_requests.append(
+                    {"method": request.method, "url": request.url}
+                )
+                if is_v3_write(request.method, request.url)
+                else None,
+            )
 
             def screenshot(filename: str) -> None:
                 if args.screenshot_policy == "failure":
@@ -492,6 +559,9 @@ def run_scenario(args: argparse.Namespace, summary: dict[str, Any]) -> None:
                 summary, "load_and_wait_for_boot", lambda: wait_for_boot(page, args.url)
             )
             summary["boot"] = boot_state
+            isolated_before = storage_values(
+                page, V3_NAMESPACES + ("car_game_best", "roady.v2.best.rotation.v1")
+            )
             run_step(summary, "capture_boot", lambda: screenshot("00_boot_menu.png"))
 
             # Enter starts a fresh round. Samples are based on elapsed wall time,
@@ -672,6 +742,18 @@ def run_scenario(args: argparse.Namespace, summary: dict[str, Any]) -> None:
                 "capture_final",
                 lambda: screenshot("10_final_after_reload.png"),
             )
+            isolated_after = storage_values(
+                page, V3_NAMESPACES + ("car_game_best", "roady.v2.best.rotation.v1")
+            )
+            assert_condition(
+                isolated_after == isolated_before,
+                "Casual/restart/settings flow crossed a v3 category or legacy namespace",
+            )
+            assert_condition(
+                not v3_write_requests,
+                f"Casual flow emitted v3 write requests: {v3_write_requests}",
+            )
+            summary["category_isolation"] = isolated_after
 
             # Let asynchronous console/page errors queued by the final frame arrive.
             page.wait_for_timeout(300)

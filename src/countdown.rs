@@ -18,9 +18,12 @@ use crate::car::InputFrozen;
 use crate::game::SpawnSet;
 use crate::game::resources::RoundActive;
 use crate::game::state::GameState;
+use crate::game_modes::{ActiveRunRules, Competition};
 use crate::modifiers::{ActiveModifier, ModifierKind};
 use crate::palette;
-use crate::persist::{ConditionBestsAtRoundStart, Medal, medal_for};
+use crate::persist::{
+    ConditionBestsAtRoundStart, Medal, ProductBestAtRoundStart, medal_for, product_medal,
+};
 use crate::settings::Settings;
 
 const PUNCH_DURATION: f32 = 0.2;
@@ -157,7 +160,9 @@ fn start_countdown(
     mut countdown: ResMut<Countdown>,
     mut input_frozen: ResMut<InputFrozen>,
     active_modifier: Res<ActiveModifier>,
+    active_rules: Option<Res<ActiveRunRules>>,
     condition_bests: Res<ConditionBestsAtRoundStart>,
+    product_best: Res<ProductBestAtRoundStart>,
 ) {
     // Resume from Paused: round already active -> no countdown.
     if round_active.0 {
@@ -170,7 +175,13 @@ fn start_countdown(
     countdown.last_cue = None;
     countdown.punch_remaining = 0.0;
     input_frozen.0 = true;
-    spawn_countdown_overlay(&mut commands, &active_modifier, &condition_bests);
+    spawn_countdown_overlay(
+        &mut commands,
+        &active_modifier,
+        active_rules.as_deref(),
+        &condition_bests,
+        product_best.best,
+    );
 }
 
 /// Format the active condition's pre-round record and its earned medal.
@@ -190,10 +201,46 @@ fn format_best_medal(kind: ModifierKind, best: u32) -> String {
 fn spawn_countdown_overlay(
     commands: &mut Commands,
     active_modifier: &ActiveModifier,
+    active_rules: Option<&ActiveRunRules>,
     condition_bests: &ConditionBestsAtRoundStart,
+    product_best: u32,
 ) {
-    let best = condition_bests.by_kind[active_modifier.0.index()];
-    let best_medal = format_best_medal(active_modifier.0, best);
+    let (condition_heading, condition_name, best_medal) = if let Some(rules) = active_rules {
+        let medal = product_medal(
+            rules.competition,
+            rules.conduct,
+            active_modifier.0,
+            product_best,
+        );
+        (
+            if rules.competition == Competition::Ranked {
+                "RANKED ROTATION"
+            } else {
+                "ROAD CONDITION"
+            },
+            if rules.competition == Competition::Ranked {
+                "FORCED 16-SEGMENT SCHEDULE"
+            } else {
+                active_modifier.display_name()
+            },
+            format!(
+                "{} BEST {product_best} | {}",
+                if rules.competition == Competition::Ranked {
+                    "RANKED"
+                } else {
+                    "CASUAL"
+                },
+                medal.label().to_uppercase()
+            ),
+        )
+    } else {
+        let best = condition_bests.by_kind[active_modifier.0.index()];
+        (
+            "ROAD CONDITION",
+            active_modifier.display_name(),
+            format_best_medal(active_modifier.0, best),
+        )
+    };
     commands
         .spawn((
             Node {
@@ -215,7 +262,7 @@ fn spawn_countdown_overlay(
             // Announce the freshly selected condition independently of the
             // animated cue so 3-2-1/GO retains its own text and punch.
             p.spawn((
-                Text::new("ROAD CONDITION"),
+                Text::new(condition_heading),
                 TextFont {
                     font_size: FontSize::Px(16.0),
                     ..default()
@@ -227,7 +274,7 @@ fn spawn_countdown_overlay(
                 },
             ));
             p.spawn((
-                Text::new(active_modifier.display_name()),
+                Text::new(condition_name),
                 TextFont {
                     font_size: FontSize::Px(32.0),
                     ..default()

@@ -56,6 +56,7 @@ try:  # Direct script execution puts tools/ on sys.path.
         discard_pre_cleanup_screenshot,
         ignorable_request_failure,
         promote_pre_cleanup_screenshot,
+        is_v3_write,
     )
 except ImportError:  # Package-style imports used by helper self-tests.
     from .browser_scenarios import (
@@ -63,6 +64,7 @@ except ImportError:  # Package-style imports used by helper self-tests.
         discard_pre_cleanup_screenshot,
         ignorable_request_failure,
         promote_pre_cleanup_screenshot,
+        is_v3_write,
     )
 
 DEFAULT_URL = "http://localhost:8080"
@@ -277,6 +279,12 @@ def attach_error_listeners(page: Any, summary: dict[str, Any], started_at: float
             }
         )
 
+    def on_request(request: Any) -> None:
+        if is_v3_write(request.method, request.url):
+            summary.setdefault("v3_write_requests", []).append(
+                {"at_ms": ts(), "method": request.method, "url": request.url}
+            )
+
     def on_response(response: Any) -> None:
         if response.status >= 400:
             summary["http_errors"].append(
@@ -286,6 +294,7 @@ def attach_error_listeners(page: Any, summary: dict[str, Any], started_at: float
     page.on("console", on_console)
     page.on("pageerror", on_page_error)
     page.on("requestfailed", on_request_failed)
+    page.on("request", on_request)
     page.on("response", on_response)
 
 
@@ -309,6 +318,10 @@ def assert_no_errors(summary: dict[str, Any]) -> None:
         not summary["http_errors"],
         f"observed {len(summary['http_errors'])} HTTP error response(s): "
         f"{summary['http_errors']}",
+    )
+    assert_condition(
+        not summary.get("v3_write_requests"),
+        f"Casual settings round trips emitted v3 writes: {summary.get('v3_write_requests')}",
     )
 
 
@@ -850,6 +863,7 @@ def main() -> int:
         "network_failures": [],
         "http_errors": [],
         "cleanup_errors": [],
+        "v3_write_requests": [],
     }
 
     exit_code = 0

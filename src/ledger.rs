@@ -173,22 +173,28 @@ pub fn finalize_terminal(
     } else {
         v3::Platform::Native
     };
-    let total = score.chickens.checked_add(score.coins).unwrap_or(u32::MAX);
     let terminal = match rules.conduct {
-        Conduct::CluckHunt => canonical::ConductTerminal::CluckHunt(canonical::CluckTerminal {
-            reason,
-            total,
-            chickens: score.chickens,
-            coins: score.coins,
-            objective_completed: objective.completed,
-            max_combo: combo.multiplier.clamp(1, 5) as u8,
-            duration_ms,
-            remaining_ms,
-            build: env!("CARGO_PKG_VERSION").into(),
-            platform,
-        }),
+        Conduct::CluckHunt => {
+            let total = v3::cluck_terminal(score.chickens, score.coins)
+                .map_err(|_| canonical::CanonicalError::MissingTerminal)?;
+            canonical::ConductTerminal::CluckHunt(canonical::CluckTerminal {
+                reason,
+                total,
+                chickens: score.chickens,
+                coins: score.coins,
+                objective_completed: objective.completed,
+                max_combo: combo.multiplier.clamp(1, 5) as u8,
+                duration_ms,
+                remaining_ms,
+                build: env!("CARGO_PKG_VERSION").into(),
+                platform,
+            })
+        }
         Conduct::RightOfWay => {
             let row = right_of_way.ok_or(canonical::CanonicalError::MissingTerminal)?;
+            if row.failed {
+                return Err(canonical::CanonicalError::MissingTerminal);
+            }
             let total = row
                 .score
                 .terminal_total()
@@ -288,5 +294,94 @@ mod tests {
         events.sort_by(canonical_event_order);
         assert_eq!(events[0].payload.kind(), v3::EventKind::ObjectiveCompleted);
         assert_eq!(events[1].payload.kind(), v3::EventKind::Terminal);
+    }
+
+    fn rules(conduct: Conduct) -> ActiveRunRules {
+        ActiveRunRules {
+            competition: crate::game_modes::Competition::Casual,
+            conduct,
+            condition: crate::game_modes::RunCondition::Casual(
+                crate::game_modes::ManualCondition::Standard,
+            ),
+        }
+    }
+
+    #[test]
+    fn every_reason_finalizes_once_for_both_conducts() {
+        for conduct in [Conduct::CluckHunt, Conduct::RightOfWay] {
+            for reason in [
+                GameOverReason::TimeUp,
+                GameOverReason::Wrecked,
+                GameOverReason::Drowned,
+            ] {
+                let mut state = V3LedgerState {
+                    ledger: Some(canonical::CanonicalLedger::new(b"started")),
+                    ..default()
+                };
+                let row = RightOfWayRun::default();
+                finalize_terminal(
+                    &rules(conduct),
+                    &ActivePlayClock::default(),
+                    reason,
+                    &Score::default(),
+                    &TimeLeft::default(),
+                    &ActiveObjective::default(),
+                    &Combo::default(),
+                    Some(&row),
+                    &mut state,
+                )
+                .unwrap();
+                finalize_terminal(
+                    &rules(conduct),
+                    &ActivePlayClock::default(),
+                    reason,
+                    &Score::default(),
+                    &TimeLeft::default(),
+                    &ActiveObjective::default(),
+                    &Combo::default(),
+                    Some(&row),
+                    &mut state,
+                )
+                .unwrap();
+                let ledger = state.ledger.as_ref().unwrap();
+                assert_eq!(ledger.event_count(), 1);
+                assert_eq!(state.final_root, Some(ledger.final_root().unwrap()));
+                let terminal = ledger.terminal().unwrap();
+                let actual = match terminal {
+                    canonical::ConductTerminal::CluckHunt(value) => value.reason,
+                    canonical::ConductTerminal::RightOfWay(value) => value.reason,
+                };
+                assert_eq!(actual, terminal_reason(reason));
+            }
+        }
+    }
+
+    #[test]
+    fn protocol_overflow_rejects_without_terminal_or_root() {
+        let mut state = V3LedgerState {
+            ledger: Some(canonical::CanonicalLedger::new(b"started")),
+            ..default()
+        };
+        let score = Score {
+            chickens: u32::MAX,
+            coins: 1,
+        };
+        assert!(
+            finalize_terminal(
+                &rules(Conduct::CluckHunt),
+                &ActivePlayClock::default(),
+                GameOverReason::TimeUp,
+                &score,
+                &TimeLeft::default(),
+                &ActiveObjective::default(),
+                &Combo::default(),
+                None,
+                &mut state,
+            )
+            .is_err()
+        );
+        assert!(!state.terminal_queued);
+        assert!(state.final_root.is_none());
+        assert_eq!(state.ledger.as_ref().unwrap().event_count(), 0);
     }
 }

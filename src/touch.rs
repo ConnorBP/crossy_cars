@@ -7,6 +7,7 @@ use crate::game::{
     RestartRequested, StateAction, TouchStateSet, apply_state_action, resources::Drowning,
     settings_closed, state::GameState,
 };
+use crate::game_modes::ActiveRunRules;
 
 const PAUSE_TOP: f32 = 0.14;
 const PAUSE_LEFT: f32 = 0.44;
@@ -685,6 +686,7 @@ fn touch_state_transitions(
     touches: Res<Touches>,
     windows: Query<&Window, With<PrimaryWindow>>,
     state: Res<State<GameState>>,
+    rules: Option<Res<ActiveRunRules>>,
     mut active: ResMut<TouchControlsActive>,
     mut restart: ResMut<RestartRequested>,
     mut next: ResMut<NextState<GameState>>,
@@ -698,10 +700,16 @@ fn touch_state_transitions(
     let Some(window_size) = primary_window_size(&windows) else {
         return;
     };
-    let action = resolve_touch_actions(just_pressed.filter_map(|touch| {
+    let mut action = resolve_touch_actions(just_pressed.filter_map(|touch| {
         let position = normalize_position(touch.position(), window_size)?;
         Some(touch_state_action(*state.get(), position))
     }));
+    if *state.get() == GameState::GameOver
+        && action == StateAction::Playing
+        && rules.as_deref().is_some_and(ActiveRunRules::is_ranked)
+    {
+        action = StateAction::Menu;
+    }
     apply_state_action(action, &mut restart, &mut next);
 }
 

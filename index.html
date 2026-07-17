@@ -45,10 +45,13 @@
       }
       canvas {
         position: fixed;
-        inset: 0;
+        top: env(safe-area-inset-top);
+        right: env(safe-area-inset-right);
+        bottom: env(safe-area-inset-bottom);
+        left: env(safe-area-inset-left);
         display: block;
-        width: 100%;
-        height: 100%;
+        width: calc(100% - env(safe-area-inset-left) - env(safe-area-inset-right));
+        height: calc(100% - env(safe-area-inset-top) - env(safe-area-inset-bottom));
         touch-action: none;
         -webkit-tap-highlight-color: transparent;
       }
@@ -420,30 +423,43 @@
         // ── WebCrypto HMAC-SHA-256 → unpadded base64url ────────────────
         // The key is the extractable embedded nuisance key. See the security
         // note in src/leaderboard.rs and LEADERBOARD_ARCHITECTURE.md §1.
-        api.hmacSha256Base64Url = function (keyUtf8, dataUtf8) {
+        function signatureBase64Url(keyUtf8, bytes) {
           var enc = new TextEncoder();
           return crypto.subtle
             .importKey(
-              "raw",
-              enc.encode(keyUtf8),
-              { name: "HMAC", hash: "SHA-256" },
-              false,
-              ["sign"]
+              "raw", enc.encode(keyUtf8),
+              { name: "HMAC", hash: "SHA-256" }, false, ["sign"]
             )
             .then(function (key) {
-              return crypto.subtle.sign("HMAC", key, enc.encode(dataUtf8));
+              return crypto.subtle.sign("HMAC", key, bytes);
             })
             .then(function (sig) {
-              var bytes = new Uint8Array(sig);
-              var s = "";
-              for (var i = 0; i < bytes.length; i++)
-                s += String.fromCharCode(bytes[i]);
-              return btoa(s)
-                .replace(/\+/g, "-")
-                .replace(/\//g, "_")
-                .replace(/=+$/, "");
+              var result = new Uint8Array(sig), s = "";
+              for (var i = 0; i < result.length; i++) s += String.fromCharCode(result[i]);
+              return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
             })
             .catch(function () { return null; });
+        }
+
+        api.hmacSha256Base64Url = function (keyUtf8, dataUtf8) {
+          return signatureBase64Url(keyUtf8, new TextEncoder().encode(dataUtf8));
+        };
+
+        // Exact binary canonical v3 score input. The bridge accepts canonical
+        // unpadded base64url rather than a JS string so arbitrary bytes are
+        // never UTF-8 transformed. Keys and payloads are neither logged nor
+        // persisted.
+        api.hmacSha256Base64UrlBytes = function (keyUtf8, dataBase64Url) {
+          try {
+            if (!/^[A-Za-z0-9_-]+$/.test(dataBase64Url)) return Promise.resolve(null);
+            var padded = dataBase64Url.replace(/-/g, "+").replace(/_/g, "/");
+            while (padded.length % 4) padded += "=";
+            var raw = atob(padded), bytes = new Uint8Array(raw.length);
+            for (var i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+            return signatureBase64Url(keyUtf8, bytes);
+          } catch (e) {
+            return Promise.resolve(null);
+          }
         };
 
         window.roadyLeaderboard = api;

@@ -10,8 +10,10 @@ use bevy::{prelude::*, text::FontSize};
 
 use crate::game::resources::Score;
 use crate::game::state::GameState;
+use crate::game_modes::{ActiveRunRules, Competition, Conduct, RunCondition};
 use crate::modifiers::{ActiveModifier, ModifierKind};
 use crate::palette;
+use crate::right_of_way::RightOfWayRun;
 use crate::touch::TouchControlsActive;
 
 /// localStorage key (web).
@@ -39,6 +41,100 @@ pub struct ConditionBests {
 #[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ConditionBestsAtRoundStart {
     pub by_kind: [u32; 5],
+}
+
+/// Records for the four v3 products. Each value is loaded and saved only via
+/// its exact product/category namespace; there is deliberately no global v3
+/// record which could leak a score between conducts or conditions.
+#[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ProductBests {
+    pub ranked: [u32; 2],
+    pub casual: [[u32; 5]; 2],
+}
+
+/// Product record snapshot captured at the fresh-round boundary.
+#[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ProductBestAtRoundStart {
+    pub best: u32,
+}
+
+const RANKED_NAMESPACES: [&str; 2] = [
+    "roady.v3.best.ranked.rotation.v2.cluck_hunt",
+    "roady.v3.best.ranked.rotation.v2.right_of_way",
+];
+const CASUAL_NAMESPACES: [[&str; 5]; 2] = [
+    [
+        "roady.v3.best.casual.cluck_hunt.0",
+        "roady.v3.best.casual.cluck_hunt.1",
+        "roady.v3.best.casual.cluck_hunt.2",
+        "roady.v3.best.casual.cluck_hunt.3",
+        "roady.v3.best.casual.cluck_hunt.4",
+    ],
+    [
+        "roady.v3.best.casual.right_of_way.0",
+        "roady.v3.best.casual.right_of_way.1",
+        "roady.v3.best.casual.right_of_way.2",
+        "roady.v3.best.casual.right_of_way.3",
+        "roady.v3.best.casual.right_of_way.4",
+    ],
+];
+
+const fn conduct_index(conduct: Conduct) -> usize {
+    match conduct {
+        Conduct::CluckHunt => 0,
+        Conduct::RightOfWay => 1,
+    }
+}
+
+/// Return the only legal namespace for these admitted run rules.
+pub fn product_namespace(rules: &ActiveRunRules) -> &'static str {
+    let conduct = conduct_index(rules.conduct);
+    match (&rules.competition, &rules.condition) {
+        (Competition::Ranked, RunCondition::Ranked(_)) => RANKED_NAMESPACES[conduct],
+        (Competition::Casual, RunCondition::Casual(condition)) => {
+            CASUAL_NAMESPACES[conduct][*condition as usize]
+        }
+        _ => "",
+    }
+}
+
+impl ProductBests {
+    pub fn get(&self, competition: Competition, conduct: Conduct, kind: ModifierKind) -> u32 {
+        let conduct = conduct_index(conduct);
+        match competition {
+            Competition::Ranked => self.ranked[conduct],
+            Competition::Casual => self.casual[conduct][kind.index()],
+        }
+    }
+
+    pub(crate) fn get_rules(&self, rules: &ActiveRunRules) -> Option<u32> {
+        match &rules.condition {
+            RunCondition::Ranked(_) if rules.competition == Competition::Ranked => {
+                Some(self.ranked[conduct_index(rules.conduct)])
+            }
+            RunCondition::Casual(condition) if rules.competition == Competition::Casual => {
+                Some(self.casual[conduct_index(rules.conduct)][*condition as usize])
+            }
+            _ => None,
+        }
+    }
+
+    fn set_rules(&mut self, rules: &ActiveRunRules, value: u32) -> bool {
+        let target = match &rules.condition {
+            RunCondition::Ranked(_) if rules.competition == Competition::Ranked => {
+                &mut self.ranked[conduct_index(rules.conduct)]
+            }
+            RunCondition::Casual(condition) if rules.competition == Competition::Casual => {
+                &mut self.casual[conduct_index(rules.conduct)][*condition as usize]
+            }
+            _ => return false,
+        };
+        if value <= *target {
+            return false;
+        }
+        *target = value;
+        true
+    }
 }
 
 /// The persisted best as it stood when the current round began.
@@ -126,6 +222,32 @@ pub const fn medal_for(kind: ModifierKind, best: u32) -> Medal {
     }
 }
 
+/// Medals are scoped to the selected product namespace. Ranked uses the
+/// frozen rotation thresholds; Casual uses the selected manual condition.
+pub fn product_medal(
+    competition: Competition,
+    conduct: Conduct,
+    kind: ModifierKind,
+    best: u32,
+) -> Medal {
+    if competition == Competition::Casual {
+        return medal_for(kind, best);
+    }
+    let (bronze, silver, gold) = match conduct {
+        Conduct::CluckHunt => (50, 150, 300),
+        Conduct::RightOfWay => (30, 90, 180),
+    };
+    if best >= gold {
+        Medal::Gold
+    } else if best >= silver {
+        Medal::Silver
+    } else if best >= bronze {
+        Medal::Bronze
+    } else {
+        Medal::None
+    }
+}
+
 /// Marker for the best-score UI root node (never despawned).
 #[derive(Component)]
 struct BestScoreRoot;
@@ -140,11 +262,16 @@ impl Plugin for PersistPlugin {
         app.init_resource::<BestScore>()
             .init_resource::<ConditionBests>()
             .init_resource::<ConditionBestsAtRoundStart>()
+            .init_resource::<ProductBests>()
+            .init_resource::<ProductBestAtRoundStart>()
             .init_resource::<BestAtRoundStart>()
             .init_resource::<PersistedBest>()
             .init_resource::<PersistedConditionBests>()
             .init_resource::<PendingBests>()
-            .add_systems(Startup, (load_best_score, spawn_best_score_ui).chain())
+            .add_systems(
+                Startup,
+                (load_best_score, load_product_bests, spawn_best_score_ui).chain(),
+            )
             .add_systems(
                 Update,
                 (update_best_score_text, update_best_score_visibility),
@@ -152,12 +279,24 @@ impl Plugin for PersistPlugin {
             // Only GameOver completes a round. Menu entry (including startup
             // and paused restart/quit) may retry a failed completed-round
             // write, but never applies an in-progress score.
+            .add_systems(OnEnter(GameState::Playing), snapshot_product_best)
             .add_systems(OnEnter(GameState::GameOver), persist_best_on_round_end)
             .add_systems(OnEnter(GameState::Menu), retry_pending_best_write);
     }
 }
 
 /// Overwrite the in-memory best resources with the values from disk/web.
+fn load_product_bests(mut bests: ResMut<ProductBests>) {
+    for (index, namespace) in RANKED_NAMESPACES.into_iter().enumerate() {
+        bests.ranked[index] = load_product_value(namespace);
+    }
+    for (conduct, namespaces) in CASUAL_NAMESPACES.into_iter().enumerate() {
+        for (condition, namespace) in namespaces.into_iter().enumerate() {
+            bests.casual[conduct][condition] = load_product_value(namespace);
+        }
+    }
+}
+
 fn load_best_score(
     mut best: ResMut<BestScore>,
     mut conditions: ResMut<ConditionBests>,
@@ -286,6 +425,14 @@ fn flush_pending_best_write(
     }
 }
 
+fn snapshot_product_best(
+    rules: Res<ActiveRunRules>,
+    bests: Res<ProductBests>,
+    mut snapshot: ResMut<ProductBestAtRoundStart>,
+) {
+    snapshot.best = bests.get_rules(&rules).unwrap_or(0);
+}
+
 /// Apply the terminal score of a completed round exactly once to the pending
 /// snapshot, then persist the resulting versioned schema. This system is
 /// registered only for GameOver; entering Menu abandons an active round and
@@ -294,14 +441,39 @@ fn persist_best_on_round_end(
     score: Res<Score>,
     _reason: Res<crate::game::resources::GameOverReason>,
     active: Res<ActiveModifier>,
+    v3_product: Option<Res<ActiveRunRules>>,
+    right_of_way: Option<Res<RightOfWayRun>>,
+    mut product_bests: ResMut<ProductBests>,
     mut best: ResMut<BestScore>,
     mut conditions: ResMut<ConditionBests>,
     mut pending: ResMut<PendingBests>,
     mut persisted_best: ResMut<PersistedBest>,
     mut persisted_conditions: ResMut<PersistedConditionBests>,
 ) {
-    // Every terminal outcome, including Drowned, is a completed local run.
-    // Network eligibility is separately owned by the competition runtime.
+    // Every admitted v3 run writes only its exact product namespace. This
+    // branch occurs only on the completed GameOver boundary (including
+    // Drowned), never from an in-progress score or a Menu transition.
+    if let Some(rules) = v3_product {
+        let total = match rules.conduct {
+            Conduct::CluckHunt => score.chickens.checked_add(score.coins),
+            Conduct::RightOfWay => right_of_way.as_deref().and_then(|run| {
+                (!run.failed)
+                    .then(|| run.score.terminal_total().ok())
+                    .flatten()
+            }),
+        };
+        if let Some(total) = total {
+            let previous = product_bests.get_rules(&rules).unwrap_or(0);
+            if total > previous && save_product_value(product_namespace(&rules), total) {
+                product_bests.set_rules(&rules, total);
+            }
+        }
+        // v3 products can never read, write, migrate, or mutate the frozen
+        // `car_game_best`/`roady.v2.best.*` families.
+        return;
+    }
+    // Every legacy terminal outcome is a completed local run. Network
+    // eligibility is separately owned by the competition runtime.
     // Preserve an earlier failed completed-round result when a player starts
     // another round directly from Game Over. A later terminal score can only
     // add to that pending snapshot, never replace it with a lower record.
@@ -353,7 +525,47 @@ fn update_best_score_text(
     }
 }
 
-// --- platform-specific storage helpers ---
+// --- exact v3 product storage helpers ---
+
+#[cfg(target_arch = "wasm32")]
+fn load_product_value(namespace: &str) -> u32 {
+    web_sys::window()
+        .and_then(|window| window.local_storage().ok().flatten())
+        .and_then(|storage| storage.get_item(namespace).ok().flatten())
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(0)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn load_product_value(_namespace: &str) -> u32 {
+    0
+}
+
+#[cfg(target_arch = "wasm32")]
+fn save_product_value(namespace: &str, value: u32) -> bool {
+    if !RANKED_NAMESPACES.contains(&namespace)
+        && !CASUAL_NAMESPACES
+            .iter()
+            .flatten()
+            .any(|allowed| *allowed == namespace)
+    {
+        return false;
+    }
+    web_sys::window()
+        .and_then(|window| window.local_storage().ok().flatten())
+        .is_some_and(|storage| storage.set_item(namespace, &value.to_string()).is_ok())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn save_product_value(namespace: &str, _value: u32) -> bool {
+    RANKED_NAMESPACES.contains(&namespace)
+        || CASUAL_NAMESPACES
+            .iter()
+            .flatten()
+            .any(|allowed| *allowed == namespace)
+}
+
+// --- platform-specific legacy storage helpers ---
 // All `web_sys::window()` usage is gated behind `target_arch = "wasm32"`; native
 // uses blocking `std::fs` (tiny file, only used at startup / round end).
 
@@ -542,6 +754,135 @@ mod tests {
         ] {
             assert_eq!(decode_bests(value), BestsSnapshot::default(), "{value}");
         }
+    }
+
+    #[test]
+    fn product_namespaces_are_exact_and_category_isolated() {
+        assert_eq!(
+            RANKED_NAMESPACES,
+            [
+                "roady.v3.best.ranked.rotation.v2.cluck_hunt",
+                "roady.v3.best.ranked.rotation.v2.right_of_way",
+            ]
+        );
+        let flattened: Vec<_> = CASUAL_NAMESPACES.iter().flatten().copied().collect();
+        assert_eq!(flattened.len(), 10);
+        assert_eq!(flattened[0], "roady.v3.best.casual.cluck_hunt.0");
+        assert_eq!(flattened[4], "roady.v3.best.casual.cluck_hunt.4");
+        assert_eq!(flattened[5], "roady.v3.best.casual.right_of_way.0");
+        assert_eq!(flattened[9], "roady.v3.best.casual.right_of_way.4");
+        assert!(
+            flattened
+                .iter()
+                .all(|key| !key.starts_with("roady.v2.best."))
+        );
+        assert!(!RANKED_NAMESPACES.contains(&"car_game_best"));
+    }
+
+    #[test]
+    fn product_bests_do_not_cross_conduct_or_condition() {
+        let mut bests = ProductBests::default();
+        bests.ranked[0] = 300;
+        bests.casual[0][0] = 70;
+        bests.casual[1][4] = 80;
+        assert_eq!(
+            bests.get(
+                Competition::Ranked,
+                Conduct::CluckHunt,
+                ModifierKind::Standard
+            ),
+            300
+        );
+        assert_eq!(
+            bests.get(
+                Competition::Ranked,
+                Conduct::RightOfWay,
+                ModifierKind::Standard
+            ),
+            0
+        );
+        assert_eq!(
+            bests.get(
+                Competition::Casual,
+                Conduct::CluckHunt,
+                ModifierKind::Standard
+            ),
+            70
+        );
+        assert_eq!(
+            bests.get(
+                Competition::Casual,
+                Conduct::CluckHunt,
+                ModifierKind::GlassCannon
+            ),
+            0
+        );
+        assert_eq!(
+            bests.get(
+                Competition::Casual,
+                Conduct::RightOfWay,
+                ModifierKind::GlassCannon
+            ),
+            80
+        );
+    }
+
+    #[test]
+    fn ranked_and_casual_medals_use_their_own_thresholds() {
+        assert_eq!(
+            product_medal(
+                Competition::Ranked,
+                Conduct::CluckHunt,
+                ModifierKind::Standard,
+                49
+            ),
+            Medal::None
+        );
+        assert_eq!(
+            product_medal(
+                Competition::Ranked,
+                Conduct::CluckHunt,
+                ModifierKind::GlassCannon,
+                50
+            ),
+            Medal::Bronze
+        );
+        assert_eq!(
+            product_medal(
+                Competition::Ranked,
+                Conduct::RightOfWay,
+                ModifierKind::Standard,
+                90
+            ),
+            Medal::Silver
+        );
+        assert_eq!(
+            product_medal(
+                Competition::Ranked,
+                Conduct::RightOfWay,
+                ModifierKind::Standard,
+                180
+            ),
+            Medal::Gold
+        );
+        assert_eq!(
+            product_medal(
+                Competition::Casual,
+                Conduct::CluckHunt,
+                ModifierKind::RushHour,
+                15
+            ),
+            Medal::Bronze
+        );
+        assert_eq!(
+            product_medal(
+                Competition::Casual,
+                Conduct::RightOfWay,
+                ModifierKind::GlassCannon,
+                79
+            ),
+            Medal::Silver
+        );
     }
 
     #[test]

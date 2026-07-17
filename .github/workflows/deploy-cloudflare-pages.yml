@@ -1,13 +1,24 @@
 name: Deploy to Cloudflare Pages
 
 on:
-  push:
-    branches:
-      - master
+  workflow_run:
+    workflows: [Deploy Cloudflare Leaderboard Worker]
+    types: [completed]
+    branches: [master]
   workflow_dispatch:
+    inputs:
+      tested_commit_sha:
+        description: Full commit SHA tested by CI and deployed to the Worker
+        required: true
+        type: string
+      worker_run_id:
+        description: Successful disabled-first Worker deployment run ID for the same SHA
+        required: true
+        type: string
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: cloudflare-pages-production
@@ -18,49 +29,91 @@ env:
 
 jobs:
   deploy:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     environment: production
+    env:
+      TESTED_SHA: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || inputs.tested_commit_sha }}
+      WORKER_RUN_ID: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.id || inputs.worker_run_id }}
+      LEADERBOARD_BASE_URL: ${{ vars.LEADERBOARD_BASE_URL }}
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
-
-      - name: Cache Rust build data
-        uses: Swatinem/rust-cache@v2
-
-      - name: Install Trunk
-        run: cargo install --locked trunk --version 0.21.14
-
-      - name: Build production site
-        run: trunk build --release --cargo-profile wasm-release
+      - name: Verify explicit Worker-before-Pages prerequisite
         env:
-          # Embedded nuisance-only leaderboard request key. The Worker must be
-          # configured with the matching LB_CLIENT_HMAC_KEY runtime secret.
-          ROADY_LEADERBOARD_CLIENT_HMAC_KEY: ${{ secrets.ROADY_LEADERBOARD_CLIENT_HMAC_KEY }}
-          LEADERBOARD_API_URL: ${{ vars.LEADERBOARD_BASE_URL }}
-          LB_TURNSTILE_SITE_KEY: ${{ vars.LB_TURNSTILE_SITE_KEY }}
-
-      - name: Check release output
-        run: python tools/check_release.py
-
-      - name: Upload site artifact
-        uses: actions/upload-artifact@v4
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          [[ "$TESTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$WORKER_RUN_ID" =~ ^[0-9]+$ ]]
+          run_json=$(gh api "repos/$REPOSITORY/actions/runs/$WORKER_RUN_ID")
+          test "$(jq -r .name <<<"$run_json")" = "Deploy Cloudflare Leaderboard Worker"
+          test "$(jq -r .conclusion <<<"$run_json")" = success
+          test "$(jq -r .head_sha <<<"$run_json")" = "$TESTED_SHA"
+          # Evidence must exist for this exact run/SHA; a CI-only green run is
+          # not an acceptable replacement for a deployed disabled Worker probe.
+          artifacts=$(gh api "repos/$REPOSITORY/actions/runs/$WORKER_RUN_ID/artifacts")
+          jq -e --arg name "worker-production-evidence-$TESTED_SHA-$WORKER_RUN_ID" '.artifacts[] | select(.name==$name and .expired==false)' <<<"$artifacts" >/dev/null
+      - uses: actions/checkout@v4
         with:
-          name: cloudflare-pages-dist-${{ github.sha }}
-          path: dist/
-          if-no-files-found: error
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
+          ref: ${{ env.TESTED_SHA }}
+      - name: Confirm checkout is the Worker-tested commit
+        run: test "$(git rev-parse HEAD)" = "$TESTED_SHA"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
         with:
           node-version: 22
-
+      - name: Require matching v3 client key and key ID
+        env:
+          ROADY_V3_CLIENT_HMAC_KEY: ${{ secrets.ROADY_V3_CLIENT_HMAC_KEY }}
+          ROADY_V3_CLIENT_HMAC_KEY_ID: ${{ secrets.ROADY_V3_CLIENT_HMAC_KEY_ID }}
+          ROADY_LEADERBOARD_CLIENT_HMAC_KEY: ${{ secrets.ROADY_LEADERBOARD_CLIENT_HMAC_KEY }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PAGES_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          for name in ROADY_V3_CLIENT_HMAC_KEY ROADY_V3_CLIENT_HMAC_KEY_ID ROADY_LEADERBOARD_CLIENT_HMAC_KEY CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID LEADERBOARD_BASE_URL; do
+            [ -n "${!name:-}" ] || { echo "::error::missing Pages prerequisite: $name"; exit 1; }
+          done
+          [ "$ROADY_V3_CLIENT_HMAC_KEY_ID" = v3.client.1 ] || { echo "::error::client currently requires exact key ID v3.client.1"; exit 1; }
+      - name: Check format and WASM target
+        run: |
+          cargo fmt --all -- --check
+          cargo check --locked --target wasm32-unknown-unknown
+      - name: Install Trunk and build production site
+        env:
+          ROADY_LEADERBOARD_CLIENT_HMAC_KEY: ${{ secrets.ROADY_LEADERBOARD_CLIENT_HMAC_KEY }}
+          ROADY_V3_CLIENT_HMAC_KEY: ${{ secrets.ROADY_V3_CLIENT_HMAC_KEY }}
+          ROADY_V3_CLIENT_HMAC_KEY_ID: ${{ secrets.ROADY_V3_CLIENT_HMAC_KEY_ID }}
+          LEADERBOARD_API_URL: ${{ vars.LEADERBOARD_BASE_URL }}
+          LB_TURNSTILE_SITE_KEY: ${{ vars.LB_TURNSTILE_SITE_KEY }}
+        run: |
+          cargo install --locked trunk --version 0.21.14
+          trunk build --release --cargo-profile wasm-release
+          python tools/check_release.py | tee pages-release-check.json
+          find dist -type f -print0 | sort -z | xargs -0 sha256sum > pages-artifacts.sha256
+      - name: Re-probe Worker immediately before Pages upload
+        working-directory: leaderboard
+        env:
+          EXPECTED_COMMIT_SHA: ${{ env.TESTED_SHA }}
+        run: node scripts/verify-production.mjs
       - name: Deploy to Cloudflare Pages
-        run: npx wrangler@4 pages deploy dist --project-name "$PROJECT_NAME" --branch main
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PAGES_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npx wrangler@4 pages deploy dist --project-name "$PROJECT_NAME" --branch main
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pages-production-evidence-${{ env.TESTED_SHA }}-${{ github.run_id }}
+          path: |
+            pages-release-check.json
+            pages-artifacts.sha256
+          if-no-files-found: error
+          retention-days: 90

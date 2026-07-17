@@ -1,0 +1,62 @@
+{
+  "schema": "roady.production-gates.v1",
+  "testedCommitSha": null,
+  "ciRunId": null,
+  "workerRunId": null,
+  "pagesRunId": null,
+  "defaultWorkerFlag": "false",
+  "requestedRuntimeFlag": "false",
+  "effectiveCapability": false,
+  "issuanceEnabled": false,
+  "gates": {
+    "rustAndRules": {
+      "status": "missing",
+      "command": "cargo test --workspace --all-targets --locked"
+    },
+    "wasmAndRelease": {
+      "status": "missing",
+      "command": "trunk build --release --cargo-profile wasm-release && python tools/check_release.py"
+    },
+    "frozenV1V2": {
+      "status": "missing",
+      "command": "cd leaderboard && npm run test:frozen-v1-v2"
+    },
+    "canonicalParity": {
+      "status": "missing",
+      "command": "cargo test -p roady-score-rules && cd leaderboard && npx vitest run test/rules-v2.test.ts test/rules-v3.test.ts"
+    },
+    "worker": {
+      "status": "missing",
+      "command": "cd leaderboard && npm run test:ci"
+    },
+    "browser": {
+      "status": "missing",
+      "suites": [
+        "audit",
+        "desktop",
+        "touch",
+        "settings",
+        "request-failure",
+        "category-isolation",
+        "replay"
+      ]
+    },
+    "remoteMigration": {
+      "status": "missing",
+      "command": "cd leaderboard && npm run verify:remote-v3",
+      "migrationSha256": null
+    },
+    "disabledProductionProbes": {
+      "status": "missing",
+      "command": "cd leaderboard && npm run verify:production:disabled",
+      "uncachedObservations": 0
+    },
+    "pagesAfterWorker": { "status": "missing", "workerRunId": null }
+  },
+  "artifactHashes": {
+    "releaseManifestSha256": null,
+    "v3ManifestSha256": null
+  },
+  "blocker": "local gates passed where recorded; production credentials, remote migration query, deployment, and production probes were not available in this environment",
+  "recordedAt": null
+}

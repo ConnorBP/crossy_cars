@@ -23,6 +23,82 @@ use crate::toy_shading::{ToyMaterialFamily, toy_material};
 const INTERACTION_RADIUS: f32 = 1.35;
 const PACKAGE_Y: f32 = 0.65;
 
+/// Score-bearing contacts are gathered during `Update` and committed together
+/// in `PostUpdate`.  This makes simultaneous package/courtesy/animal/wave/coin
+/// contacts follow the canonical gameplay-kind order rather than Bevy's
+/// otherwise unspecified cross-plugin system order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PendingRightOfWayAction {
+    Delivery {
+        active_ms: u64,
+        target_index: u32,
+    },
+    Courtesy {
+        active_ms: u64,
+        chicken_id: u32,
+    },
+    Animal {
+        active_ms: u64,
+        animal_kind: u8,
+        ordinal: u32,
+    },
+    Wave {
+        active_ms: u64,
+        wave_index: u32,
+    },
+    Coin {
+        active_ms: u64,
+        stable_id: u64,
+    },
+}
+
+impl PendingRightOfWayAction {
+    const fn sort_key(self) -> (u64, u8, u64) {
+        match self {
+            Self::Delivery {
+                active_ms,
+                target_index,
+            } => (active_ms, 9, target_index as u64),
+            Self::Courtesy {
+                active_ms,
+                chicken_id,
+            } => (active_ms, 10, chicken_id as u64),
+            Self::Animal {
+                active_ms,
+                animal_kind,
+                ordinal,
+            } => (active_ms, 11, ((animal_kind as u64) << 32) | ordinal as u64),
+            Self::Wave {
+                active_ms,
+                wave_index,
+            } => (active_ms, 12, wave_index as u64),
+            Self::Coin {
+                active_ms,
+                stable_id,
+            } => (active_ms, 13, stable_id),
+        }
+    }
+}
+
+#[derive(Resource, Clone, Debug, Default, PartialEq, Eq)]
+pub struct PendingRightOfWayActions(pub Vec<PendingRightOfWayAction>);
+
+impl PendingRightOfWayActions {
+    pub fn coin(&mut self, active_ms: u64, stable_id: u64) {
+        self.0.push(PendingRightOfWayAction::Coin {
+            active_ms,
+            stable_id,
+        });
+    }
+
+    pub fn wave(&mut self, active_ms: u64, wave_index: u32) {
+        self.0.push(PendingRightOfWayAction::Wave {
+            active_ms,
+            wave_index,
+        });
+    }
+}
+
 /// Systems producing chicken/critter/coin contacts run before this set. It is
 /// the single collision-order seam used by Right of Way interactions.
 #[derive(SystemSet, Clone, Debug, PartialEq, Eq, Hash)]
@@ -88,8 +164,10 @@ struct RightOfWayAssets {
 impl FromWorld for RightOfWayAssets {
     fn from_world(world: &mut World) -> Self {
         world.resource_scope::<Assets<Mesh>, _>(|world, mut meshes| {
-            let package_mesh = meshes.add(Cuboid::new(0.8, 0.55, 0.65));
-            let delivery_mesh = meshes.add(Torus::new(1.1, 1.28));
+            // Deliberately chunky silhouette and a broad emissive ring remain
+            // readable against the production microtextured/PBR world.
+            let package_mesh = meshes.add(Cuboid::new(1.0, 0.72, 0.82));
+            let delivery_mesh = meshes.add(Torus::new(1.35, 1.62));
             let mut materials = world.resource_mut::<Assets<StandardMaterial>>();
             let package_material = materials.add(toy_material(
                 ToyMaterialFamily::RawWood,
@@ -121,6 +199,7 @@ pub struct RightOfWayPlugin;
 impl Plugin for RightOfWayPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<RightOfWayRun>()
+            .init_resource::<PendingRightOfWayActions>()
             .init_resource::<RightOfWayAssets>()
             .add_message::<PackagePickedUp>()
             .add_message::<PackageDelivered>()
@@ -144,7 +223,12 @@ impl Plugin for RightOfWayPlugin {
             )
             .add_systems(
                 PostUpdate,
-                apply_animal_hit_messages
+                (
+                    queue_animal_hit_messages,
+                    apply_pending_actions,
+                    reject_failed_run,
+                )
+                    .chain()
                     .before(ObjectiveFinalizeSet)
                     .before(TerminalFinalizeSet)
                     .run_if(in_state(GameState::Playing)),
@@ -165,6 +249,7 @@ fn setup_fresh_run(
     round: Res<RoundActive>,
     time_left: Res<TimeLeft>,
     mut run: ResMut<RightOfWayRun>,
+    mut pending: ResMut<PendingRightOfWayActions>,
     existing: Query<Entity, Or<(With<PackagePickup>, With<DeliveryTarget>)>>,
 ) {
     if round.0 {
@@ -174,6 +259,7 @@ fn setup_fresh_run(
         commands.entity(entity).despawn();
     }
     *run = RightOfWayRun::default();
+    pending.0.clear();
     run.score.remaining_ms = seconds_to_ms(time_left.0);
     if is_right_of_way(&rules) {
         for index in 0..3 {
@@ -287,12 +373,11 @@ fn collect_packages(
     drowning: Res<Drowning>,
     car: Query<&Transform, With<Car>>,
     packages: Query<(Entity, &Transform, &PackagePickup), Without<Car>>,
-    deliveries: Query<(Entity, &Transform), (With<DeliveryTarget>, Without<Car>)>,
+    deliveries: Query<(Entity, &Transform, &DeliveryTarget), (With<DeliveryTarget>, Without<Car>)>,
     mut run: ResMut<RightOfWayRun>,
-    mut time_left: ResMut<TimeLeft>,
     mut queue: ResMut<CanonicalEventQueue>,
+    mut pending: ResMut<PendingRightOfWayActions>,
     mut pickups: MessageWriter<PackagePickedUp>,
-    mut delivered: MessageWriter<PackageDelivered>,
 ) {
     if !is_right_of_way(&rules) || run.failed || frozen.0 || drowning.active {
         return;
@@ -306,7 +391,8 @@ fn collect_packages(
         .filter(|(_, tf, _)| xz_distance_squared(car_pos, tf.translation) <= radius2)
         .collect();
     package_hits.sort_by_key(|(_, _, package)| package.target_index);
-    for (entity, _, _) in package_hits {
+    let mut delivery_spawn_queued = !deliveries.is_empty();
+    for (entity, _, package) in package_hits {
         let before = run.score.carried_packages;
         if !run.score.pickup_package() {
             break;
@@ -314,7 +400,7 @@ fn collect_packages(
         commands.entity(entity).despawn();
         queue.push(PendingCanonicalEvent {
             active_ms: clock.milliseconds(),
-            stable_id: u64::from(run.next_target),
+            stable_id: u64::from(package.target_index),
             payload: canonical::EventPayload::PackagePickup {
                 carried_before: before,
                 carried_after: run.score.carried_packages,
@@ -335,73 +421,44 @@ fn collect_packages(
             target_position(car_pos, index, false),
             index,
         );
-        if deliveries.is_empty() {
+        if !delivery_spawn_queued {
             spawn_delivery(
                 &mut commands,
                 &assets,
                 target_position(car_pos, index, true),
                 index,
             );
+            delivery_spawn_queued = true;
         }
     }
 
     let mut delivery_hits: Vec<_> = deliveries
         .iter()
-        .filter(|(_, tf)| xz_distance_squared(car_pos, tf.translation) <= radius2)
+        .filter(|(_, tf, _)| xz_distance_squared(car_pos, tf.translation) <= radius2)
         .collect();
-    delivery_hits.sort_by_key(|(entity, _)| entity.to_bits());
-    for (entity, _) in delivery_hits {
-        if run.score.carried_packages == 0 {
-            continue;
+    delivery_hits.sort_by_key(|(_, _, target)| target.target_index);
+    if run.score.carried_packages > 0 {
+        if let Some((entity, _, target)) = delivery_hits.first() {
+            commands.entity(*entity).despawn();
+            pending.0.push(PendingRightOfWayAction::Delivery {
+                active_ms: clock.milliseconds(),
+                target_index: target.target_index,
+            });
         }
-        commands.entity(entity).despawn();
-        run.score.remaining_ms = seconds_to_ms(time_left.0);
-        let count = run.score.carried_packages;
-        for ordinal in 0..count {
-            let chain_index = run.score.delivery_chain;
-            let premium = run.score.premium_bps;
-            let guilt = run.score.guilt_remaining_ms != 0;
-            let remaining_before = run.score.remaining_ms;
-            match run.score.deliver_package() {
-                Ok(Some(award)) => {
-                    queue.push(PendingCanonicalEvent {
-                        active_ms: clock.milliseconds(),
-                        stable_id: u64::from(ordinal),
-                        payload: canonical::EventPayload::PackageDelivery {
-                            delivered_ordinal_within_dropoff: ordinal,
-                            chain_index,
-                            base: award.base,
-                            premium_bps: premium,
-                            guilt,
-                            credited: award.credited,
-                            accumulator_before: award.before,
-                            accumulator_after: award.after,
-                            remaining_before_ms: remaining_before,
-                            remaining_after_ms: run.score.remaining_ms,
-                        },
-                    });
-                    delivered.write(PackageDelivered(ordinal));
-                }
-                _ => {
-                    run.reject();
-                    return;
-                }
-            }
-        }
-        time_left.0 = ms_to_seconds(run.score.remaining_ms);
     }
 }
 
 fn observe_courtesy(
     rules: Res<ActiveRunRules>,
     clock: Res<ActivePlayClock>,
+    frozen: Res<InputFrozen>,
+    drowning: Res<Drowning>,
     car: Query<(&Car, &Transform)>,
     chickens: Query<(&StableChickenId, &Transform), With<Chicken>>,
     mut run: ResMut<RightOfWayRun>,
-    mut queue: ResMut<CanonicalEventQueue>,
-    mut awards: MessageWriter<CourtesyAwarded>,
+    mut pending: ResMut<PendingRightOfWayActions>,
 ) {
-    if !is_right_of_way(&rules) || run.failed {
+    if !is_right_of_way(&rules) || run.failed || frozen.0 || drowning.active {
         return;
     }
     let Ok((car, car_tf)) = car.single() else {
@@ -417,94 +474,213 @@ fn observe_courtesy(
         {
             continue;
         }
-        let premium = run.score.premium_bps;
-        let guilt = run.score.guilt_remaining_ms != 0;
-        match run.score.courtesy() {
-            Ok(award) => {
-                queue.push(PendingCanonicalEvent {
-                    active_ms: clock.milliseconds(),
-                    stable_id: u64::from(id.0),
-                    payload: canonical::EventPayload::CourtesyAward {
-                        chicken_stable_id: id.0,
-                        premium_bps: premium,
-                        guilt,
-                        credited: award.credited,
-                        accumulator_before: award.before,
-                        accumulator_after: award.after,
-                        cooldown_after_ms: v3::COURTESY_COOLDOWN_MS as u32,
-                    },
-                });
-                if award.credited > 0 {
-                    awards.write(CourtesyAwarded);
-                }
-            }
-            Err(_) => {
-                run.reject();
-                return;
-            }
-        }
+        pending.0.push(PendingRightOfWayAction::Courtesy {
+            active_ms: clock.milliseconds(),
+            chicken_id: id.0,
+        });
     }
 }
 
-fn apply_animal_hit_messages(
+fn queue_animal_hit_messages(
     rules: Res<ActiveRunRules>,
     clock: Res<ActivePlayClock>,
     mut chickens: MessageReader<ChickenHit>,
     mut critters: MessageReader<CritterHit>,
-    mut run: ResMut<RightOfWayRun>,
-    mut queue: ResMut<CanonicalEventQueue>,
+    run: Res<RightOfWayRun>,
+    mut pending: ResMut<PendingRightOfWayActions>,
 ) {
     let chicken_count = chickens.read().count();
     let critter_count = critters.read().count();
     if !is_right_of_way(&rules) || run.failed {
         return;
     }
-    for animal_kind in
-        std::iter::repeat_n(0_u8, chicken_count).chain(std::iter::repeat_n(1_u8, critter_count))
+    let now = clock.milliseconds();
+    for (ordinal, animal_kind) in std::iter::repeat_n(0_u8, chicken_count)
+        .chain(std::iter::repeat_n(1_u8, critter_count))
+        .enumerate()
     {
-        let premium_before = run.score.premium_bps;
-        match run.score.animal_hit() {
-            Ok((before, after)) => queue.push(PendingCanonicalEvent {
-                active_ms: clock.milliseconds(),
-                stable_id: u64::from(run.score.animal_hits),
-                payload: canonical::EventPayload::AnimalHit {
-                    animal_kind,
-                    delta: v3::ANIMAL_HIT_DELTA as i32,
-                    premium_before_bps: premium_before,
-                    premium_after_bps: run.score.premium_bps,
-                    guilt_after_ms: run.score.guilt_remaining_ms,
-                    accumulator_before: before,
-                    accumulator_after: after,
-                },
-            }),
-            Err(_) => {
-                run.reject();
-                return;
+        let Ok(ordinal) = u32::try_from(ordinal) else {
+            return;
+        };
+        pending.0.push(PendingRightOfWayAction::Animal {
+            active_ms: now,
+            animal_kind,
+            ordinal,
+        });
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_pending_actions(
+    rules: Res<ActiveRunRules>,
+    mut pending: ResMut<PendingRightOfWayActions>,
+    mut run: ResMut<RightOfWayRun>,
+    mut time_left: ResMut<TimeLeft>,
+    mut queue: ResMut<CanonicalEventQueue>,
+    mut delivered: MessageWriter<PackageDelivered>,
+    mut courtesy_awards: MessageWriter<CourtesyAwarded>,
+) {
+    if !is_right_of_way(&rules) {
+        pending.0.clear();
+        return;
+    }
+    pending.0.sort_by_key(|action| action.sort_key());
+    for action in pending.0.drain(..) {
+        if run.failed {
+            break;
+        }
+        match action {
+            PendingRightOfWayAction::Delivery { active_ms, .. } => {
+                run.score.remaining_ms = seconds_to_ms(time_left.0);
+                let count = run.score.carried_packages;
+                for ordinal in 0..count {
+                    let chain_index = run.score.delivery_chain;
+                    let premium_bps = run.score.premium_bps;
+                    let guilt = run.score.guilt_remaining_ms != 0;
+                    let remaining_before_ms = run.score.remaining_ms;
+                    match run.score.deliver_package() {
+                        Ok(Some(award)) => {
+                            queue.push(PendingCanonicalEvent {
+                                active_ms,
+                                stable_id: u64::from(ordinal),
+                                payload: canonical::EventPayload::PackageDelivery {
+                                    delivered_ordinal_within_dropoff: ordinal,
+                                    chain_index,
+                                    base: award.base,
+                                    premium_bps,
+                                    guilt,
+                                    credited: award.credited,
+                                    accumulator_before: award.before,
+                                    accumulator_after: award.after,
+                                    remaining_before_ms,
+                                    remaining_after_ms: run.score.remaining_ms,
+                                },
+                            });
+                            delivered.write(PackageDelivered(ordinal));
+                        }
+                        _ => {
+                            run.reject();
+                            break;
+                        }
+                    }
+                }
+                time_left.0 = ms_to_seconds(run.score.remaining_ms);
+            }
+            PendingRightOfWayAction::Courtesy {
+                active_ms,
+                chicken_id,
+            } => {
+                let premium_bps = run.score.premium_bps;
+                let guilt = run.score.guilt_remaining_ms != 0;
+                match run.score.courtesy() {
+                    Ok(award) => {
+                        queue.push(PendingCanonicalEvent {
+                            active_ms,
+                            stable_id: u64::from(chicken_id),
+                            payload: canonical::EventPayload::CourtesyAward {
+                                chicken_stable_id: chicken_id,
+                                premium_bps,
+                                guilt,
+                                credited: award.credited,
+                                accumulator_before: award.before,
+                                accumulator_after: award.after,
+                                cooldown_after_ms: v3::COURTESY_COOLDOWN_MS as u32,
+                            },
+                        });
+                        if award.credited > 0 {
+                            courtesy_awards.write(CourtesyAwarded);
+                        }
+                    }
+                    Err(_) => run.reject(),
+                }
+            }
+            PendingRightOfWayAction::Animal {
+                active_ms,
+                animal_kind,
+                ..
+            } => {
+                let premium_before_bps = run.score.premium_bps;
+                match run.score.animal_hit() {
+                    Ok((before, after)) => queue.push(PendingCanonicalEvent {
+                        active_ms,
+                        stable_id: u64::from(run.score.animal_hits),
+                        payload: canonical::EventPayload::AnimalHit {
+                            animal_kind,
+                            delta: v3::ANIMAL_HIT_DELTA as i32,
+                            premium_before_bps,
+                            premium_after_bps: run.score.premium_bps,
+                            guilt_after_ms: run.score.guilt_remaining_ms,
+                            accumulator_before: before,
+                            accumulator_after: after,
+                        },
+                    }),
+                    Err(_) => run.reject(),
+                }
+            }
+            PendingRightOfWayAction::Wave {
+                active_ms,
+                wave_index,
+            } => {
+                let premium_bps = run.score.premium_bps;
+                let guilt = run.score.guilt_remaining_ms != 0;
+                match run.score.wave(true) {
+                    Ok(Some(award)) => queue.push(PendingCanonicalEvent {
+                        active_ms,
+                        stable_id: u64::from(wave_index),
+                        payload: canonical::EventPayload::WaveAward {
+                            base: award.base,
+                            premium_bps,
+                            guilt,
+                            credited: award.credited,
+                            accumulator_before: award.before,
+                            accumulator_after: award.after,
+                        },
+                    }),
+                    _ => run.reject(),
+                }
+            }
+            PendingRightOfWayAction::Coin {
+                active_ms,
+                stable_id,
+            } => {
+                run.score.remaining_ms = seconds_to_ms(time_left.0);
+                let remaining_before_ms = run.score.remaining_ms;
+                let premium_bps = run.score.premium_bps;
+                let guilt = run.score.guilt_remaining_ms != 0;
+                match run.score.coin() {
+                    Ok(award) => {
+                        queue.push(PendingCanonicalEvent {
+                            active_ms,
+                            stable_id,
+                            payload: canonical::EventPayload::CoinAward {
+                                base: award.base,
+                                premium_bps,
+                                guilt,
+                                credited: award.credited,
+                                accumulator_before: award.before,
+                                accumulator_after: award.after,
+                                remaining_before_ms,
+                                remaining_after_ms: run.score.remaining_ms,
+                            },
+                        });
+                        time_left.0 = ms_to_seconds(run.score.remaining_ms);
+                    }
+                    Err(_) => run.reject(),
+                }
             }
         }
     }
 }
 
-pub fn award_coin(
-    run: &mut RightOfWayRun,
-    current_time: &mut TimeLeft,
-) -> Option<(v3::PositiveTransition, u64, u64, u32, bool)> {
-    if run.failed {
-        return None;
-    }
-    run.score.remaining_ms = seconds_to_ms(current_time.0);
-    let before_time = run.score.remaining_ms;
-    let premium = run.score.premium_bps;
-    let guilt = run.score.guilt_remaining_ms != 0;
-    match run.score.coin() {
-        Ok(award) => {
-            *current_time = TimeLeft(ms_to_seconds(run.score.remaining_ms));
-            Some((award, before_time, run.score.remaining_ms, premium, guilt))
-        }
-        Err(_) => {
-            run.reject();
-            None
-        }
+fn reject_failed_run(
+    rules: Res<ActiveRunRules>,
+    run: Res<RightOfWayRun>,
+    mut next: ResMut<NextState<GameState>>,
+) {
+    if is_right_of_way(&rules) && run.failed {
+        // Checked-arithmetic/protocol rejection is not a playable terminal and
+        // must never produce a score snapshot or submission package.
+        next.set(GameState::Menu);
     }
 }
 
@@ -563,5 +739,87 @@ mod tests {
         assert_eq!(seconds_to_ms(60.0), 60_000);
         assert_eq!(seconds_to_ms(-1.0), 0);
         assert_eq!(seconds_to_ms(f32::NAN), 0);
+    }
+
+    #[test]
+    fn simultaneous_actions_have_protocol_kind_then_stable_id_order() {
+        let mut actions = [
+            PendingRightOfWayAction::Coin {
+                active_ms: 9,
+                stable_id: 2,
+            },
+            PendingRightOfWayAction::Animal {
+                active_ms: 9,
+                animal_kind: 1,
+                ordinal: 0,
+            },
+            PendingRightOfWayAction::Courtesy {
+                active_ms: 9,
+                chicken_id: 7,
+            },
+            PendingRightOfWayAction::Delivery {
+                active_ms: 9,
+                target_index: 3,
+            },
+            PendingRightOfWayAction::Coin {
+                active_ms: 9,
+                stable_id: 1,
+            },
+        ];
+        actions.sort_by_key(|action| action.sort_key());
+        assert!(matches!(
+            actions[0],
+            PendingRightOfWayAction::Delivery { .. }
+        ));
+        assert!(matches!(
+            actions[1],
+            PendingRightOfWayAction::Courtesy { .. }
+        ));
+        assert!(matches!(actions[2], PendingRightOfWayAction::Animal { .. }));
+        assert!(matches!(
+            actions[3],
+            PendingRightOfWayAction::Coin { stable_id: 1, .. }
+        ));
+        assert!(matches!(
+            actions[4],
+            PendingRightOfWayAction::Coin { stable_id: 2, .. }
+        ));
+    }
+
+    #[test]
+    fn courtesy_bands_rearm_cooldown_and_zero_credit_are_exact() {
+        let mut gate = v3::CourtesyGate::default();
+        assert!(!gate.observe(1, 0, 4.0, 1.0));
+        assert!(gate.observe(1, 0, 4.0, 1.0001));
+        assert!(!gate.observe(1, 500, 4.0, 1.5));
+        assert!(!gate.observe(1, 501, 4.0, 2.13));
+        assert!(gate.observe(1, 501, 4.0, 2.12));
+
+        let mut row = v3::RightOfWay::new();
+        row.premium_bps = 0;
+        let award = row.courtesy().unwrap();
+        assert_eq!(award.credited, 0);
+        assert_eq!(row.courtesy_count, 0);
+    }
+
+    #[test]
+    fn hit_decay_guilt_chain_and_checked_failure_are_atomic() {
+        let mut row = v3::RightOfWay::new();
+        row.delivery_chain = 4;
+        row.accumulator = i64::MIN + 9;
+        let before = row;
+        assert!(row.animal_hit().is_err());
+        assert_eq!(row, before);
+
+        row.accumulator = 10;
+        row.animal_hit().unwrap();
+        assert_eq!(row.accumulator, 0);
+        assert_eq!(row.premium_bps, 9_000);
+        assert_eq!(row.delivery_chain, 0);
+        assert_eq!(row.guilt_remaining_ms, 5_000);
+        row.tick_guilt(4_999);
+        assert_eq!(row.guilt_remaining_ms, 1);
+        row.tick_guilt(1);
+        assert_eq!(row.guilt_remaining_ms, 0);
     }
 }
