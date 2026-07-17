@@ -58,7 +58,7 @@ jobs:
           cargo build --locked -p roady-score-rules --target wasm32-unknown-unknown
           cargo test --locked -p roady-score-rules --test golden_v3
       - name: Install PBR regression test dependencies
-        run: python -m pip install --disable-pip-version-check pillow "playwright==1.52.0"
+        run: python -m pip install --disable-pip-version-check "pillow==12.0.0" "playwright==1.52.0"
       - name: Regression-check production microtexture/PBR assets and generated metadata
         run: |
           # The production assets + generated constants landed byte-stable in
