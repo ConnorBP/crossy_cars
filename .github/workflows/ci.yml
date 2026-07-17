@@ -64,6 +64,7 @@ jobs:
           git diff --exit-code 796ef3f -- \
             assets/textures/pbr_detail \
             src/pbr_detail_constants.rs
+          python -m pip install --disable-pip-version-check pillow "playwright==1.52.0"
           python -m unittest tools.test_build_pbr_details tools.test_microtexture_review_capture
           python tools/build_pbr_details.py
           git diff --exit-code -- assets/textures/pbr_detail src/pbr_detail_constants.rs
