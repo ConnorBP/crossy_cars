@@ -252,6 +252,46 @@ accepted and flagged for moderation via `moderation_note`.
 stored. Rotate the pepper carefully — rotation breaks historical correlation
 but not existing leaderboard rows.
 
+## Additive ranked v3 service
+
+Rules v3 is isolated under `/v3` and uses migrations `0005_ranked_v2.sql`
+(the approved byte-exact v2 migration reserved by the contract) followed by
+`0006_ranked_v3.sql`. Migration 0006 creates only `_v3` tables and indexes.
+The public capability route is `GET /v3/capabilities`; its checked-in gate is
+off and production remains disabled until every parity/deployment item in
+`docs/RULES_V3_DROWNED_PROTOCOL_ADDENDUM.md` section 9 has independent release
+evidence.
+
+Install the following **additional, independent** production secrets:
+
+```bash
+npx wrangler secret put LB_V3_PROOF_HMAC_KEY
+npx wrangler secret put LB_V3_SEED_ENCRYPTION_KEY       # unpadded base64url, exactly 32 decoded bytes
+npx wrangler secret put LB_V3_SEED_KEY_ID               # e.g. v3.seed.prod.1
+npx wrangler secret put LB_V3_EVIDENCE_CAPABILITY_KEY
+npx wrangler secret put LB_V3_CLIENT_HMAC_KEYS_JSON     # {"v3.client.1":"..."}; overlap IDs while rotating
+```
+
+`LB_V3_SEED_ENCRYPTION_KEY` is AES-256-GCM material. Sessions store only the
+12-byte IV, 32-byte seed ciphertext plus 16-byte tag, key ID, and commitments.
+Retain every referenced encryption key until no stored started session needs
+it; started sessions have no completion TTL. The proof and evidence capability
+keys must be random and independent of all v1/v2 keys. The client HMAC remains
+recoverable nuisance friction and accepted key IDs should overlap during a
+controlled rotation.
+
+`ROADY_V3_RANKED_ENABLED` is a non-secret upper-bound switch. Missing, malformed,
+or anything except exact lowercase `true` is disabled. Keep it `false` while
+applying and checking migrations, artifacts, workerd replay, smoke tests, and
+two uncached production probes. Disabling stops new sessions but intentionally
+does not invalidate already-started scores/evidence. Never enable production
+by changing the source default or bypassing the code-level parity latch.
+
+V3 endpoint summary: capabilities; session issuance/start; one-time pending
+score submission; evidence upload/replay; category leaderboard; personal rank;
+and isolated restoration/hide/delete moderation routes. All JSON writes reject
+unknown fields and use the addendum's 16 KiB/512 KiB bounds.
+
 ## Provisioning blockers (must resolve before deploy)
 
 1. **D1 `database_id` is a placeholder in `wrangler.toml`.** Run
@@ -279,7 +319,12 @@ but not existing leaderboard rows.
 6. **`ALLOWED_ORIGINS` must list your production origin.** The default
    (`https://car.segfault.site,https://roady-car.pages.dev,http://localhost:8080`) is a starting point;
    update it to the real production site origin so CORS allows submissions.
-7. **Rate limit bindings use the `unsafe.bindings` form.** Confirm your
+7. **V3 secrets, migration parity, and production gate are intentionally unresolved.**
+   Provision the five v3 secrets above, apply migrations 0005 then 0006, run
+   local/remote D1 and workerd replay checks, and collect the addendum section 9
+   evidence. Ranked v3 must remain disabled until a separate review changes the
+   code-level parity latch.
+8. **Rate limit bindings use the `unsafe.bindings` form.** Confirm your
    Wrangler version / account supports anonymous rate-limit namespaces, or
    switch to named namespaces. Session and submit bindings fail closed when
    missing or errored. Public reads tolerate an absent binding for standalone

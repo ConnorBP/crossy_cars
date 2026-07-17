@@ -29,3 +29,16 @@ LB_TURNSTILE_SECRET=1x0000000000000000000000000000000AA
 # the client uses the same one. Production value is installed via
 # `wrangler secret put LB_CLIENT_HMAC_KEY` and never written to source.
 LB_CLIENT_HMAC_KEY=REPLACE_WITH_LOCAL_DEV_KEY_ONLY_NOT_A_REAL_SECRET
+
+# Rules-v3 uses independent keys so v1/v2 proof, seed and capability material
+# cannot cross protocol boundaries. Keep ROADY_V3_RANKED_ENABLED false; local
+# maintainers may use exact "true" only while exercising the complete v3 flow.
+ROADY_V3_RANKED_ENABLED=false
+LB_V3_PROOF_HMAC_KEY=REPLACE_WITH_BASE64_32_RANDOM_BYTES_LOCAL_ONLY
+# Canonical unpadded base64url encoding of exactly 32 random AES-256-GCM bytes.
+LB_V3_SEED_ENCRYPTION_KEY=REPLACE_WITH_BASE64URL_32_RANDOM_BYTES_LOCAL_ONLY
+LB_V3_SEED_KEY_ID=v3.seed.local.1
+LB_V3_EVIDENCE_CAPABILITY_KEY=REPLACE_WITH_BASE64_32_RANDOM_BYTES_LOCAL_ONLY
+# Accepted nuisance-HMAC IDs support overlap during rotation. Values are raw
+# secret strings and must match the corresponding client builds.
+LB_V3_CLIENT_HMAC_KEYS_JSON={"v3.client.1":"REPLACE_WITH_LOCAL_V3_CLIENT_KEY"}

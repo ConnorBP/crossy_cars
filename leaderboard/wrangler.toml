@@ -78,6 +78,11 @@ BUILD = "dev"
 # All five conditions (0–4) MUST be present — the Worker fails closed if any
 # cap is missing or non-positive (see configError in src/index.ts).
 SCORE_CAPS_JSON = "{\"0\":3000,\"1\":3000,\"2\":4000,\"3\":3000,\"4\":6000}"
+# Fail-closed v3 production gate. Do not change this in source. After all
+# addendum section 9 checks pass, set exact lowercase `true` in the deployed
+# Worker environment; the code-level production parity latch remains false in
+# this implementation until separately reviewed release evidence is landed.
+ROADY_V3_RANKED_ENABLED = "false"
 
 # Optional scheduled cleanup of expired sessions and old non-top scores.
 # Disabled by default (comment out to enable once retention policy is reviewed).

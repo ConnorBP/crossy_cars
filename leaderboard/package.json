@@ -8,6 +8,7 @@
   "scripts": {
     "test": "vitest run",
     "test:d1-restoration": "node scripts/test-d1-restoration.mjs",
+    "test:d1-v3": "node scripts/test-d1-v3.mjs",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "dev": "wrangler dev",

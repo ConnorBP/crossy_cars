@@ -40,6 +40,7 @@ import {
   type ValidatedScore,
 } from "./validation";
 import { renderLeaderboardSvg } from "./svg";
+import { cleanupV3, handleV3, type V3Env } from "./v3";
 import {
   checkRateLimit,
   readBoundedJson,
@@ -48,7 +49,7 @@ import {
 
 // ─── Bindings ────────────────────────────────────────────────────────────────
 
-export interface Env {
+export interface Env extends V3Env {
   DB: D1Database;
   // Rate limit bindings (Cloudflare Rate Limiting). Optional at the type level
   // for standalone tests; write endpoints require them and fail closed.
@@ -66,6 +67,14 @@ export interface Env {
   LB_ADMIN_TOKEN: string;
   LB_TURNSTILE_SECRET: string;
   LB_CLIENT_HMAC_KEY: string;
+  // Additive v3 secrets/vars. V3 config fails closed independently; v1 does
+  // not depend on these bindings and therefore remains byte-compatible.
+  ROADY_V3_RANKED_ENABLED?: string;
+  LB_V3_PROOF_HMAC_KEY?: string;
+  LB_V3_SEED_ENCRYPTION_KEY?: string;
+  LB_V3_SEED_KEY_ID?: string;
+  LB_V3_EVIDENCE_CAPABILITY_KEY?: string;
+  LB_V3_CLIENT_HMAC_KEYS_JSON?: string;
 }
 
 type RateLimit = RateLimitBinding;
@@ -176,6 +185,14 @@ export default {
       if (pathname === "/healthz" && method === "GET") {
         return healthz(env, cors);
       }
+
+      // V3 is additive and owns only the exact /v3 namespace. Its
+      // capabilities route remains available (disabled) without v3 secrets;
+      // all other v3 routes fail closed in their independent config guard.
+      // Dispatch it before the frozen v1 config guard so missing v1-only score
+      // caps cannot change the exact public capability response.
+      const v3Response = await handleV3(request, env, ctx, cors, requestId);
+      if (v3Response) return v3Response;
 
       // ── fail-closed config guard (architecture §1: defense in depth) ────
       // Every endpoint below depends on secrets and/or caps. If the Worker is
@@ -1275,6 +1292,13 @@ export async function scheduledCleanup(env: Env): Promise<void> {
   const ninetyDaysMs = 90 * 24 * 60 * 60 * 1000;
 
   await env.DB.prepare(`DELETE FROM sessions WHERE expires_at < ?`).bind(now).run();
+  // V3 cleanup is additive and may run before migration 0006 during a staged
+  // rollout. Missing v3 tables must not prevent the frozen v1 retention pass.
+  try {
+    await cleanupV3(env);
+  } catch (error) {
+    console.error("v3_cleanup_unavailable", { message: String(error) });
+  }
 
   // For each condition, hide live scores that are NOT in the top 1000 AND are
   // older than 90 days. This keeps the board fresh without nuking recent play.
