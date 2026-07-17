@@ -684,6 +684,8 @@ mod tests {
             .init_resource::<TouchControlsActive>()
             .add_message::<ChickenHit>()
             .add_message::<CoinCollected>()
+            .add_message::<PackageDelivered>()
+            .add_message::<CourtesyAwarded>()
             .add_plugins(ObjectivesPlugin)
             .add_systems(
                 Update,
