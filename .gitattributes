@@ -3,3 +3,7 @@ rules/*.json text eol=lf
 crates/roady-score-rules/examples/generate_v2.rs text eol=lf
 crates/roady-score-rules/src/v2/artifacts.rs text eol=lf
 crates/roady-score-rules/tests/golden_v2.rs text eol=lf
+
+# Generated PBR manifests/constants are also byte-stable LF artifacts.
+assets/textures/pbr_detail/manifest.json text eol=lf
+src/pbr_detail_constants.rs text eol=lf
