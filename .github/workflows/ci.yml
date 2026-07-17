@@ -57,6 +57,8 @@ jobs:
           cargo check --workspace --locked --target wasm32-unknown-unknown
           cargo build --locked -p roady-score-rules --target wasm32-unknown-unknown
           cargo test --locked -p roady-score-rules --test golden_v3
+      - name: Install PBR regression test dependencies
+        run: python -m pip install --disable-pip-version-check pillow "playwright==1.52.0"
       - name: Regression-check production microtexture/PBR assets and generated metadata
         run: |
           # The production assets + generated constants landed byte-stable in
@@ -64,7 +66,7 @@ jobs:
           git diff --exit-code 796ef3f -- \
             assets/textures/pbr_detail \
             src/pbr_detail_constants.rs
-          python -m pip install --disable-pip-version-check pillow "playwright==1.52.0"
+          python -c "import PIL, playwright.sync_api"
           python -m unittest tools.test_build_pbr_details tools.test_microtexture_review_capture
           python tools/build_pbr_details.py
           git diff --exit-code -- assets/textures/pbr_detail src/pbr_detail_constants.rs
