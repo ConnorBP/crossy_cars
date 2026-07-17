@@ -26,7 +26,7 @@ const CACHE_CAP = "public, max-age=60, s-maxage=300, stale-while-revalidate=600"
 const CACHE_BOARD = "public, max-age=30, s-maxage=60, stale-while-revalidate=120";
 const NO_STORE = { "Cache-Control": "no-store" };
 const TEST_TURNSTILE_SECRET = "1x0000000000000000000000000000000AA";
-const PRODUCTION_PARITY_PROVEN = true; // Deliberately false until section 9 release evidence is approved.
+const PRODUCTION_PARITY_PROVEN = true; // Approved by the section 9 disabled-first evidence chain.
 const te = new TextEncoder();
 
 function dev(build: string): boolean { return build === "dev" || build === "test" || build === "local"; }
