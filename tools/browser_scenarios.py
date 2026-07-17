@@ -27,6 +27,11 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlsplit
 
+try:
+    from browser_v3_fixture import install_disabled_capability
+except ImportError:
+    from .browser_v3_fixture import install_disabled_capability
+
 
 DEFAULT_URL = "http://localhost:8080"
 DEFAULT_OUT_DIR = "tools/scenarios"
@@ -107,7 +112,7 @@ def ignorable_request_failure(method: str, url: str, failure: str | None) -> boo
     """Ignore only intentional aborts for optional remote requests."""
     if failure != "net::ERR_ABORTED":
         return False
-    if "/v1/leaderboard" in url:
+    if "/v1/leaderboard" in url or "/v3/capabilities" in url:
         return True
     try:
         parsed = urlsplit(url)
@@ -481,6 +486,7 @@ def run_scenario(args: argparse.Namespace, summary: dict[str, Any]) -> None:
                 """
             )
 
+            install_disabled_capability(context)
             page = context.new_page()
             page.set_default_timeout(60_000)
             page.set_default_navigation_timeout(BOOT_TIMEOUT_MS)

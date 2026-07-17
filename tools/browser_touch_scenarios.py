@@ -19,6 +19,11 @@ import traceback
 from pathlib import Path
 from typing import Any
 
+try:
+    from browser_v3_fixture import install_disabled_capability
+except ImportError:
+    from .browser_v3_fixture import install_disabled_capability
+
 try:  # Direct script execution puts tools/ on sys.path.
     from browser_scenarios import (
         FailureScreenshotRecorder,
@@ -179,6 +184,7 @@ def main() -> int:
 }})();
 """
             )
+            install_disabled_capability(context)
             page = context.new_page()
             page.on(
                 "console",

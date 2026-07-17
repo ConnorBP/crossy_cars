@@ -50,6 +50,11 @@ import traceback
 from pathlib import Path
 from typing import Any, Callable
 
+try:
+    from browser_v3_fixture import install_disabled_capability
+except ImportError:
+    from .browser_v3_fixture import install_disabled_capability
+
 try:  # Direct script execution puts tools/ on sys.path.
     from browser_scenarios import (
         FailureScreenshotRecorder,
@@ -360,6 +365,7 @@ def setup_context(
     # Wipe settings/legacy keys once per context so every run starts from the
     # deterministic fresh schema, while leaving reloads untouched.
     context.add_init_script(script=fresh_init_script())
+    install_disabled_capability(context)
     page = context.new_page()
     page.set_default_timeout(60_000)
     page.set_default_navigation_timeout(BOOT_TIMEOUT_MS)
