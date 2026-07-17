@@ -64,7 +64,7 @@ jobs:
           # The production assets + generated constants landed byte-stable in
           # 796ef3f. Capture tooling may evolve, but shipped bytes may not.
           git diff --exit-code 796ef3f -- \
-            assets/textures/pbr_detail \
+            'assets/textures/pbr_detail/*.png' \
             src/pbr_detail_constants.rs
           python -c "import PIL, playwright.sync_api"
           python tools/build_pbr_details.py --verify
