@@ -47,20 +47,35 @@ assert.equal(v2Body.error?.code, "not_found", "v2 absence body changed");
 const board = await get("/v1/leaderboard?limit=1");
 assert.equal(board.status, 200, "legacy board probe failed");
 assert.ok(Array.isArray((await board.json()).entries), "legacy board entries missing");
-for (let probe = 1; probe <= 2; probe += 1) {
-  // The capability contract rejects query strings. Use a unique request header
-  // plus no-cache directives so both requests reach production uncached.
+const capability = async (label) => {
   const response = await fetch(`${base}/v3/capabilities`, {
     cache: "no-store",
     headers: {
       "Cache-Control": "no-cache, no-store, max-age=0",
       Pragma: "no-cache",
-      "X-Roady-Release-Probe": `${Date.now()}-${probe}-${crypto.randomUUID()}`,
+      "X-Roady-Release-Probe": `${Date.now()}-${label}-${crypto.randomUUID()}`,
     },
   });
-  assert.equal(response.status, 200, `capability probe ${probe} failed`);
+  assert.equal(response.status, 200, `capability probe ${label} failed`);
   assert.equal(response.headers.get("cache-control"), "public, max-age=60, s-maxage=300, stale-while-revalidate=600");
-  assert.deepEqual(await response.json(), expected, `capability probe ${probe} tuple mismatch`);
+  return response.json();
+};
+// Cloudflare may briefly serve the preceding Worker version after deploy. Wait
+// for the expected effective gate before taking the two independent final
+// observations. A mismatch after the bounded window still fails and triggers
+// the enable workflow's disable-first rollback trap.
+let propagated = false;
+for (let attempt = 1; attempt <= 12; attempt += 1) {
+  const body = await capability(`propagation-${attempt}`);
+  if (JSON.stringify(body) === JSON.stringify(expected)) {
+    propagated = true;
+    break;
+  }
+  if (attempt < 12) await sleep(attempt * 1000);
+}
+assert.equal(propagated, true, "capability tuple did not propagate within the bounded window");
+for (let probe = 1; probe <= 2; probe += 1) {
+  assert.deepEqual(await capability(`final-${probe}`), expected, `capability final probe ${probe} tuple mismatch`);
 }
 if (!expectedEnabled) {
   const issuance = await fetch(`${base}/v3/session`, {
