@@ -264,7 +264,6 @@ struct MenuRect {
 }
 
 impl MenuRect {
-    #[cfg(test)]
     fn right(self) -> f32 {
         self.left + self.width
     }
