@@ -46,6 +46,9 @@ use crate::game::TouchStateSet;
 use crate::game::resources::{RoundActive, not_drowning};
 use crate::game::state::GameState;
 use crate::modifiers::ActiveModifier;
+use crate::pbr_detail_constants::{
+    TRAFFIC_PAINT_ALBEDO_LINEAR_MEAN, TRAFFIC_PAINT_ROUGHNESS_LINEAR_MEAN,
+};
 use crate::run_events::ActiveEvent;
 use crate::textures::PbrDetailAssets;
 use crate::touch::{
@@ -53,7 +56,11 @@ use crate::touch::{
 };
 #[cfg(target_arch = "wasm32")]
 use crate::toy_shading::ToyCastShadow;
-use crate::toy_shading::{ToyContactShadow, ToyShadingAssets, contact_shadow_transform};
+use crate::toy_shading::{
+    ImportedMicrotextureCache, ImportedMicrotextureSet, MicrotextureDetailEnabled,
+    ToyContactShadow, ToyShadingAssets, WorldMaterialSemantic, cached_imported_microtexture_mesh,
+    contact_shadow_transform,
+};
 #[cfg(test)]
 use crate::toy_shading::{ToyMaterialFamily, toy_material};
 use crate::world::{
@@ -137,6 +144,7 @@ const BODY_D: f32 = 2.0;
 const WINDSHIELD_D: f32 = 0.03;
 /// The established deterministic traffic paint palette. Imported instances
 /// replace only an authored `Toy_Paint` material's base color with one entry.
+const TRAFFIC_PAINT_REPEAT: u8 = 2;
 const TRAFFIC_PAINT_COLORS: [Color; 5] = [
     Color::srgb(0.85, 0.12, 0.10),
     Color::srgb(0.15, 0.35, 0.85),
@@ -413,48 +421,48 @@ pub struct Traffic {
 /// scene. The exact authored prefix prevents similarly named nodes from a
 /// different selected asset from ever being bound.
 #[derive(Component, Clone, Copy, Debug)]
-struct ImportedTrafficVisual {
-    asset_prefix: &'static str,
-    paint_index: usize,
+pub(crate) struct ImportedTrafficVisual {
+    pub(crate) asset_prefix: &'static str,
+    pub(crate) paint_index: usize,
 }
 
 /// The sole per-instance clone of the selected owner's authored paint. The
 /// source handle is never mutated; every matching primitive beneath this
 /// wrapper is redirected to this handle as it arrives asynchronously.
 #[derive(Component, Clone, Debug, Default)]
-struct ImportedTrafficPaintMaterial(Option<Handle<StandardMaterial>>);
+pub(crate) struct ImportedTrafficPaintMaterial(pub(crate) Option<Handle<StandardMaterial>>);
 
 /// Marks a `Toy_Paint` primitive after assignment to its owner's clone.
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
-struct ImportedTrafficPaintOwner(Entity);
+pub(crate) struct ImportedTrafficPaintOwner(Entity);
 
 /// Per-wrapper rolling state. Keeping this separate from wheel transforms lets
 /// every wheel be rebuilt from its captured authored baseline each frame.
 #[derive(Component, Clone, Copy, Debug, Default)]
-struct ImportedTrafficWheelAnimation {
-    spin_radians: f32,
+pub(crate) struct ImportedTrafficWheelAnimation {
+    pub(crate) spin_radians: f32,
 }
 
 /// Added to the imported wrapper only while all four wheel slots are present
 /// exactly once beneath that wrapper.
 #[derive(Component, Clone, Copy, Debug)]
-struct ImportedTrafficReady;
+pub(crate) struct ImportedTrafficReady;
 
 /// Marks an asynchronously discovered authored wheel pivot.
 #[derive(Component, Clone, Copy, Debug)]
-struct ImportedTrafficWheel;
+pub(crate) struct ImportedTrafficWheel;
 
 /// Stable gameplay owner used to read speed without depending on the glTF's
 /// intermediate hierarchy.
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
-struct ImportedTrafficWheelOwner(Entity);
+pub(crate) struct ImportedTrafficWheelOwner(Entity);
 
 /// Authored local orientation captured once when the wheel pivot appears.
 #[derive(Component, Clone, Copy, Debug)]
 struct ImportedTrafficWheelBaseline(Quat);
 
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
-enum ImportedTrafficWheelSlot {
+pub(crate) enum ImportedTrafficWheelSlot {
     Fl,
     Fr,
     Rl,
@@ -516,7 +524,7 @@ impl Plugin for DifficultyPlugin {
                 Update,
                 (
                     bind_imported_traffic_wheels,
-                    bind_imported_traffic_paint,
+                    bind_imported_traffic_paint.after(ImportedMicrotextureSet),
                     update_imported_traffic_ready,
                     animate_imported_traffic_wheels,
                 )
@@ -1054,7 +1062,7 @@ fn compose_imported_traffic_wheel_rotation(baseline: Quat, spin_radians: f32) ->
 /// entities arrive asynchronously, so this runs every playing frame until the
 /// wrapper is ready. Existing markers are never replaced, preserving the true
 /// authored baseline rather than accidentally capturing an animated pose.
-fn bind_imported_traffic_wheels(
+pub(crate) fn bind_imported_traffic_wheels(
     mut commands: Commands,
     wrappers: Query<(Entity, &ImportedTrafficVisual, &ChildOf), Without<ImportedTrafficReady>>,
     nodes: Query<(Entity, &Name, &Transform, Option<&ImportedTrafficWheel>)>,
@@ -1087,30 +1095,39 @@ fn bind_imported_traffic_wheels(
 }
 
 /// Clone an imported `Toy_Paint` material at most once for each traffic
-/// wrapper, changing only its base color. All matching primitives owned by the
-/// wrapper share that clone, including primitives instantiated in later
-/// frames. Unrelated imported player/world primitives are ancestry-excluded.
-fn bind_imported_traffic_paint(
+/// wrapper. Dedicated neutral albedo/ORM multipliers preserve average palette
+/// color and authored roughness through mean compensation; the existing weak
+/// plastic normal supplies non-displacement relief. All matching primitives
+/// owned by the wrapper share that clone, including primitives instantiated in
+/// later frames. Unrelated buildings, player cars, accents, glass, lights,
+/// trim, and tires are excluded by exact material name and wrapper ancestry.
+pub(crate) fn bind_imported_traffic_paint(
     mut commands: Commands,
     mut wrappers: Query<(
         Entity,
         &ImportedTrafficVisual,
         &ChildOf,
         &mut ImportedTrafficPaintMaterial,
+        Option<&MicrotextureDetailEnabled>,
     )>,
     mut primitives: Query<(
         Entity,
         &GltfMaterialName,
+        &mut Mesh3d,
         &mut MeshMaterial3d<StandardMaterial>,
         Option<&ImportedTrafficPaintOwner>,
     )>,
     parents: Query<&ChildOf>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut mesh_cache: ResMut<ImportedMicrotextureCache>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     details: Option<Res<PbrDetailAssets>>,
 ) {
-    for (wrapper, visual, wrapper_parent, mut instance_material) in &mut wrappers {
+    for (wrapper, visual, wrapper_parent, mut instance_material, review_detail) in &mut wrappers {
         let owner = wrapper_parent.parent();
-        for (entity, name, mut primitive_material, assigned_owner) in &mut primitives {
+        for (entity, name, mut primitive_mesh, mut primitive_material, assigned_owner) in
+            &mut primitives
+        {
             if name.0 != "Toy_Paint"
                 || !is_traffic_descendant_of(entity, wrapper, |candidate| {
                     parents.get(candidate).ok().map(ChildOf::parent)
@@ -1119,7 +1136,42 @@ fn bind_imported_traffic_paint(
                 continue;
             }
 
-            let instance_handle = if let Some(handle) = &instance_material.0 {
+            let detail_enabled = review_detail.is_none_or(|enabled| enabled.0);
+            // Eligibility is a property of the authored material and must be
+            // resolved before any tangent generation or UV mesh clone. An
+            // excluded Toy_Paint primitive remains byte-for-byte authored.
+            let Some(source_material) = materials.get(primitive_material.0.id()) else {
+                continue;
+            };
+            let authored_material_eligible = source_material.base_color_texture.is_none()
+                && source_material.metallic_roughness_texture.is_none()
+                && source_material.occlusion_texture.is_none()
+                && source_material.normal_map_texture.is_none()
+                && source_material.emissive_texture.is_none();
+            let generated_detail_eligible =
+                detail_enabled && details.is_some() && authored_material_eligible;
+            let mesh_variant = if assigned_owner.map(|assigned| assigned.0) == Some(owner) {
+                None
+            } else if generated_detail_eligible {
+                let Some(variant) = cached_imported_microtexture_mesh(
+                    &primitive_mesh.0,
+                    WorldMaterialSemantic::Coated,
+                    TRAFFIC_PAINT_REPEAT,
+                    &mut meshes,
+                    &mut mesh_cache,
+                ) else {
+                    continue;
+                };
+                Some(variant)
+            } else {
+                None
+            };
+
+            let instance_handle = if !authored_material_eligible {
+                // Exclusions retain the exact authored material as well as mesh
+                // and UVs; ownership still completes wrapper readiness.
+                primitive_material.0.clone()
+            } else if let Some(handle) = &instance_material.0 {
                 handle.clone()
             } else {
                 let Some(mut cloned) = materials.get(primitive_material.0.id()).cloned() else {
@@ -1128,21 +1180,31 @@ fn bind_imported_traffic_paint(
                     continue;
                 };
                 cloned.base_color = TRAFFIC_PAINT_COLORS[visual.paint_index];
-                // Traffic GLBs have UV0 but no tangents, so add only shared
-                // plastic roughness/AO detail and preserve authored maps.
-                if let Some(details) = details.as_deref() {
-                    if cloned.metallic_roughness_texture.is_none() {
-                        cloned.metallic_roughness_texture = Some(details.plastic_orm.clone());
-                    }
-                    if cloned.occlusion_texture.is_none() {
-                        cloned.occlusion_texture = Some(details.plastic_orm.clone());
-                    }
+                // Only the audited texture-free Toy_Paint receives generated
+                // maps. Authored paint textures, player materials, accent
+                // paint, glass, lamps, metal and tires remain untouched.
+                if generated_detail_eligible && let Some(details) = details.as_deref() {
+                    let color = cloned.base_color.to_linear();
+                    cloned.base_color = Color::LinearRgba(LinearRgba::new(
+                        color.red / TRAFFIC_PAINT_ALBEDO_LINEAR_MEAN,
+                        color.green / TRAFFIC_PAINT_ALBEDO_LINEAR_MEAN,
+                        color.blue / TRAFFIC_PAINT_ALBEDO_LINEAR_MEAN,
+                        color.alpha,
+                    ));
+                    cloned.perceptual_roughness /= TRAFFIC_PAINT_ROUGHNESS_LINEAR_MEAN;
+                    cloned.base_color_texture = Some(details.traffic_paint_albedo.clone());
+                    cloned.metallic_roughness_texture = Some(details.traffic_paint_orm.clone());
+                    cloned.occlusion_texture = Some(details.traffic_paint_orm.clone());
+                    cloned.normal_map_texture = Some(details.plastic_normal.clone());
                 }
                 let handle = materials.add(cloned);
                 instance_material.0 = Some(handle.clone());
                 handle
             };
 
+            if let Some(variant) = mesh_variant {
+                primitive_mesh.0 = variant;
+            }
             if primitive_material.0.id() != instance_handle.id() {
                 primitive_material.0 = instance_handle;
             }
@@ -1155,7 +1217,7 @@ fn bind_imported_traffic_paint(
     }
 }
 
-fn update_imported_traffic_ready(
+pub(crate) fn update_imported_traffic_ready(
     mut commands: Commands,
     wrappers: Query<(Entity, &ChildOf, Option<&ImportedTrafficReady>), With<ImportedTrafficVisual>>,
     wheels: Query<
@@ -1808,6 +1870,7 @@ mod tests {
     use crate::run_events::EventKind;
     use crate::toy_shading::ToyShadingAssets;
     use bevy::ecs::world::CommandQueue;
+    use bevy::mesh::VertexAttributeValues;
 
     const EXPECTED_BODY_COLORS: [Color; 5] = TRAFFIC_PAINT_COLORS;
 
@@ -1838,9 +1901,39 @@ mod tests {
 
     fn traffic_paint_test_app() -> App {
         let mut app = App::new();
-        app.init_resource::<Assets<StandardMaterial>>()
+        app.init_resource::<Assets<Mesh>>()
+            .init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<ImportedMicrotextureCache>()
             .add_systems(Update, bind_imported_traffic_paint);
         app
+    }
+
+    fn insert_traffic_test_details(app: &mut App) -> PbrDetailAssets {
+        app.init_resource::<Assets<Image>>();
+        let mut images = app.world_mut().resource_mut::<Assets<Image>>();
+        PbrDetailAssets {
+            concrete_albedo: images.add(Image::default()),
+            foliage_albedo: images.add(Image::default()),
+            traffic_paint_albedo: images.add(Image::default()),
+            traffic_paint_orm: images.add(Image::default()),
+            plastic_normal: images.add(Image::default()),
+            plastic_orm: images.add(Image::default()),
+            concrete_normal: images.add(Image::default()),
+            concrete_orm: images.add(Image::default()),
+            wood_normal: images.add(Image::default()),
+            wood_orm: images.add(Image::default()),
+            grass_normal: images.add(Image::default()),
+            grass_orm: images.add(Image::default()),
+            soil_orm: images.add(Image::default()),
+        }
+    }
+
+    fn loaded_traffic_test_mesh() -> Mesh {
+        let mut mesh: Mesh = Plane3d::default().mesh().size(1.0, 1.0).into();
+        mesh.remove_attribute(Mesh::ATTRIBUTE_TANGENT);
+        assert!(mesh.attribute(Mesh::ATTRIBUTE_UV_0).is_some());
+        assert!(mesh.attribute(Mesh::ATTRIBUTE_NORMAL).is_some());
+        mesh
     }
 
     fn spawn_paint_wrapper(app: &mut App, paint_index: usize) -> (Entity, Entity) {
@@ -1881,10 +1974,21 @@ mod tests {
         parent: Entity,
         material: Handle<StandardMaterial>,
     ) -> Entity {
+        spawn_named_paint_primitive(app, parent, "Toy_Paint", Handle::default(), material)
+    }
+
+    fn spawn_named_paint_primitive(
+        app: &mut App,
+        parent: Entity,
+        name: &str,
+        mesh: Handle<Mesh>,
+        material: Handle<StandardMaterial>,
+    ) -> Entity {
         let primitive = app
             .world_mut()
             .spawn((
-                GltfMaterialName("Toy_Paint".to_owned()),
+                GltfMaterialName(name.to_owned()),
+                Mesh3d(mesh),
                 MeshMaterial3d(material),
             ))
             .id();
@@ -2167,7 +2271,265 @@ mod tests {
     }
 
     #[test]
-    fn imported_traffic_paint_clones_once_shares_and_preserves_authored_fields() {
+    fn traffic_microtexture_path_generates_tangents_repeats_uvs_and_recycles_cleanly() {
+        let mut app = traffic_paint_test_app();
+        let details = insert_traffic_test_details(&mut app);
+        app.insert_resource(details.clone());
+        let source = app
+            .world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial {
+                // Matches every authored traffic GLB Toy_Paint material.
+                perceptual_roughness: 0.20,
+                ..default()
+            });
+        let source_mesh = app
+            .world_mut()
+            .resource_mut::<Assets<Mesh>>()
+            .add(loaded_traffic_test_mesh());
+        let (owner, wrapper) = spawn_paint_wrapper(&mut app, 2);
+        let paint = spawn_named_paint_primitive(
+            &mut app,
+            wrapper,
+            "Toy_Paint",
+            source_mesh.clone(),
+            source.clone(),
+        );
+        // Exact material naming and wrapper ancestry protect both authored
+        // accent content and player/world primitives from traffic mutation.
+        let authored_texture = Handle::<Image>::default();
+        let authored_source = app
+            .world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial {
+                base_color_texture: Some(authored_texture.clone()),
+                ..default()
+            });
+        let protected_parts = [
+            "Toy_Accent_Paint",
+            "Toy_Glass",
+            "Toy_Headlight",
+            "Toy_Taillight",
+            "Toy_Silver_Trim",
+            "Toy_Dark_Trim",
+            "Toy_Tire",
+        ]
+        .map(|name| {
+            spawn_named_paint_primitive(
+                &mut app,
+                wrapper,
+                name,
+                source_mesh.clone(),
+                authored_source.clone(),
+            )
+        });
+        let player = spawn_named_paint_primitive(
+            &mut app,
+            owner,
+            "Toy_Paint",
+            source_mesh.clone(),
+            authored_source.clone(),
+        );
+        let (authored_owner, authored_wrapper) = spawn_paint_wrapper(&mut app, 4);
+        let authored_paint = spawn_named_paint_primitive(
+            &mut app,
+            authored_wrapper,
+            "Toy_Paint",
+            source_mesh.clone(),
+            authored_source.clone(),
+        );
+        let before = (
+            app.world().resource::<Assets<Mesh>>().len(),
+            app.world().resource::<Assets<StandardMaterial>>().len(),
+        );
+
+        app.update();
+
+        let variant_mesh = app.world().get::<Mesh3d>(paint).unwrap().0.clone();
+        let paint_material = app
+            .world()
+            .get::<MeshMaterial3d<StandardMaterial>>(paint)
+            .unwrap()
+            .0
+            .clone();
+        assert_ne!(variant_mesh.id(), source_mesh.id());
+        assert_ne!(paint_material.id(), source.id());
+        assert_eq!(
+            (
+                app.world().resource::<Assets<Mesh>>().len(),
+                app.world().resource::<Assets<StandardMaterial>>().len(),
+            ),
+            (before.0 + 1, before.1 + 1),
+            "one shared mesh variant and only the eligible owner's material clone"
+        );
+        let meshes = app.world().resource::<Assets<Mesh>>();
+        assert!(
+            meshes
+                .get(&source_mesh)
+                .unwrap()
+                .attribute(Mesh::ATTRIBUTE_TANGENT)
+                .is_none()
+        );
+        let variant = meshes.get(&variant_mesh).unwrap();
+        assert!(variant.attribute(Mesh::ATTRIBUTE_TANGENT).is_some());
+        let VertexAttributeValues::Float32x2(uvs) =
+            variant.attribute(Mesh::ATTRIBUTE_UV_0).unwrap()
+        else {
+            panic!("traffic UV0 must remain float2")
+        };
+        assert!(uvs.iter().flatten().any(|component| *component == 2.0));
+        let cloned = app
+            .world()
+            .resource::<Assets<StandardMaterial>>()
+            .get(&paint_material)
+            .unwrap();
+        let original_color = TRAFFIC_PAINT_COLORS[2].to_linear();
+        let compensated_color = cloned.base_color.to_linear();
+        for (actual, expected) in [
+            (
+                compensated_color.red * TRAFFIC_PAINT_ALBEDO_LINEAR_MEAN,
+                original_color.red,
+            ),
+            (
+                compensated_color.green * TRAFFIC_PAINT_ALBEDO_LINEAR_MEAN,
+                original_color.green,
+            ),
+            (
+                compensated_color.blue * TRAFFIC_PAINT_ALBEDO_LINEAR_MEAN,
+                original_color.blue,
+            ),
+        ] {
+            assert!((actual - expected).abs() < 1e-7);
+        }
+        assert_eq!(
+            cloned.base_color_texture.as_ref(),
+            Some(&details.traffic_paint_albedo)
+        );
+        assert!(
+            (cloned.perceptual_roughness * TRAFFIC_PAINT_ROUGHNESS_LINEAR_MEAN - 0.20).abs() < 1e-7
+        );
+        assert_eq!(
+            cloned.metallic_roughness_texture.as_ref(),
+            Some(&details.traffic_paint_orm)
+        );
+        assert_eq!(
+            cloned.occlusion_texture.as_ref(),
+            Some(&details.traffic_paint_orm)
+        );
+        assert_eq!(
+            cloned.normal_map_texture.as_ref(),
+            Some(&details.plastic_normal)
+        );
+        for protected in protected_parts.into_iter().chain([player]) {
+            assert_eq!(
+                app.world().get::<Mesh3d>(protected).unwrap().0.id(),
+                source_mesh.id()
+            );
+            assert_eq!(
+                app.world()
+                    .get::<MeshMaterial3d<StandardMaterial>>(protected)
+                    .unwrap()
+                    .0
+                    .id(),
+                authored_source.id()
+            );
+            assert!(
+                app.world()
+                    .get::<ImportedTrafficPaintOwner>(protected)
+                    .is_none()
+            );
+        }
+        let authored_paint_handle = app
+            .world()
+            .get::<MeshMaterial3d<StandardMaterial>>(authored_paint)
+            .unwrap()
+            .0
+            .clone();
+        assert_eq!(
+            app.world().get::<Mesh3d>(authored_paint).unwrap().0.id(),
+            source_mesh.id(),
+            "authored slots are inspected before any traffic mesh clone"
+        );
+        assert_eq!(
+            app.world()
+                .get::<ImportedTrafficPaintOwner>(authored_paint)
+                .unwrap()
+                .0,
+            authored_owner
+        );
+        let materials = app.world().resource::<Assets<StandardMaterial>>();
+        assert_eq!(authored_paint_handle.id(), authored_source.id());
+        let authored_clone = materials.get(&authored_paint_handle).unwrap();
+        assert_eq!(
+            authored_clone.base_color_texture.as_ref(),
+            Some(&authored_texture)
+        );
+        assert!(authored_clone.metallic_roughness_texture.is_none());
+        assert!(authored_clone.occlusion_texture.is_none());
+        assert!(authored_clone.normal_map_texture.is_none());
+        assert_eq!(
+            materials
+                .get(&authored_source)
+                .unwrap()
+                .base_color_texture
+                .as_ref(),
+            Some(&authored_texture),
+            "authored shared source material remains immutable"
+        );
+
+        // A delayed second Toy_Paint primitive in the shared scene reuses the
+        // 8x tangent mesh and the owner's clone without cache growth.
+        let delayed = spawn_named_paint_primitive(
+            &mut app,
+            wrapper,
+            "Toy_Paint",
+            source_mesh.clone(),
+            source.clone(),
+        );
+        app.update();
+        assert_eq!(
+            app.world().get::<Mesh3d>(delayed).unwrap().0.id(),
+            variant_mesh.id()
+        );
+        assert_eq!(
+            app.world()
+                .get::<MeshMaterial3d<StandardMaterial>>(delayed)
+                .unwrap()
+                .0
+                .id(),
+            paint_material.id()
+        );
+        let plateau = (
+            app.world().resource::<Assets<Mesh>>().len(),
+            app.world().resource::<Assets<StandardMaterial>>().len(),
+        );
+
+        app.add_systems(Update, cleanup_traffic);
+        app.update();
+        app.update();
+        assert!(app.world().get_entity(owner).is_err());
+        assert!(app.world().get_entity(authored_owner).is_err());
+        assert!(
+            app.world()
+                .resource::<Assets<StandardMaterial>>()
+                .get(&paint_material)
+                .is_none(),
+            "traffic cleanup removes its per-owner clone"
+        );
+        assert_eq!(
+            app.world().resource::<Assets<Mesh>>().len(),
+            plateau.0,
+            "the reusable cached mesh survives owner recycling"
+        );
+        assert_eq!(
+            app.world().resource::<Assets<StandardMaterial>>().len(),
+            plateau.1 - 1,
+            "the one eligible per-owner paint clone is reclaimed"
+        );
+    }
+
+    #[test]
+    fn imported_traffic_authored_exclusion_preserves_exact_mesh_uv_and_material() {
         let mut app = traffic_paint_test_app();
         let base_texture = Handle::<Image>::default();
         let emissive_texture = Handle::<Image>::default();
@@ -2212,17 +2574,14 @@ mod tests {
             .world()
             .get::<MeshMaterial3d<StandardMaterial>>(second)
             .unwrap();
-        assert_eq!(first_handle.0.id(), second_handle.0.id());
-        assert_ne!(first_handle.0.id(), source.id());
-        assert_eq!(
+        assert_eq!(first_handle.0.id(), source.id());
+        assert_eq!(second_handle.0.id(), source.id());
+        assert!(
             app.world()
                 .get::<ImportedTrafficPaintMaterial>(wrapper)
                 .unwrap()
                 .0
-                .as_ref()
-                .unwrap()
-                .id(),
-            first_handle.0.id()
+                .is_none()
         );
         assert_eq!(
             app.world()
@@ -2246,8 +2605,8 @@ mod tests {
         );
         assert_eq!(
             app.world().resource::<Assets<StandardMaterial>>().len(),
-            2,
-            "two owner primitives must create exactly one instance clone"
+            1,
+            "authored exclusions must not allocate an instance clone"
         );
 
         let materials = app.world().resource::<Assets<StandardMaterial>>();
@@ -2256,17 +2615,17 @@ mod tests {
             format!("{source_before:?}"),
             "the shared authored source must remain untouched"
         );
-        let mut expected = source_before;
-        expected.base_color = TRAFFIC_PAINT_COLORS[3];
-        let cloned = materials.get(&first_handle.0).unwrap();
-        assert_eq!(
-            format!("{cloned:?}"),
-            format!("{expected:?}"),
-            "only base_color may differ from the authored source"
-        );
-        assert_eq!(cloned.base_color_texture.as_ref(), Some(&base_texture));
-        assert_eq!(cloned.emissive_texture.as_ref(), Some(&emissive_texture));
-        assert_eq!(cloned.alpha_mode, AlphaMode::Blend);
+        let preserved = materials.get(&first_handle.0).unwrap();
+        assert_eq!(format!("{preserved:?}"), format!("{source_before:?}"));
+        assert_eq!(preserved.base_color_texture.as_ref(), Some(&base_texture));
+        assert_eq!(preserved.emissive_texture.as_ref(), Some(&emissive_texture));
+        assert_eq!(preserved.alpha_mode, AlphaMode::Blend);
+        for entity in [first, second] {
+            assert_eq!(
+                app.world().get::<Mesh3d>(entity).unwrap().0,
+                Handle::default()
+            );
+        }
     }
 
     #[test]

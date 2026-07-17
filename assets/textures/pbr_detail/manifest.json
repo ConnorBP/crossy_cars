@@ -1,157 +1,205 @@
 {
-  "color_space": "linear",
+  "color_spaces": {
+    "albedo": "sRGB",
+    "normal_and_orm": "linear"
+  },
+  "families": {
+    "concrete_lightstone": {
+      "albedo_sRGB": [
+        228,
+        255
+      ],
+      "facade_maps": [
+        "albedo",
+        "orm"
+      ],
+      "facade_normal": null,
+      "repeat": 2
+    },
+    "foliage": {
+      "albedo_sRGB": [
+        236,
+        255
+      ],
+      "repeat": 2
+    },
+    "grass": {
+      "normal_amplitude_max": 0.02773,
+      "normal_ceiling": 0.035,
+      "orm_ranges": {
+        "ao": [
+          248,
+          255
+        ],
+        "roughness": [
+          238,
+          255
+        ]
+      }
+    },
+    "soil": {
+      "orm_ranges": {
+        "ao": [
+          246,
+          255
+        ],
+        "roughness": [
+          232,
+          255
+        ]
+      }
+    },
+    "traffic_paint": {
+      "albedo_sRGB": [
+        232,
+        255
+      ],
+      "normal": "plastic_normal.png, requested/audited strength 0.035 (8-bit decoded amplitude <= 0.0356)",
+      "orm_ranges": {
+        "alpha": [
+          255,
+          255
+        ],
+        "ao": [
+          250,
+          255
+        ],
+        "metallic": [
+          255,
+          255
+        ],
+        "roughness": [
+          220,
+          255
+        ]
+      },
+      "repeat": 2
+    },
+    "wood_and_roofs": "unchanged"
+  },
+  "generation": {
+    "algorithm": "fixed-seed toroidal isotropic D4-symmetrized value noise",
+    "cycles": [
+      24,
+      48
+    ],
+    "runtime_repeat": 2,
+    "seam": "opposite RGBA edges and corners are byte-exact",
+    "seeds": {
+      "concrete_albedo": 3222388958,
+      "foliage_albedo": 251730542,
+      "grass_ao": 435286,
+      "grass_height": 435285,
+      "grass_roughness": 435287,
+      "soil_ao": 5247392,
+      "soil_roughness": 5247408,
+      "traffic_ao": 499872,
+      "traffic_paint_albedo": 8060700,
+      "traffic_roughness": 499888
+    },
+    "weights": [
+      0.7,
+      0.3
+    ]
+  },
   "generator": "build_pbr_details.py",
-  "license": "User-confirmed free to use",
+  "license": "Source-free generated noise; preserved legacy derivatives retain prior user-confirmed free-use provenance",
   "orm_channels": {
     "a": 255,
     "b": "metallic multiplier (255)",
     "g": "roughness multiplier",
-    "r": "ambient occlusion"
+    "r": "ambient occlusion multiplier"
   },
   "outputs": {
+    "concrete_albedo": {
+      "bytes": 15350,
+      "compensation_reciprocal": 1.13676981993,
+      "decoded_linear_mean": 0.879685563839,
+      "path": "assets/textures/pbr_detail/concrete_albedo.png",
+      "sha256": "1cfad41fa2148bde7bd31e9ff3e8cc8b7fc1402f1985ad6f86240b0655dcc2c4"
+    },
     "concrete_normal": {
-      "bytes": 40106,
+      "bytes": 38264,
+      "generation": "preserved unchanged by final correction",
       "path": "assets/textures/pbr_detail/concrete_normal.png",
-      "sha256": "ecda35918b757c70a33b83e07ef649ccdf2bc516d853a9c3ec991561112a5204"
+      "sha256": "5df8a179267f02c14e82f801e84c63e5cbd0f74daef870d39d9951314070dba4"
     },
     "concrete_orm": {
-      "bytes": 62040,
+      "bytes": 25062,
+      "generation": "preserved unchanged by final correction",
       "path": "assets/textures/pbr_detail/concrete_orm.png",
-      "sha256": "80f18ae9aa2a4a91d1c161b466692b38ac0514838743bc5038f01365ee0613c1"
+      "sha256": "e3932426fed9fb8cbe83d010dad95960d7629dbad9d17596cc829585f600c2b6"
+    },
+    "foliage_albedo": {
+      "bytes": 15093,
+      "compensation_reciprocal": 1.095526602125,
+      "decoded_linear_mean": 0.912803028298,
+      "path": "assets/textures/pbr_detail/foliage_albedo.png",
+      "sha256": "22cd828582a492b0f47fafbfbb4229593ebc2cc608e18c6cbf1683f3cb73a291"
     },
     "grass_normal": {
-      "bytes": 76264,
+      "bytes": 14643,
+      "normal_validation": {
+        "amplitude_max": 0.02773,
+        "amplitude_mean": 0.007095,
+        "length_error_max": 0.000384,
+        "seam_max": 0.0
+      },
       "path": "assets/textures/pbr_detail/grass_normal.png",
-      "sha256": "1693499719377b7235310b095547ab5bcbb039e4254eccb62c2f23ebe7ca4bd1"
+      "sha256": "c69f4c394188c3642d3ab6f7902fcc16d45f189e37eb915de8c2e5f54265f8a5"
     },
     "grass_orm": {
-      "bytes": 81175,
+      "bytes": 20361,
       "path": "assets/textures/pbr_detail/grass_orm.png",
-      "sha256": "84529e7d257f4c6faa1d312febf7944137ee0908434cba57642c1b905f2c5813"
+      "sha256": "edc1c1b9de602a3764fa7f15436ce0fc0a678f52b328dce048bcc5ec4ad506b0"
     },
     "plastic_normal": {
-      "bytes": 2570,
+      "bytes": 20223,
+      "generation": "preserved unchanged by final correction",
       "path": "assets/textures/pbr_detail/plastic_normal.png",
-      "sha256": "a939c2263345d912fb7ab6f254411399cb2e2f258c8e83b04a9ba0f627cd9aa8"
+      "sha256": "3a017091a5379c7cf9cde4bd87b2c707d185d5f85ff9c31b3c3e0e7bc653f671"
     },
     "plastic_orm": {
-      "bytes": 56426,
+      "bytes": 14953,
+      "generation": "preserved unchanged by final correction",
       "path": "assets/textures/pbr_detail/plastic_orm.png",
-      "sha256": "9cbbb155e918cbe583e8c9f86fcdddd0104d5f5eb6ed8f2ace8f1ab444dd8705"
+      "sha256": "327077bb119686a881a6678e308f993511e38628987578550a62be0f570e04bd"
     },
     "soil_orm": {
-      "bytes": 60302,
+      "bytes": 22719,
       "path": "assets/textures/pbr_detail/soil_orm.png",
-      "sha256": "dfe392f3d1c9397433081ae8b815adfe49f42cb2742e28292676a5c90160fde4"
+      "sha256": "7bdf542012cbf29ca1b7297a78effab137784384d4807caf964ed20a534f4990"
+    },
+    "traffic_paint_albedo": {
+      "bytes": 15275,
+      "compensation_reciprocal": 1.099738066456,
+      "decoded_linear_mean": 0.909307434653,
+      "path": "assets/textures/pbr_detail/traffic_paint_albedo.png",
+      "sha256": "7592ec31faa80335f9314d2856e0d6cac14106d800424fac2d6dea49385b3d29"
+    },
+    "traffic_paint_orm": {
+      "bytes": 22224,
+      "path": "assets/textures/pbr_detail/traffic_paint_orm.png",
+      "roughness_compensation_reciprocal": 1.075748374599,
+      "roughness_linear_mean": 0.929585415709,
+      "sha256": "9c68350a08d2081c524abb082426afacea5c834760d596eb190aa6b568c55506"
     },
     "wood_normal": {
-      "bytes": 38359,
+      "bytes": 20239,
+      "generation": "preserved unchanged by final correction",
       "path": "assets/textures/pbr_detail/wood_normal.png",
-      "sha256": "b1850979e58cffcd940f34f1347a3270f30784bb1661bfe0c998cb5c60dd6274"
+      "sha256": "b21c9425ac5d05104955b026ca8fbb7c1ad4b1ebea19676d60253f7a0e0db740"
     },
     "wood_orm": {
-      "bytes": 50217,
+      "bytes": 18416,
+      "generation": "preserved unchanged by final correction",
       "path": "assets/textures/pbr_detail/wood_orm.png",
-      "sha256": "5cdae3e5afb89c6c1a9570a41b91c9c62cf163a0144aa57118ffc2ac457ebc34"
+      "sha256": "8906aaee4615d697161185e4c6f69de64a1cc33012cdeda225a0cbc09f0312f5"
     }
   },
   "resolution": [
     256,
     256
   ],
-  "schema": "roady.pbr-detail.v1",
-  "sources": {
-    "concrete": {
-      "ao_floor": 228,
-      "archive": "concrete_wall_01_4k.zip",
-      "archive_sha256": "b213d01ec8781d784812d7f7cb8aeee3eda46f65469dd12ce6a8fa4dfd4b2113",
-      "entries": {
-        "ao": {
-          "path": "concrete_wall_01_4k/concrete_wall_01_ambient_occlusion_4k.png",
-          "sha256": "ff1b4276ea64834f3fd25df7ff557a5efdfce439171993680863c011800a2313"
-        },
-        "normal": {
-          "path": "concrete_wall_01_4k/concrete_wall_01_normal_gl_4k.png",
-          "sha256": "ea6b62efe64b13cd175a385a695b62fdf4dd4e46edbdf109155d437cc1d3b637"
-        },
-        "roughness": {
-          "path": "concrete_wall_01_4k/concrete_wall_01_roughness_4k.png",
-          "sha256": "f14d8e9aebc44f10cd7642843578b98407492cb4f0105bed1a82c2bccfaa1a0a"
-        }
-      },
-      "normal_strength": 0.32,
-      "roughness_floor": 210
-    },
-    "grass": {
-      "ao_floor": 232,
-      "archive": "whispy-grass-meadow-bl.zip",
-      "archive_sha256": "b6b34b9b1a7e4e60fb54832975cbb7b364e6c66736995eeb8f020ccdfee57821",
-      "entries": {
-        "ao": {
-          "path": "whispy-grass-meadow-bl/wispy-grass-meadow_ao.png",
-          "sha256": "2b2c706b96ac3cc72b8d2b2796e36afd84928a44dc01a64418227c531faa1f9d"
-        },
-        "normal": {
-          "path": "whispy-grass-meadow-bl/wispy-grass-meadow_normal-ogl.png",
-          "sha256": "ff88422ed70bbe3299e956cd98025bc207a6f77b05459ec016a09c6e59b7fae7"
-        },
-        "roughness": {
-          "path": "whispy-grass-meadow-bl/wispy-grass-meadow_roughness.png",
-          "sha256": "39b811cf934d66fa96aec7a932c6a3cc48d4849c0f14fb1aded3dfd7a2058f46"
-        }
-      },
-      "normal_strength": 0.22,
-      "roughness_floor": 220
-    },
-    "plastic": {
-      "ao_floor": 232,
-      "archive": "scuffed-plastic-1-bl.zip",
-      "archive_sha256": "5b8953bcbc5d016c36c5c412a2c78cc44b465ed07ab7e5cd9399a5ee1036cb1e",
-      "entries": {
-        "ao": {
-          "path": "scuffed-plastic-1-bl/scuffed-plastic-ao.png",
-          "sha256": "cb98672f2811142893186fde2e164c36ae7922ffb431b25922654d6daa7b7774"
-        },
-        "normal": {
-          "path": "scuffed-plastic-1-bl/scuffed-plastic-normal.png",
-          "sha256": "debb5963154a50d0816c720d8f53e062098341cc84cb36aff6540a540c7ede7d"
-        },
-        "roughness": {
-          "path": "scuffed-plastic-1-bl/scuffed-plastic-rough.png",
-          "sha256": "f820ee86c6dbc1196640a62ea4b55e3acfb11ce99de44719c6e75bdb8b1ded44"
-        }
-      },
-      "normal_strength": 0.2,
-      "roughness_floor": 205
-    },
-    "soil": {
-      "ao_floor": 232,
-      "recovery": "Pillow LOAD_TRUNCATED_IMAGES=true; complete 4096x4096 RGB decoded",
-      "roughness_floor": 210,
-      "source": "Smudges01_4K.png",
-      "source_sha256": "2fb6c8f6490fc3f77ebaebc23942f5ea9022d96ba9b778b09ea6e82db14ebbed",
-      "tiling": "128px Lanczos sample mirrored in both axes into a seamless 256px tile"
-    },
-    "wood": {
-      "ao_floor": 228,
-      "archive": "wood_01_4k.zip",
-      "archive_sha256": "96d07abedfe1fbab86cf0a8918108a42e8e868a73c3938d7373f694acda35e7c",
-      "entries": {
-        "ao": {
-          "path": "wood_01_4k/wood_01_ambient_occlusion_4k.png",
-          "sha256": "3579176b49f251afe915c58704a982e15d88862548c06fab0577c368160fef7b"
-        },
-        "normal": {
-          "path": "wood_01_4k/wood_01_normal_gl_4k.png",
-          "sha256": "715bb11f110d4820bbdd43ecac63f799fcb320aba61f242d5953fb295c3dc956"
-        },
-        "roughness": {
-          "path": "wood_01_4k/wood_01_roughness_4k.png",
-          "sha256": "1d4753a115e92c11d065df6b8cbcb5b1cf1692a601304cc9e7c117b9264239f2"
-        }
-      },
-      "normal_strength": 0.27,
-      "roughness_floor": 205
-    }
-  }
+  "schema": "roady.pbr-detail.v5"
 }

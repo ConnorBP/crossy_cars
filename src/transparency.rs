@@ -452,6 +452,92 @@ mod tests {
     }
 
     #[test]
+    fn scalar_emissive_standard_facade_fades_and_restores_exact_handle() {
+        let mut app = App::new();
+        app.init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<BuildingGhostMaterial>()
+            .add_systems(Update, fade_occluding_buildings);
+        let exact_emission = LinearRgba::new(2.0, 1.0, 0.5, 0.75);
+        let facade = app
+            .world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial {
+                emissive: exact_emission,
+                alpha_mode: AlphaMode::Blend,
+                ..default()
+            });
+        let ghost = app.world().resource::<BuildingGhostMaterial>().0.clone();
+        let camera = app
+            .world_mut()
+            .spawn((
+                Camera3d::default(),
+                GlobalTransform::from_xyz(10.0, 10.0, 10.0),
+            ))
+            .id();
+        app.world_mut().spawn((
+            Car {
+                speed: 0.0,
+                heading: 0.0,
+                drift: 0.0,
+            },
+            GlobalTransform::IDENTITY,
+        ));
+        let building = app
+            .world_mut()
+            .spawn((
+                Building,
+                Collider {
+                    half_x: 1.0,
+                    half_z: 1.0,
+                },
+                BuildingVisualProfile {
+                    kind: BuildingAssetKind::Apartment,
+                    height: 8.55,
+                },
+                GlobalTransform::from_xyz(5.0, 0.0, 5.0),
+            ))
+            .id();
+        let facade_entity = app
+            .world_mut()
+            .spawn((
+                Mesh3d::default(),
+                MeshMaterial3d(facade.clone()),
+                Aabb::from_min_max(Vec3::splat(-1.0), Vec3::splat(1.0)),
+                GlobalTransform::from_xyz(5.0, 4.0, 5.0),
+            ))
+            .id();
+        app.world_mut()
+            .entity_mut(building)
+            .add_child(facade_entity);
+
+        app.update();
+        assert_eq!(
+            app.world()
+                .get::<MeshMaterial3d<StandardMaterial>>(facade_entity)
+                .unwrap()
+                .0,
+            ghost
+        );
+        app.world_mut().despawn(camera);
+        app.update();
+        assert_eq!(
+            app.world()
+                .get::<MeshMaterial3d<StandardMaterial>>(facade_entity)
+                .unwrap()
+                .0,
+            facade
+        );
+        assert_eq!(
+            app.world()
+                .resource::<Assets<StandardMaterial>>()
+                .get(&facade)
+                .unwrap()
+                .emissive,
+            exact_emission
+        );
+    }
+
+    #[test]
     fn tall_box_between_camera_and_car_occludes() {
         let camera = Vec3::new(10.0, 10.0, 10.0);
         let car = Vec3::ZERO;

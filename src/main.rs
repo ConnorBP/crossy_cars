@@ -12,10 +12,12 @@ mod game;
 mod health;
 mod leaderboard;
 mod menu;
+mod microtexture_review;
 mod minimap;
 mod modifiers;
 mod objectives;
 mod palette;
+mod pbr_detail_constants;
 mod persist;
 mod pickups;
 mod readiness;
@@ -49,6 +51,7 @@ use game::GamePlugin;
 use health::HealthPlugin;
 use leaderboard::LeaderboardPlugin;
 use menu::MenuPlugin;
+use microtexture_review::MicrotextureReviewPlugin;
 use minimap::MinimapPlugin;
 use modifiers::ModifiersPlugin;
 use objectives::ObjectivesPlugin;
@@ -108,20 +111,28 @@ fn pond_review_requested() -> bool {
     query_flag_requested("pond_review", "ROADY_POND_REVIEW")
 }
 
+/// Exact opt-in only. A normal URL contains no microtexture review marker.
+fn microtexture_review_requested() -> bool {
+    query_flag_requested("microtexture_review", "ROADY_MICROTEXTURE_REVIEW")
+}
+
 fn pond_review_reduced_motion() -> bool {
     !query_flag_requested("pond_motion", "ROADY_POND_REVIEW_MOTION")
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum StartupMode {
+pub(crate) enum StartupMode {
     Production,
+    MicrotextureReview,
     CarReview,
     WorldReview,
     PondReview,
 }
 
-fn startup_mode(pond: bool, world: bool, car: bool) -> StartupMode {
-    if pond {
+pub(crate) fn startup_mode(microtexture: bool, pond: bool, world: bool, car: bool) -> StartupMode {
+    if microtexture {
+        StartupMode::MicrotextureReview
+    } else if pond {
         StartupMode::PondReview
     } else if world {
         StartupMode::WorldReview
@@ -134,10 +145,12 @@ fn startup_mode(pond: bool, world: bool, car: bool) -> StartupMode {
 
 fn main() {
     let mode = startup_mode(
+        microtexture_review_requested(),
         pond_review_requested(),
         world_review_requested(),
         car_review_requested(),
     );
+    let microtexture_review = mode == StartupMode::MicrotextureReview;
     let pond_review = mode == StartupMode::PondReview;
     let world_review = mode == StartupMode::WorldReview;
     let car_review = mode == StartupMode::CarReview;
@@ -171,6 +184,20 @@ fn main() {
             brightness: 40.0,
             ..default()
         });
+
+    if microtexture_review {
+        // One deterministic A/B tableau, with no game state, gameplay, UI,
+        // audio, persistence, leaderboard, or network plugins installed.
+        app.insert_resource(ClearColor(Color::srgb(0.095, 0.10, 0.11)))
+            .insert_resource(GlobalAmbientLight {
+                color: Color::WHITE,
+                brightness: 90.0,
+                ..default()
+            })
+            .add_plugins((TexturesPlugin, ToyShadingPlugin, MicrotextureReviewPlugin));
+        app.run();
+        return;
+    }
 
     if pond_review {
         // Static review-only tableau. Production gameplay, game state, score,
@@ -290,10 +317,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn review_flag_precedence_is_pond_then_world_then_car() {
-        assert_eq!(startup_mode(true, true, true), StartupMode::PondReview);
-        assert_eq!(startup_mode(false, true, true), StartupMode::WorldReview);
-        assert_eq!(startup_mode(false, false, true), StartupMode::CarReview);
-        assert_eq!(startup_mode(false, false, false), StartupMode::Production);
+    fn review_flag_precedence_is_microtexture_then_pond_world_car() {
+        assert_eq!(
+            startup_mode(true, true, true, true),
+            StartupMode::MicrotextureReview
+        );
+        assert_eq!(
+            startup_mode(false, true, true, true),
+            StartupMode::PondReview
+        );
+        assert_eq!(
+            startup_mode(false, false, true, true),
+            StartupMode::WorldReview
+        );
+        assert_eq!(
+            startup_mode(false, false, false, true),
+            StartupMode::CarReview
+        );
+        assert_eq!(
+            startup_mode(false, false, false, false),
+            StartupMode::Production
+        );
     }
 }

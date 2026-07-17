@@ -1,76 +1,47 @@
 #!/usr/bin/env python3
-"""Build Roady's tiny toy-town PBR detail library from free-use source maps.
+"""Build Roady's deterministic seamless PBR microdetail maps.
 
-Reads selected entries directly from the user's source ZIPs, attenuates normal
-relief, packs AO/roughness/metallic channels, and writes only 256px derivatives.
-The original 4K maps are never copied into the repository.
+Color multipliers and the regenerated grass/soil data maps are source-free,
+fixed-seed, toroidal value noise.  The audited plastic, concrete and wood data
+maps are intentionally left byte-for-byte unchanged by this correction.
 """
 from __future__ import annotations
 
 import hashlib
 import json
 import math
-from dataclasses import dataclass
-from io import BytesIO
+import random
 from pathlib import Path
-from zipfile import ZipFile
 
-from PIL import Image, ImageFile, ImageOps
+from PIL import Image
 
 SIZE = 256
-ROOT = Path(r"E:/DEVELOPER/PBR_MATERIALS")
 OUT = Path(__file__).resolve().parents[1] / "assets" / "textures" / "pbr_detail"
 MANIFEST = OUT / "manifest.json"
+CONSTANTS = Path(__file__).resolve().parents[1] / "src" / "pbr_detail_constants.rs"
+CYCLES = (24, 48)
+OCTAVE_WEIGHTS = (0.7, 0.3)
+REPEAT = 2
+NORMAL_LENGTH_TOLERANCE = 0.01
+NORMAL_AMPLITUDE_CEILING = 0.035
 
+SEEDS = {
+    "concrete_albedo": 0xC011C0DE,
+    "foliage_albedo": 0xF011A6E,
+    "traffic_paint_albedo": 0x7AFF1C,
+    "traffic_ao": 0x7A0A0,
+    "traffic_roughness": 0x7A0B0,
+    "grass_height": 0x6A455,
+    "grass_ao": 0x6A456,
+    "grass_roughness": 0x6A457,
+    "soil_ao": 0x5011A0,
+    "soil_roughness": 0x5011B0,
+}
 
-@dataclass(frozen=True)
-class Family:
-    archive: str
-    normal: str
-    roughness: str
-    ao: str
-    normal_strength: float
-    roughness_floor: int
-    ao_floor: int
-
-
-FAMILIES = {
-    "plastic": Family(
-        "scuffed-plastic-1-bl.zip",
-        "scuffed-plastic-1-bl/scuffed-plastic-normal.png",
-        "scuffed-plastic-1-bl/scuffed-plastic-rough.png",
-        "scuffed-plastic-1-bl/scuffed-plastic-ao.png",
-        0.20,
-        205,
-        232,
-    ),
-    "concrete": Family(
-        "concrete_wall_01_4k.zip",
-        "concrete_wall_01_4k/concrete_wall_01_normal_gl_4k.png",
-        "concrete_wall_01_4k/concrete_wall_01_roughness_4k.png",
-        "concrete_wall_01_4k/concrete_wall_01_ambient_occlusion_4k.png",
-        0.32,
-        210,
-        228,
-    ),
-    "wood": Family(
-        "wood_01_4k.zip",
-        "wood_01_4k/wood_01_normal_gl_4k.png",
-        "wood_01_4k/wood_01_roughness_4k.png",
-        "wood_01_4k/wood_01_ambient_occlusion_4k.png",
-        0.27,
-        205,
-        228,
-    ),
-    "grass": Family(
-        "whispy-grass-meadow-bl.zip",
-        "whispy-grass-meadow-bl/wispy-grass-meadow_normal-ogl.png",
-        "whispy-grass-meadow-bl/wispy-grass-meadow_roughness.png",
-        "whispy-grass-meadow-bl/wispy-grass-meadow_ao.png",
-        0.22,
-        220,
-        232,
-    ),
+ALBEDO_RANGES = {
+    "concrete_albedo": (228, 255),
+    "foliage_albedo": (236, 255),
+    "traffic_paint_albedo": (232, 255),
 }
 
 
@@ -78,164 +49,268 @@ def sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def read_entry(archive: Path, entry: str) -> bytes:
-    with ZipFile(archive) as bundle:
-        return bundle.read(entry)
+def _smooth(value: float) -> float:
+    return value * value * (3.0 - 2.0 * value)
 
 
-def decode(data: bytes, *, recover_truncated: bool = False) -> Image.Image:
-    previous = ImageFile.LOAD_TRUNCATED_IMAGES
-    ImageFile.LOAD_TRUNCATED_IMAGES = recover_truncated
-    try:
-        image = Image.open(BytesIO(data))
-        image.load()
-        return image
-    finally:
-        ImageFile.LOAD_TRUNCATED_IMAGES = previous
+def _periodic_value_octave(cycles: int, seed: int) -> list[float]:
+    """Periodic value noise, D4-symmetrized to remove directional bias."""
+    rng = random.Random(seed)
+    lattice = [[rng.random() for _ in range(cycles)] for _ in range(cycles)]
 
+    def sample(px: float, py: float) -> float:
+        x0 = math.floor(px)
+        y0 = math.floor(py)
+        tx = _smooth(px - x0)
+        ty = _smooth(py - y0)
+        x0 %= cycles
+        y0 %= cycles
+        x1 = (x0 + 1) % cycles
+        y1 = (y0 + 1) % cycles
+        a = lattice[y0][x0] * (1.0 - tx) + lattice[y0][x1] * tx
+        b = lattice[y1][x0] * (1.0 - tx) + lattice[y1][x1] * tx
+        return a * (1.0 - ty) + b * ty
 
-def downscale(image: Image.Image, mode: str) -> Image.Image:
-    return image.convert(mode).resize((SIZE, SIZE), Image.Resampling.LANCZOS)
-
-
-def attenuated_normal(image: Image.Image, strength: float) -> Image.Image:
-    source = downscale(image, "RGB")
-    output = Image.new("RGBA", source.size)
-    pixels = []
-    for red, green, _blue in source.getdata():
-        x = (red / 127.5 - 1.0) * strength
-        y = (green / 127.5 - 1.0) * strength
-        z = math.sqrt(max(0.0, 1.0 - x * x - y * y))
-        pixels.append(
-            (
-                round((x * 0.5 + 0.5) * 255.0),
-                round((y * 0.5 + 0.5) * 255.0),
-                round((z * 0.5 + 0.5) * 255.0),
-                255,
+    values: list[float] = []
+    period = float(SIZE - 1)
+    for y in range(SIZE):
+        py = y * cycles / period
+        for x in range(SIZE):
+            px = x * cycles / period
+            # Averaging the four quarter-turn/reflection equivalents gives
+            # each fixed realization equal X/Y and diagonal statistics.
+            values.append(
+                (sample(px, py) + sample(py, px) + sample(-px, py) + sample(py, -px))
+                * 0.25
             )
-        )
-    output.putdata(pixels)
-    return output
+    return values
 
 
-def normalized_luminance(image: Image.Image) -> list[float]:
-    # Several 4K sources are 16-bit grayscale. Converting those directly to
-    # `L` clips values above 255 and produces an almost uniform white map.
-    # Resize in float space, then normalize the resulting sampled range.
-    sampled = image.convert("F").resize((SIZE, SIZE), Image.Resampling.LANCZOS)
-    values = list(sampled.getdata())
-    lo, hi = min(values), max(values)
-    span = max(1.0, hi - lo)
-    return [(value - lo) / span for value in values]
+def toroidal_isotropic_noise(seed: int) -> list[float]:
+    octaves = [
+        _periodic_value_octave(cycles, seed + index * 0x9E3779B1)
+        for index, cycles in enumerate(CYCLES)
+    ]
+    mixed = [
+        OCTAVE_WEIGHTS[0] * first + OCTAVE_WEIGHTS[1] * second
+        for first, second in zip(*octaves, strict=True)
+    ]
+    lo, hi = min(mixed), max(mixed)
+    span = hi - lo
+    assert span > 0.0
+    values = [(value - lo) / span for value in mixed]
+    # Integer endpoint coordinates already agree; assign them explicitly so
+    # PNG bytes at opposite edges and all four corners are exact.
+    for y in range(SIZE):
+        values[y * SIZE + SIZE - 1] = values[y * SIZE]
+    for x in range(SIZE):
+        values[(SIZE - 1) * SIZE + x] = values[x]
+    return values
 
 
-def packed_orm(ao: Image.Image, roughness: Image.Image, ao_floor: int, rough_floor: int) -> Image.Image:
-    ao_values = normalized_luminance(ao)
-    rough_values = normalized_luminance(roughness)
-    output = Image.new("RGBA", (SIZE, SIZE))
-    output.putdata(
-        [
-            (
-                round(ao_floor + value_ao * (255 - ao_floor)),
-                round(rough_floor + value_rough * (255 - rough_floor)),
-                255,
-                255,
-            )
-            for value_ao, value_rough in zip(ao_values, rough_values, strict=True)
-        ]
+def quantize(values: list[float], floor: int, ceiling: int = 255) -> list[int]:
+    result = [round(floor + value * (ceiling - floor)) for value in values]
+    assert min(result) == floor and max(result) == ceiling
+    return result
+
+
+def albedo_map(seed: int, floor: int) -> Image.Image:
+    values = quantize(toroidal_isotropic_noise(seed), floor)
+    image = Image.new("RGBA", (SIZE, SIZE))
+    image.putdata([(value, value, value, 255) for value in values])
+    return image
+
+
+def orm_map(ao_seed: int, roughness_seed: int, ao_floor: int, roughness_floor: int) -> Image.Image:
+    ao = quantize(toroidal_isotropic_noise(ao_seed), ao_floor)
+    roughness = quantize(toroidal_isotropic_noise(roughness_seed), roughness_floor)
+    image = Image.new("RGBA", (SIZE, SIZE))
+    image.putdata([(a, r, 255, 255) for a, r in zip(ao, roughness, strict=True)])
+    return image
+
+
+def encode_normal(nx: float, ny: float) -> tuple[int, int, int, int]:
+    inverse_length = 1.0 / math.sqrt(nx * nx + ny * ny + 1.0)
+    return (
+        round((nx * inverse_length * 0.5 + 0.5) * 255.0),
+        round((ny * inverse_length * 0.5 + 0.5) * 255.0),
+        round((inverse_length * 0.5 + 0.5) * 255.0),
+        255,
     )
-    return output
 
 
-def mirrored_tile(image: Image.Image) -> Image.Image:
-    """Make a seamless 256px tile from a recovered 128px source sample."""
-    sample = image.convert("L").resize((SIZE // 2, SIZE // 2), Image.Resampling.LANCZOS)
-    tile = Image.new("L", (SIZE, SIZE))
-    tile.paste(sample, (0, 0))
-    tile.paste(ImageOps.mirror(sample), (SIZE // 2, 0))
-    tile.paste(ImageOps.flip(sample), (0, SIZE // 2))
-    tile.paste(ImageOps.flip(ImageOps.mirror(sample)), (SIZE // 2, SIZE // 2))
-    return tile
+def normal_map(seed: int, max_slope: float) -> Image.Image:
+    height = toroidal_isotropic_noise(seed)
+    gradients: list[tuple[float, float]] = []
+    maximum = 0.0
+    period = SIZE - 1
+    for y in range(SIZE):
+        ym = (y - 1) % period
+        yp = (y + 1) % period
+        for x in range(SIZE):
+            xm = (x - 1) % period
+            xp = (x + 1) % period
+            dx = (height[y * SIZE + xp] - height[y * SIZE + xm]) * 0.5
+            dy = (height[yp * SIZE + x] - height[ym * SIZE + x]) * 0.5
+            gradients.append((dx, dy))
+            maximum = max(maximum, math.hypot(dx, dy))
+    scale = max_slope / maximum
+    slopes = [(-dx * scale, -dy * scale) for dx, dy in gradients]
+    for y in range(SIZE):
+        slopes[y * SIZE + SIZE - 1] = slopes[y * SIZE]
+    for x in range(SIZE):
+        slopes[(SIZE - 1) * SIZE + x] = slopes[x]
+    image = Image.new("RGBA", (SIZE, SIZE))
+    image.putdata([encode_normal(nx, ny) for nx, ny in slopes])
+    return image
 
 
-def soil_orm(smudge: Image.Image) -> Image.Image:
-    values = normalized_luminance(mirrored_tile(smudge))
-    output = Image.new("RGBA", (SIZE, SIZE))
-    output.putdata(
-        [
-            (
-                round(232 + value * 23),
-                round(210 + value * 45),
-                255,
-                255,
-            )
-            for value in values
-        ]
-    )
-    return output
+def srgb_to_linear(value: int) -> float:
+    encoded = value / 255.0
+    return encoded / 12.92 if encoded <= 0.04045 else ((encoded + 0.055) / 1.055) ** 2.4
+
+
+def decoded_linear_mean(image: Image.Image) -> float:
+    pixels = image.convert("RGBA").getdata()
+    return sum(srgb_to_linear(pixel[0]) for pixel in pixels) / (SIZE * SIZE)
+
+
+def linear_channel_mean(image: Image.Image, channel: int) -> float:
+    return sum(pixel[channel] / 255.0 for pixel in image.convert("RGBA").getdata()) / (SIZE * SIZE)
+
+
+def assert_exact_edges(image: Image.Image, label: str) -> None:
+    pixels = list(image.convert("RGBA").getdata())
+    for y in range(SIZE):
+        assert pixels[y * SIZE] == pixels[y * SIZE + SIZE - 1], f"{label}: horizontal seam {y}"
+    for x in range(SIZE):
+        assert pixels[x] == pixels[(SIZE - 1) * SIZE + x], f"{label}: vertical seam {x}"
+
+
+def assert_exact_channels(image: Image.Image, bounds: tuple[tuple[int, int], ...], label: str) -> None:
+    channels = tuple(zip(*image.convert("RGBA").getdata()))
+    actual = tuple((min(channel), max(channel)) for channel in channels)
+    assert actual == bounds, f"{label}: {actual}, expected {bounds}"
+
+
+def normal_metrics(image: Image.Image) -> dict[str, float]:
+    vectors = [tuple(channel / 127.5 - 1.0 for channel in pixel[:3]) for pixel in image.convert("RGBA").getdata()]
+    lengths = [math.sqrt(x * x + y * y + z * z) for x, y, z in vectors]
+    amplitudes = [math.hypot(x, y) for x, y, _ in vectors]
+    return {
+        "length_error_max": max(abs(length - 1.0) for length in lengths),
+        "amplitude_mean": sum(amplitudes) / len(amplitudes),
+        "amplitude_max": max(amplitudes),
+        "seam_max": 0.0,
+    }
 
 
 def save(image: Image.Image, name: str) -> dict[str, object]:
     path = OUT / name
     image.save(path, format="PNG", optimize=True, compress_level=9)
     data = path.read_bytes()
-    return {"path": path.relative_to(OUT.parents[2]).as_posix(), "bytes": len(data), "sha256": sha256(data)}
+    return {
+        "path": path.relative_to(OUT.parents[2]).as_posix(),
+        "bytes": len(data),
+        "sha256": sha256(data),
+    }
+
+
+def existing(name: str) -> dict[str, object]:
+    path = OUT / name
+    data = path.read_bytes()
+    return {
+        "path": path.relative_to(OUT.parents[2]).as_posix(),
+        "bytes": len(data),
+        "sha256": sha256(data),
+        "generation": "preserved unchanged by final correction",
+    }
+
+
+def write_constants(means: dict[str, float]) -> None:
+    text = """// @generated by tools/build_pbr_details.py; do not edit.\n\
+// Decoded means are derived from the checked-in PNG bytes.\n\n\
+pub(crate) const CONCRETE_ALBEDO_LINEAR_MEAN: f32 = {concrete:.12f};\n\
+pub(crate) const FOLIAGE_ALBEDO_LINEAR_MEAN: f32 = {foliage:.12f};\n\
+pub(crate) const TRAFFIC_PAINT_ALBEDO_LINEAR_MEAN: f32 = {traffic:.12f};\n\
+pub(crate) const TRAFFIC_PAINT_ROUGHNESS_LINEAR_MEAN: f32 = {roughness:.12f};\n\
+""".format(**means)
+    CONSTANTS.write_text(text, encoding="utf-8", newline="\n")
 
 
 def main() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
     outputs: dict[str, dict[str, object]] = {}
-    sources: dict[str, dict[str, object]] = {}
+    means: dict[str, float] = {}
 
-    for name, family in FAMILIES.items():
-        archive = ROOT / family.archive
-        archive_bytes = archive.read_bytes()
-        normal_bytes = read_entry(archive, family.normal)
-        roughness_bytes = read_entry(archive, family.roughness)
-        ao_bytes = read_entry(archive, family.ao)
-        normal = attenuated_normal(decode(normal_bytes), family.normal_strength)
-        orm = packed_orm(
-            decode(ao_bytes),
-            decode(roughness_bytes),
-            family.ao_floor,
-            family.roughness_floor,
-        )
-        outputs[f"{name}_normal"] = save(normal, f"{name}_normal.png")
-        outputs[f"{name}_orm"] = save(orm, f"{name}_orm.png")
-        sources[name] = {
-            "archive": family.archive,
-            "archive_sha256": sha256(archive_bytes),
-            "entries": {
-                "normal": {"path": family.normal, "sha256": sha256(normal_bytes)},
-                "roughness": {"path": family.roughness, "sha256": sha256(roughness_bytes)},
-                "ao": {"path": family.ao, "sha256": sha256(ao_bytes)},
-            },
-            "normal_strength": family.normal_strength,
-            "roughness_floor": family.roughness_floor,
-            "ao_floor": family.ao_floor,
+    for key, (floor, ceiling) in ALBEDO_RANGES.items():
+        image = albedo_map(SEEDS[key], floor)
+        assert_exact_edges(image, key)
+        assert_exact_channels(image, ((floor, ceiling),) * 3 + ((255, 255),), key)
+        mean = decoded_linear_mean(image)
+        constant_key = {"concrete_albedo": "concrete", "foliage_albedo": "foliage", "traffic_paint_albedo": "traffic"}[key]
+        means[constant_key] = mean
+        outputs[key] = {
+            **save(image, f"{key}.png"),
+            "decoded_linear_mean": round(mean, 12),
+            "compensation_reciprocal": round(1.0 / mean, 12),
         }
 
-    smudge_path = ROOT / "Smudges01_4K.png"
-    smudge_bytes = smudge_path.read_bytes()
-    smudge = decode(smudge_bytes, recover_truncated=True)
-    outputs["soil_orm"] = save(soil_orm(smudge), "soil_orm.png")
-    sources["soil"] = {
-        "source": smudge_path.name,
-        "source_sha256": sha256(smudge_bytes),
-        "recovery": "Pillow LOAD_TRUNCATED_IMAGES=true; complete 4096x4096 RGB decoded",
-        "tiling": "128px Lanczos sample mirrored in both axes into a seamless 256px tile",
-        "roughness_floor": 210,
-        "ao_floor": 232,
+    traffic_orm = orm_map(SEEDS["traffic_ao"], SEEDS["traffic_roughness"], 250, 220)
+    assert_exact_edges(traffic_orm, "traffic_paint_orm")
+    assert_exact_channels(traffic_orm, ((250, 255), (220, 255), (255, 255), (255, 255)), "traffic_paint_orm")
+    roughness_mean = linear_channel_mean(traffic_orm, 1)
+    means["roughness"] = roughness_mean
+    outputs["traffic_paint_orm"] = {
+        **save(traffic_orm, "traffic_paint_orm.png"),
+        "roughness_linear_mean": round(roughness_mean, 12),
+        "roughness_compensation_reciprocal": round(1.0 / roughness_mean, 12),
     }
 
+    grass_normal = normal_map(SEEDS["grass_height"], 0.024)
+    grass_metrics = normal_metrics(grass_normal)
+    assert_exact_edges(grass_normal, "grass_normal")
+    assert grass_metrics["length_error_max"] <= NORMAL_LENGTH_TOLERANCE
+    assert grass_metrics["amplitude_max"] <= NORMAL_AMPLITUDE_CEILING
+    outputs["grass_normal"] = {**save(grass_normal, "grass_normal.png"), "normal_validation": {key: round(value, 6) for key, value in grass_metrics.items()}}
+
+    grass_orm = orm_map(SEEDS["grass_ao"], SEEDS["grass_roughness"], 248, 238)
+    soil_orm = orm_map(SEEDS["soil_ao"], SEEDS["soil_roughness"], 246, 232)
+    for key, image, bounds in [
+        ("grass_orm", grass_orm, ((248, 255), (238, 255), (255, 255), (255, 255))),
+        ("soil_orm", soil_orm, ((246, 255), (232, 255), (255, 255), (255, 255))),
+    ]:
+        assert_exact_edges(image, key)
+        assert_exact_channels(image, bounds, key)
+        outputs[key] = save(image, f"{key}.png")
+
+    for key in ("plastic_normal", "plastic_orm", "concrete_normal", "concrete_orm", "wood_normal", "wood_orm"):
+        outputs[key] = existing(f"{key}.png")
+
+    write_constants(means)
     manifest = {
-        "schema": "roady.pbr-detail.v1",
-        "license": "User-confirmed free to use",
+        "schema": "roady.pbr-detail.v5",
+        "license": "Source-free generated noise; preserved legacy derivatives retain prior user-confirmed free-use provenance",
         "resolution": [SIZE, SIZE],
-        "color_space": "linear",
-        "orm_channels": {"r": "ambient occlusion", "g": "roughness multiplier", "b": "metallic multiplier (255)", "a": 255},
+        "color_spaces": {"albedo": "sRGB", "normal_and_orm": "linear"},
         "generator": Path(__file__).name,
-        "sources": sources,
+        "generation": {
+            "algorithm": "fixed-seed toroidal isotropic D4-symmetrized value noise",
+            "cycles": list(CYCLES),
+            "weights": list(OCTAVE_WEIGHTS),
+            "runtime_repeat": REPEAT,
+            "seam": "opposite RGBA edges and corners are byte-exact",
+            "seeds": SEEDS,
+        },
+        "orm_channels": {"r": "ambient occlusion multiplier", "g": "roughness multiplier", "b": "metallic multiplier (255)", "a": 255},
+        "families": {
+            "concrete_lightstone": {"albedo_sRGB": [228, 255], "repeat": 2, "facade_maps": ["albedo", "orm"], "facade_normal": None},
+            "foliage": {"albedo_sRGB": [236, 255], "repeat": 2},
+            "traffic_paint": {"albedo_sRGB": [232, 255], "repeat": 2, "orm_ranges": {"ao": [250, 255], "roughness": [220, 255], "metallic": [255, 255], "alpha": [255, 255]}, "normal": "plastic_normal.png, requested/audited strength 0.035 (8-bit decoded amplitude <= 0.0356)"},
+            "grass": {"normal_amplitude_max": round(grass_metrics["amplitude_max"], 6), "normal_ceiling": 0.035, "orm_ranges": {"ao": [248, 255], "roughness": [238, 255]}},
+            "soil": {"orm_ranges": {"ao": [246, 255], "roughness": [232, 255]}},
+            "wood_and_roofs": "unchanged",
+        },
         "outputs": outputs,
     }
     MANIFEST.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n")

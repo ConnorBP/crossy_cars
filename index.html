@@ -499,7 +499,8 @@
           return root.getAttribute("data-roady-ready") === "playable"
             || root.getAttribute("data-roady-world-review-ready") === "true"
             || root.getAttribute("data-roady-car-review-ready") === "true"
-            || root.getAttribute("data-roady-pond-review-ready") === "true";
+            || root.getAttribute("data-roady-pond-review-ready") === "true"
+            || root.getAttribute("data-roady-microtexture-review-ready") === "true";
         }
 
         function checkPlayable() {
@@ -548,6 +549,7 @@
             "data-roady-world-review-ready",
             "data-roady-car-review-ready",
             "data-roady-pond-review-ready",
+            "data-roady-microtexture-review-ready",
           ],
           childList: true,
           subtree: true,
