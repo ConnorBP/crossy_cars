@@ -54,6 +54,27 @@ jobs:
           # not an acceptable replacement for a deployed disabled Worker probe.
           artifacts=$(gh api "repos/$REPOSITORY/actions/runs/$WORKER_RUN_ID/artifacts")
           jq -e --arg name "worker-production-evidence-$TESTED_SHA-$WORKER_RUN_ID" '.artifacts[] | select(.name==$name and .expired==false)' <<<"$artifacts" >/dev/null
+      - name: Download exact Worker deployment evidence
+        uses: actions/download-artifact@v4
+        with:
+          name: worker-production-evidence-${{ env.TESTED_SHA }}-${{ env.WORKER_RUN_ID }}
+          path: worker-evidence
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ env.WORKER_RUN_ID }}
+      - name: Validate Worker evidence and select matching capability probe
+        run: |
+          set -euo pipefail
+          evidence=worker-evidence/production-gate-evidence.json
+          jq -e --arg sha "$TESTED_SHA" --arg run "$WORKER_RUN_ID" '
+            .schema == "roady.production-gates.v1" and
+            .testedCommitSha == $sha and
+            .workflowRunId == $run and
+            .conclusion == "success" and
+            (.enableRequested | type == "boolean")
+          ' "$evidence" >/dev/null
+          enabled=$(jq -r .enableRequested "$evidence")
+          echo "WORKER_RANKED_ENABLED=$enabled" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
         with:
           ref: ${{ env.TESTED_SHA }}
@@ -103,7 +124,12 @@ jobs:
         working-directory: leaderboard
         env:
           EXPECTED_COMMIT_SHA: ${{ env.TESTED_SHA }}
-        run: node scripts/verify-production.mjs
+        run: |
+          if [ "$WORKER_RANKED_ENABLED" = true ]; then
+            node scripts/verify-production.mjs --enabled
+          else
+            node scripts/verify-production.mjs
+          fi
       - name: Deploy to Cloudflare Pages
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PAGES_API_TOKEN }}
