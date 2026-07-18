@@ -9,8 +9,6 @@ use bevy::{
         touch::Touches,
     },
     prelude::*,
-    render::render_resource::AsBindGroup,
-    shader::ShaderRef,
     window::PrimaryWindow,
 };
 
@@ -36,68 +34,6 @@ const TIPS: [&str; 5] = [
     "Space brakes, then reverses when stopped",
     "Hold the handbrake while steering to drift",
 ];
-
-#[derive(AsBindGroup, Asset, TypePath, Debug, Clone)]
-pub struct HazardStripeMaterial {
-    #[uniform(0)]
-    pub color_a: Vec4,
-    #[uniform(1)]
-    pub color_b: Vec4,
-    #[uniform(2)]
-    pub params: Vec4,
-}
-impl UiMaterial for HazardStripeMaterial {
-    fn fragment_shader() -> ShaderRef {
-        "shaders/hazard_stripes.wgsl".into()
-    }
-}
-
-#[derive(AsBindGroup, Asset, TypePath, Debug, Clone)]
-pub struct GlowButtonMaterial {
-    #[uniform(0)]
-    pub color_fill: Vec4,
-    #[uniform(1)]
-    pub color_glow: Vec4,
-    #[uniform(2)]
-    pub params: Vec4,
-    #[uniform(3)]
-    pub params2: Vec4,
-}
-impl UiMaterial for GlowButtonMaterial {
-    fn fragment_shader() -> ShaderRef {
-        "shaders/glow_button.wgsl".into()
-    }
-}
-
-#[derive(AsBindGroup, Asset, TypePath, Debug, Clone)]
-pub struct MenuCardMaterial {
-    #[uniform(0)]
-    pub color_top: Vec4,
-    #[uniform(1)]
-    pub color_bottom: Vec4,
-    #[uniform(2)]
-    pub color_accent: Vec4,
-    #[uniform(3)]
-    pub params: Vec4,
-}
-impl UiMaterial for MenuCardMaterial {
-    fn fragment_shader() -> ShaderRef {
-        "shaders/menu_card.wgsl".into()
-    }
-}
-
-#[derive(AsBindGroup, Asset, TypePath, Debug, Clone)]
-pub struct VignetteMaterial {
-    #[uniform(0)]
-    pub color: Vec4,
-    #[uniform(1)]
-    pub params: Vec4,
-}
-impl UiMaterial for VignetteMaterial {
-    fn fragment_shader() -> ShaderRef {
-        "shaders/menu_vignette.wgsl".into()
-    }
-}
 
 #[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum MenuLayout {
@@ -128,9 +64,33 @@ struct MenuMetrics {
 #[derive(Resource, Default)]
 struct MenuBuiltAt(f32);
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MenuBuildKey {
+    layout: MenuLayout,
+    viewport_width: i32,
+    viewport_height: i32,
+    selected: ModifierKind,
+    focus_index: usize,
+    ranked_available: bool,
+    drive_presentation: DrivePresentation,
+    reduced_motion: bool,
+}
+
+#[derive(Resource, Default)]
+struct LastMenuBuildKey(Option<MenuBuildKey>);
+
 #[derive(SystemParam)]
 struct MenuRecords<'w> {
     products: Res<'w, ProductBests>,
+}
+/// Layout, metrics, and build-debounce state owned by the responsive menu
+/// builder, grouped so spawn/rebuild share one mutable resource read.
+#[derive(SystemParam)]
+struct MenuBuildState<'w> {
+    layout: ResMut<'w, MenuLayout>,
+    metrics: ResMut<'w, MenuMetrics>,
+    built_at: ResMut<'w, MenuBuiltAt>,
+    last_build_key: ResMut<'w, LastMenuBuildKey>,
 }
 #[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
 struct ProductFocus {
@@ -255,6 +215,37 @@ fn drive_presentation(focus: ProductFocus, ranked: &RankedV3Client) -> DrivePres
     }
 }
 
+fn menu_build_key(
+    layout: MenuLayout,
+    width: f32,
+    height: f32,
+    selected: ModifierKind,
+    focus: ProductFocus,
+    ranked: &RankedV3Client,
+    reduced_motion: bool,
+) -> MenuBuildKey {
+    let ranked_available = ranked.ranked_available();
+    MenuBuildKey {
+        layout,
+        viewport_width: width.round() as i32,
+        viewport_height: height.round() as i32,
+        selected,
+        focus_index: focus.index,
+        ranked_available,
+        drive_presentation: drive_presentation(focus, ranked),
+        reduced_motion,
+    }
+}
+
+fn menu_rebuild_required(
+    roots_missing: bool,
+    previous: &MenuBuildKey,
+    current: &MenuBuildKey,
+    product_bests_changed: bool,
+) -> bool {
+    roots_missing || previous != current || product_bests_changed
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct MenuRect {
     left: f32,
@@ -318,6 +309,26 @@ fn drive_rect(layout: MenuLayout, width: f32, height: f32) -> MenuRect {
     }
 }
 
+#[cfg(test)]
+fn short_title_rect(width: f32) -> MenuRect {
+    MenuRect {
+        left: (width - 290.0) * 0.5,
+        top: 68.0,
+        width: 290.0,
+        height: 50.0,
+    }
+}
+
+#[cfg(test)]
+fn short_carousel_rect(width: f32) -> MenuRect {
+    MenuRect {
+        left: (width - 690.0) * 0.5,
+        top: 160.0,
+        width: 690.0,
+        height: 90.0,
+    }
+}
+
 fn short_product_grid_rect(width: f32) -> MenuRect {
     MenuRect {
         left: (width - 500.0) * 0.5,
@@ -330,41 +341,33 @@ fn short_product_grid_rect(width: f32) -> MenuRect {
 pub struct MenuPlugin;
 impl Plugin for MenuPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins((
-            UiMaterialPlugin::<HazardStripeMaterial>::default(),
-            UiMaterialPlugin::<GlowButtonMaterial>::default(),
-            UiMaterialPlugin::<MenuCardMaterial>::default(),
-            UiMaterialPlugin::<VignetteMaterial>::default(),
-        ))
-        .init_resource::<MenuLayout>()
-        .init_resource::<MenuMetrics>()
-        .init_resource::<MenuBuiltAt>()
-        .init_resource::<ProductFocus>()
-        .init_resource::<TipState>()
-        .init_resource::<SwipeStartSelection>()
-        .add_systems(OnEnter(GameState::Menu), spawn_menu)
-        .add_systems(OnExit(GameState::Menu), despawn_menu)
-        .add_systems(
-            Update,
-            (
-                sync_product_default,
-                rebuild_responsive_menu,
-                menu_keyboard,
-                menu_swipe,
-                menu_buttons,
-                menu_touch_actions,
-                (animate_menu_geometry, animate_menu_materials),
-            )
-                .chain()
-                .run_if(in_state(GameState::Menu))
-                .run_if(settings_closed),
-        );
+        app.init_resource::<MenuLayout>()
+            .init_resource::<MenuMetrics>()
+            .init_resource::<MenuBuiltAt>()
+            .init_resource::<LastMenuBuildKey>()
+            .init_resource::<ProductFocus>()
+            .init_resource::<TipState>()
+            .init_resource::<SwipeStartSelection>()
+            .add_systems(OnEnter(GameState::Menu), spawn_menu)
+            .add_systems(OnExit(GameState::Menu), despawn_menu)
+            .add_systems(
+                Update,
+                (
+                    sync_product_default,
+                    rebuild_responsive_menu,
+                    menu_keyboard,
+                    menu_swipe,
+                    menu_buttons,
+                    menu_touch_actions,
+                    (animate_menu_geometry, animate_menu_interactions),
+                )
+                    .chain()
+                    .run_if(in_state(GameState::Menu))
+                    .run_if(settings_closed),
+            );
     }
 }
 
-fn to_vec4(color: Color) -> Vec4 {
-    color.to_linear().to_vec4()
-}
 fn yellow() -> Color {
     Color::srgb(1.0, 0.83, 0.10)
 }
@@ -420,9 +423,13 @@ fn cycle_selection(selected: &mut SelectedModifier, delta: i32) {
 }
 
 fn sync_product_default(ranked: Res<RankedV3Client>, mut focus: ResMut<ProductFocus>) {
-    // Use the admission resource's exact capability bit as well as Ready;
-    // Starting/Started may retain admission but cannot be selected twice.
-    focus.set_default_for_gate(ranked.capability_admitted() && ranked.ranked_available());
+    // Read before mutably dereferencing the resource. Bevy marks ResMut changed
+    // on DerefMut, so a no-op write here used to force a full menu rebuild on
+    // every frame and made its buttons impossible to hold or click.
+    let admitted = ranked.capability_admitted() && ranked.ranked_available();
+    if focus.capability_admitted != admitted {
+        focus.set_default_for_gate(admitted);
+    }
 }
 
 fn activate_product(
@@ -557,6 +564,8 @@ fn resolve_activation_action(
 
 fn menu_buttons(
     interactions: Query<(&Interaction, &MenuAction), Changed<Interaction>>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    touches: Res<Touches>,
     mut selected: ResMut<SelectedModifier>,
     mut focus: ResMut<ProductFocus>,
     mut mode: ResMut<SelectedGameMode>,
@@ -564,6 +573,15 @@ fn menu_buttons(
     mut restart: ResMut<RestartRequested>,
     mut next: ResMut<NextState<GameState>>,
 ) {
+    // A visible-state change rebuilds the menu once on the next frame. A new
+    // button spawned beneath a pointer that is still held can also enter
+    // Interaction::Pressed, so accept only the physical press edge. This makes
+    // a long press exactly one action instead of cycling every rebuild frame.
+    let physical_press =
+        mouse.just_pressed(MouseButton::Left) || touches.iter_just_pressed().next().is_some();
+    if !physical_press {
+        return;
+    }
     for (interaction, action) in &interactions {
         if *interaction != Interaction::Pressed {
             continue;
@@ -669,35 +687,33 @@ fn spawn_menu(
     focus: Res<ProductFocus>,
     ranked: Res<RankedV3Client>,
     time: Res<Time>,
-    mut layout: ResMut<MenuLayout>,
-    mut metrics: ResMut<MenuMetrics>,
-    mut built_at: ResMut<MenuBuiltAt>,
-    mut stripe_materials: ResMut<Assets<HazardStripeMaterial>>,
-    mut glow_materials: ResMut<Assets<GlowButtonMaterial>>,
-    mut card_materials: ResMut<Assets<MenuCardMaterial>>,
-    mut vignette_materials: ResMut<Assets<VignetteMaterial>>,
+    mut build: MenuBuildState,
 ) {
     let (width, height) = windows
         .single()
         .map(|window| (window.width(), window.height()))
         .unwrap_or((1280.0, 800.0));
-    *layout = MenuLayout::classify(width, height);
-    built_at.0 = time.elapsed_secs();
-    build_menu(
-        &mut commands,
-        *layout,
+    *build.layout = MenuLayout::classify(width, height);
+    build.built_at.0 = time.elapsed_secs();
+    build.last_build_key.0 = Some(menu_build_key(
+        *build.layout,
         width,
         height,
-        &records.products,
-        &settings,
         selected.0,
         *focus,
         &ranked,
-        &mut metrics,
-        &mut stripe_materials,
-        &mut glow_materials,
-        &mut card_materials,
-        &mut vignette_materials,
+        settings.reduced_motion,
+    ));
+    build_menu(
+        &mut commands,
+        *build.layout,
+        width,
+        height,
+        &records.products,
+        selected.0,
+        *focus,
+        &ranked,
+        &mut build.metrics,
     );
 }
 
@@ -712,45 +728,46 @@ fn rebuild_responsive_menu(
     focus: Res<ProductFocus>,
     ranked: Res<RankedV3Client>,
     time: Res<Time>,
-    mut layout: ResMut<MenuLayout>,
-    mut metrics: ResMut<MenuMetrics>,
-    mut built_at: ResMut<MenuBuiltAt>,
-    mut stripe_materials: ResMut<Assets<HazardStripeMaterial>>,
-    mut glow_materials: ResMut<Assets<GlowButtonMaterial>>,
-    mut card_materials: ResMut<Assets<MenuCardMaterial>>,
-    mut vignette_materials: ResMut<Assets<VignetteMaterial>>,
+    mut build: MenuBuildState,
 ) {
     let Ok(window) = windows.single() else { return };
     let next_layout = MenuLayout::classify(window.width(), window.height());
-    let needs_rebuild = roots.is_empty()
-        || *layout != next_layout
-        || records.products.is_changed()
-        || settings.is_changed()
-        || focus.is_changed()
-        || ranked.is_changed();
+    let next_key = menu_build_key(
+        next_layout,
+        window.width(),
+        window.height(),
+        selected.0,
+        *focus,
+        &ranked,
+        settings.reduced_motion,
+    );
+    let needs_rebuild = build.last_build_key.0.as_ref().is_none_or(|previous| {
+        menu_rebuild_required(
+            roots.is_empty(),
+            previous,
+            &next_key,
+            records.products.is_changed(),
+        )
+    });
     if !needs_rebuild {
         return;
     }
     for entity in &roots {
         commands.entity(entity).despawn();
     }
-    *layout = next_layout;
-    built_at.0 = time.elapsed_secs();
+    *build.layout = next_layout;
+    build.built_at.0 = time.elapsed_secs();
+    build.last_build_key.0 = Some(next_key);
     build_menu(
         &mut commands,
         next_layout,
         window.width(),
         window.height(),
         &records.products,
-        &settings,
         selected.0,
         *focus,
         &ranked,
-        &mut metrics,
-        &mut stripe_materials,
-        &mut glow_materials,
-        &mut card_materials,
-        &mut vignette_materials,
+        &mut build.metrics,
     );
 }
 
@@ -804,15 +821,10 @@ fn build_menu(
     window_width: f32,
     window_height: f32,
     product_bests: &ProductBests,
-    settings: &Settings,
     selected: ModifierKind,
     focus: ProductFocus,
     ranked: &RankedV3Client,
     metrics: &mut MenuMetrics,
-    stripe_materials: &mut Assets<HazardStripeMaterial>,
-    glow_materials: &mut Assets<GlowButtonMaterial>,
-    card_materials: &mut Assets<MenuCardMaterial>,
-    vignette_materials: &mut Assets<VignetteMaterial>,
 ) {
     let short = layout == MenuLayout::ShortLandscape;
     let portrait = layout == MenuLayout::Portrait;
@@ -839,7 +851,6 @@ fn build_menu(
         card_width,
         gap,
     };
-    let reduced = f32::from(settings.reduced_motion);
     let (focused_competition, focused_conduct) = focus.product();
     let earned: usize = if focused_competition == Competition::Casual {
         CONDITIONS
@@ -871,10 +882,7 @@ fn build_menu(
             ..default()
         },
         Pickable::IGNORE,
-        MaterialNode(vignette_materials.add(VignetteMaterial {
-            color: to_vec4(Color::srgb(0.02, 0.02, 0.04)),
-            params: Vec4::new(0.0, 0.84, 0.48, reduced),
-        })),
+        BackgroundColor(Color::srgba(0.02, 0.02, 0.04, 0.48)),
         GlobalZIndex(1),
     ));
 
@@ -938,6 +946,12 @@ fn build_menu(
                 76.0
             };
             root.spawn(Node {
+                position_type: if short {
+                    PositionType::Absolute
+                } else {
+                    PositionType::Relative
+                },
+                top: if short { px(68.0) } else { Val::Auto },
                 flex_direction: FlexDirection::Column,
                 align_items: AlignItems::Center,
                 row_gap: px(if short { 2.0 } else { 5.0 }),
@@ -985,18 +999,11 @@ fn build_menu(
                             520.0
                         }),
                         height: px(if short { 7.0 } else { 11.0 }),
+                        border: UiRect::vertical(px(2.0)),
                         ..default()
                     },
-                    MaterialNode(stripe_materials.add(HazardStripeMaterial {
-                        color_a: to_vec4(yellow()),
-                        color_b: to_vec4(ink()),
-                        params: Vec4::new(
-                            0.0,
-                            14.0,
-                            if settings.reduced_motion { 0.0 } else { 26.0 },
-                            0.9,
-                        ),
-                    })),
+                    BackgroundColor(yellow()),
+                    BorderColor::all(ink()),
                 ));
                 if !short {
                     title.spawn((
@@ -1069,7 +1076,6 @@ fn build_menu(
                                     card_width,
                                     card_height,
                                     layout,
-                                    card_materials,
                                 );
                             }
                         });
@@ -1211,16 +1217,14 @@ fn build_menu(
                                 } else {
                                     color.with_alpha(0.45)
                                 }),
-                                MaterialNode(glow_materials.add(GlowButtonMaterial {
-                                    color_fill: to_vec4(color),
-                                    color_glow: to_vec4(color),
-                                    params: Vec4::new(
-                                        0.0,
-                                        if enabled { 0.45 } else { 0.0 },
-                                        0.25,
-                                        0.0,
-                                    ),
-                                    params2: Vec4::new(reduced, 0.0, 0.0, 0.0),
+                                // Use Bevy's stable UI fill for interactive controls.
+                                // The old rounded-rect glow shader subtracted an 18px
+                                // inset from 31px-high mobile cells, yielding negative
+                                // geometry and bright WebGL streaks.
+                                BackgroundColor(color.with_alpha(if enabled {
+                                    0.88
+                                } else {
+                                    0.52
                                 })),
                             ));
                             // Even unavailable Ranked products remain selectable
@@ -1260,10 +1264,8 @@ fn build_menu(
                             "RANKED ADMITTED · EXACT v3 TUPLE + ORDERED CATEGORIES VERIFIED"
                                 .to_string()
                         } else {
-                            format!(
-                                "RANKED DISABLED · {} · CHOOSE A CASUAL CELL",
-                                ranked.message
-                            )
+                            "RANKED DISABLED · SERVICE UNAVAILABLE · CHOOSE A CASUAL CELL"
+                                .to_string()
                         }),
                         font(10.0),
                         TextColor(if ranked.ranked_available() {
@@ -1315,16 +1317,10 @@ fn build_menu(
                 } else {
                     dim().with_alpha(0.65)
                 }),
-                MaterialNode(glow_materials.add(GlowButtonMaterial {
-                    color_fill: to_vec4(drive_color),
-                    color_glow: to_vec4(drive_color),
-                    params: Vec4::new(
-                        0.0,
-                        if presentation.enabled() { 0.60 } else { 0.0 },
-                        0.25,
-                        0.0,
-                    ),
-                    params2: Vec4::new(reduced, 0.0, 0.0, 0.0),
+                BackgroundColor(drive_color.with_alpha(if presentation.enabled() {
+                    0.92
+                } else {
+                    0.55
                 })),
             ))
             .with_children(|button| {
@@ -1350,7 +1346,6 @@ fn spawn_condition_card(
     width: f32,
     height: f32,
     layout: MenuLayout,
-    materials: &mut Assets<MenuCardMaterial>,
 ) {
     let short = layout == MenuLayout::ShortLandscape;
     let medal = medal_for(kind, best);
@@ -1371,15 +1366,12 @@ fn spawn_condition_card(
                 align_items: AlignItems::Center,
                 justify_content: JustifyContent::SpaceBetween,
                 padding: UiRect::all(px(if short { 8.0 } else { 13.0 })),
+                border: UiRect::all(px(2.0)),
                 border_radius: BorderRadius::all(px(14.0)),
                 ..default()
             },
-            MaterialNode(materials.add(MenuCardMaterial {
-                color_top: to_vec4(Color::srgb(0.13, 0.13, 0.17)),
-                color_bottom: to_vec4(Color::srgb(0.07, 0.07, 0.10)),
-                color_accent: to_vec4(kind.color()),
-                params: Vec4::ZERO,
-            })),
+            BackgroundColor(panel()),
+            BorderColor::all(kind.color().with_alpha(0.42)),
         ))
         .with_children(|card| {
             card.spawn((
@@ -1470,11 +1462,10 @@ fn animate_menu_geometry(
     built_at: Res<MenuBuiltAt>,
     mut tips: ResMut<TipState>,
     mut rows: Query<(&mut CarouselRow, &mut Node), Without<ConditionCard>>,
-    mut cards: Query<(&ConditionCard, &mut Node, &MaterialNode<MenuCardMaterial>)>,
+    mut cards: Query<(&ConditionCard, &mut Node, &mut BorderColor)>,
     mut dots: Query<(&CarouselDot, &mut BackgroundColor), Without<ConditionCard>>,
     mut letters: Query<(&TitleLetter, &mut Node), (Without<ConditionCard>, Without<CarouselRow>)>,
     mut tip_text: Query<(&mut Text, &mut TextColor), With<TipText>>,
-    mut card_materials: ResMut<Assets<MenuCardMaterial>>,
 ) {
     let now = time.elapsed_secs();
     let dt = time.delta_secs();
@@ -1491,17 +1482,14 @@ fn animate_menu_geometry(
         row.0 += (target - row.0) * k;
         node.left = px(row.0);
     }
-    for (card, mut node, handle) in &mut cards {
+    for (card, mut node, mut border) in &mut cards {
         let active = card.0 == selected_index;
         node.top = px(if active { -10.0 } else { 0.0 });
-        if let Some(mut material) = card_materials.get_mut(handle) {
-            material.params = Vec4::new(
-                now,
-                f32::from(active),
-                1.0,
-                f32::from(settings.reduced_motion),
-            );
-        }
+        border.set_all(if active {
+            yellow()
+        } else {
+            dim().with_alpha(0.55)
+        });
     }
     for (dot, mut background) in &mut dots {
         background.0 = if dot.0 == selected_index {
@@ -1544,44 +1532,28 @@ fn animate_menu_geometry(
     }
 }
 
-fn animate_menu_materials(
+fn animate_menu_interactions(
     time: Res<Time>,
     settings: Res<Settings>,
     selected: Res<SelectedModifier>,
     focus: Res<ProductFocus>,
     ranked: Res<RankedV3Client>,
-    stripes: Query<&MaterialNode<HazardStripeMaterial>>,
-    vignettes: Query<&MaterialNode<VignetteMaterial>>,
     mut glows: Query<(
-        &MaterialNode<GlowButtonMaterial>,
+        &mut BackgroundColor,
+        &mut BorderColor,
         &Interaction,
         &MenuAction,
         &mut GlowAnimation,
     )>,
     mut drive_labels: Query<(&mut Text, &mut TextColor), With<DriveLabel>>,
-    mut stripe_materials: ResMut<Assets<HazardStripeMaterial>>,
-    mut vignette_materials: ResMut<Assets<VignetteMaterial>>,
-    mut glow_materials: ResMut<Assets<GlowButtonMaterial>>,
 ) {
-    let now = time.elapsed_secs();
+    let _now = time.elapsed_secs();
     let dt = time.delta_secs();
     let k = if settings.reduced_motion {
         1.0
     } else {
         1.0 - (-10.0 * dt).exp()
     };
-    for handle in &stripes {
-        if let Some(mut material) = stripe_materials.get_mut(handle) {
-            material.params.x = now;
-            material.params.z = if settings.reduced_motion { 0.0 } else { 26.0 };
-        }
-    }
-    for handle in &vignettes {
-        if let Some(mut material) = vignette_materials.get_mut(handle) {
-            material.params.x = now;
-            material.params.w = f32::from(settings.reduced_motion);
-        }
-    }
     let presentation = drive_presentation(*focus, &ranked);
     for (mut label, mut color) in &mut drive_labels {
         label.0 = presentation.label().into();
@@ -1591,7 +1563,7 @@ fn animate_menu_materials(
             text()
         };
     }
-    for (handle, interaction, action, mut animation) in &mut glows {
+    for (mut background, mut border, interaction, action, mut animation) in &mut glows {
         let enabled = match action {
             MenuAction::Drive => presentation.enabled(),
             MenuAction::Product(Competition::Ranked, _) => ranked.ranked_available(),
@@ -1607,14 +1579,29 @@ fn animate_menu_materials(
             }
         };
         animation.0 += (target - animation.0) * k;
-        if let Some(mut material) = glow_materials.get_mut(handle) {
-            let color = if enabled { selected.0.color() } else { dim() };
-            material.color_fill = to_vec4(color);
-            material.color_glow = to_vec4(color);
-            material.params.x = now;
-            material.params.w = animation.0;
-            material.params2.x = f32::from(settings.reduced_motion);
-        }
+        let color = if enabled { selected.0.color() } else { dim() };
+        let alpha = if enabled {
+            0.82 + animation.0 * 0.14
+        } else {
+            0.52
+        };
+        background.0 = color.with_alpha(alpha);
+        let focused_product = match action {
+            MenuAction::Product(competition, conduct) => {
+                focus.product() == (*competition, *conduct)
+            }
+            _ => false,
+        };
+        border.set_all(
+            if animation.0 > 0.05
+                || focused_product
+                || (*action == MenuAction::Drive && presentation.enabled())
+            {
+                yellow()
+            } else {
+                color.with_alpha(if enabled { 0.62 } else { 0.40 })
+            },
+        );
     }
 }
 
@@ -1726,8 +1713,80 @@ mod tests {
     }
 
     #[test]
+    fn stable_product_gate_does_not_mark_focus_changed() {
+        let mut app = App::new();
+        app.init_resource::<RankedV3Client>()
+            .init_resource::<ProductFocus>()
+            .add_systems(Update, sync_product_default);
+        app.world_mut().clear_trackers();
+        app.update();
+        assert!(
+            !app.world()
+                .get_resource_ref::<ProductFocus>()
+                .expect("focus resource")
+                .is_changed()
+        );
+    }
+
+    #[test]
+    fn unchanged_ranked_client_does_not_request_menu_rebuild() {
+        let focus = ProductFocus::default();
+        let ranked = RankedV3Client::default();
+        let first = menu_build_key(
+            MenuLayout::Wide,
+            1280.0,
+            800.0,
+            ModifierKind::Standard,
+            focus,
+            &ranked,
+            false,
+        );
+        let mut same_visible_state = RankedV3Client::default();
+        same_visible_state.message = ranked.message.clone();
+        let second = menu_build_key(
+            MenuLayout::Wide,
+            1280.0,
+            800.0,
+            ModifierKind::Standard,
+            focus,
+            &same_visible_state,
+            false,
+        );
+        assert_eq!(first, second);
+        assert!(!menu_rebuild_required(false, &first, &second, false));
+    }
+
+    #[test]
+    fn one_visible_menu_change_requests_exactly_one_rebuild() {
+        let ranked = RankedV3Client::default();
+        let focus = ProductFocus::default();
+        let standard = menu_build_key(
+            MenuLayout::Wide,
+            1280.0,
+            800.0,
+            ModifierKind::Standard,
+            focus,
+            &ranked,
+            false,
+        );
+        let rush_hour = menu_build_key(
+            MenuLayout::Wide,
+            1280.0,
+            800.0,
+            ModifierKind::RushHour,
+            focus,
+            &ranked,
+            false,
+        );
+        assert!(menu_rebuild_required(false, &standard, &rush_hour, false));
+        assert!(!menu_rebuild_required(false, &rush_hour, &rush_hour, false));
+    }
+
+    #[test]
     fn short_landscape_drive_geometry_is_single_clear_stable_target() {
         let drive = drive_rect(MenuLayout::ShortLandscape, 844.0, 390.0);
+        let title = short_title_rect(844.0);
+        let carousel = short_carousel_rect(844.0);
         let products = short_product_grid_rect(844.0);
         let settings = MenuRect {
             left: 844.0 - 12.0 - 104.0,
@@ -1745,6 +1804,11 @@ mod tests {
                 height: 36.0,
             }
         );
+        assert!(!title.overlaps(carousel));
+        assert!(!title.overlaps(products));
+        assert!(!title.overlaps(drive));
+        assert!(!carousel.overlaps(products));
+        assert!(!carousel.overlaps(drive));
         assert!(products.bottom() <= 326.0);
         assert!(!drive.overlaps(products));
         assert!(!drive.overlaps(settings));

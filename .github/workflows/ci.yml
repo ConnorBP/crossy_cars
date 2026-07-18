@@ -148,6 +148,7 @@ jobs:
             desktop,
             touch,
             settings,
+            menu,
             request-failure,
             category-isolation,
             replay,
@@ -200,6 +201,8 @@ jobs:
               python tools/browser_touch_scenarios.py --url http://127.0.0.1:8080 --browser-channel chromium --out-dir tools/scenarios/touch ;;
             settings)
               python tools/browser_settings_scenarios.py --url http://127.0.0.1:8080 --browser-channel chromium --out-dir tools/scenarios/settings ;;
+            menu)
+              python tools/browser_menu_scenarios.py --url http://127.0.0.1:8080 --browser-channel chromium --out-dir tools/scenarios/menu ;;
           esac
       - name: Upload failure evidence
         if: failure()

@@ -995,7 +995,13 @@ fn drive_client(
             }
         }
     }
-    if let Some(conduct) = client.start_request.take() {
+    // Avoid DerefMut on the idle path: Bevy treats any mutable dereference as
+    // a change, and the menu debounces rebuilds from visible Ranked state.
+    if client.start_request.is_some() {
+        let conduct = client
+            .start_request
+            .take()
+            .expect("start request checked immediately before take");
         client.epoch = client.epoch.wrapping_add(1).max(1);
         browser::cancel();
         browser::start(client.epoch, conduct);
@@ -1070,6 +1076,23 @@ mod tests {
         format!(
             r#"{{"ranked":{{"enabled":{enabled},"categories":["rotation.v2.cluck_hunt","rotation.v2.right_of_way"]}},"protocolVersion":3,"protocolId":"roady-protocol.v3","rulesVersion":3,"rulesId":"roady-rules.v3","policyVersion":1,"policyId":"roady-ranked-policy.v3.1","mode":"rotation"}}"#
         )
+    }
+
+    #[test]
+    fn idle_drive_client_does_not_mark_ranked_state_changed() {
+        let mut app = App::new();
+        app.init_resource::<RankedV3Client>()
+            .init_resource::<InjectedRankedSession>()
+            .init_resource::<NextState<GameState>>()
+            .add_systems(Update, drive_client);
+        app.world_mut().clear_trackers();
+        app.update();
+        assert!(
+            !app.world()
+                .get_resource_ref::<RankedV3Client>()
+                .expect("ranked resource")
+                .is_changed()
+        );
     }
 
     #[test]
